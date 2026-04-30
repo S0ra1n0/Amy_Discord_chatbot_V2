@@ -9,11 +9,41 @@ import random
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from commands_help import HELP_COMMAND
+from datetime import datetime
 #----------------------------------
+
+#----Utility Functions------
+def safe_print(message):
+    """
+    Safe print function that handles Unicode encoding errors on Windows.
+    Writes directly to stdout buffer to bypass cp1252 encoding.
+    """
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        import sys
+        # Write directly to stdout buffer with UTF-8 encoding to bypass console codec
+        sys.stdout.buffer.write(message.encode('utf-8', errors='replace'))
+        sys.stdout.buffer.write(b'\n')
+        sys.stdout.buffer.flush()
+
+def validate_input(user_message):
+    """
+    Validate user input for truly unreadable content.
+    Returns (is_valid, error_message) tuple.
+    """
+    # Accept everything - handle encoding errors during processing instead
+    return True, None
+#--------------------------------------
 
 #----Setup Discord Bot and Ollama Model------
 load_dotenv()
 discord_token = os.getenv("DISCORD_TOKEN")
+
+# Validate that required credentials are present
+if not discord_token:
+    safe_print("[ERROR] DISCORD_TOKEN not found in .env file. Please add it and try again.")
+    exit(1)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -66,46 +96,58 @@ def get_message(server, channel):
 #----Chat and Command Functions------
 def chat(user_message, server_id, channel_id):
     """Send a message to the chatbot and get a response (blocking, runs in thread)"""
-    print(f"[DEBUG] Chat function called with message: {user_message[:30]}...")
-    
-    # Add user message to memory
-    store_message(server_id, channel_id, "user", user_message)
-    print("[DEBUG] User message stored in memory")
-    
-    # Get conversation history
-    history = get_message(server_id, channel_id)
-    print(f"[DEBUG] Conversation history retrieved: {len(history)} messages")
-    
-    # Prepare messages with system prompt at the beginning
-    messages = [{"role": "system", "content": system_prompt}] + history
-    print("[DEBUG] Messages prepared for Ollama")
-    
-    # Call Ollama with conversation history (this is a blocking call)
-    print("[DEBUG] Calling Ollama.chat()...")
     try:
-        response = ollama.chat(
-            model=model,
-            messages=messages
-        )
-        print("[DEBUG] Ollama response received")
+        safe_print(f"[DEBUG] Chat function called with message: {user_message[:30]}...")
+        
+        # Add user message to memory
+        store_message(server_id, channel_id, "user", user_message)
+        safe_print("[DEBUG] User message stored in memory")
+        
+        # Get conversation history
+        history = get_message(server_id, channel_id)
+        safe_print(f"[DEBUG] Conversation history retrieved: {len(history)} messages")
+        
+        # Get current timestamp for bot context
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_day = datetime.now().strftime("%A")
+        
+        # Prepare messages with system prompt and current time at the beginning
+        system_with_time = f"{system_prompt}\n\n[IMPORTANT] Current date and time: {current_time} ({current_day}). Use this information when answering questions about time."
+        messages = [{"role": "system", "content": system_with_time}] + history
+        safe_print("[DEBUG] Messages prepared for Ollama")
+        
+        # Call Ollama with conversation history (this is a blocking call)
+        safe_print("[DEBUG] Calling Ollama.chat()...")
+        try:
+            response = ollama.chat(
+                model=model,
+                messages=messages
+            )
+            safe_print("[DEBUG] Ollama response received")
+        except Exception as e:
+            safe_print(f"[ERROR] Ollama call failed: {e}")
+            raise
+        
+        # Extract response content
+        assistant_response = response['message']['content'].strip()
+        safe_print(f"[DEBUG] Response extracted: {assistant_response[:30]}...")
+        
+        # Handle empty responses
+        if not assistant_response:
+            safe_print("[DEBUG] Warning: Ollama returned empty response, using fallback")
+            assistant_response = "I apologize, but I'm having difficulty formulating a response at the moment. Could you please rephrase your question?"
+        
+        # Add assistant response to memory
+        store_message(server_id, channel_id, "assistant", assistant_response)
+        safe_print("[DEBUG] Assistant response stored in memory")
+        
+        return assistant_response
+    except UnicodeDecodeError as e:
+        safe_print(f"[ERROR] Encoding error in chat: {e}")
+        return "I cannot process your message since it has unreadable character(s), please try again with readable text."
     except Exception as e:
-        print(f"[ERROR] Ollama call failed: {e}")
+        safe_print(f"[ERROR] Unexpected error in chat: {e}")
         raise
-    
-    # Extract response content
-    assistant_response = response['message']['content'].strip()
-    print(f"[DEBUG] Response extracted: {assistant_response[:30]}...")
-    
-    # Handle empty responses
-    if not assistant_response:
-        print("[DEBUG] Warning: Ollama returned empty response, using fallback")
-        assistant_response = "I apologize, but I'm having difficulty formulating a response at the moment. Could you please rephrase your question?"
-    
-    # Add assistant response to memory
-    store_message(server_id, channel_id, "assistant", assistant_response)
-    print("[DEBUG] Assistant response stored in memory")
-    
-    return assistant_response
 
 async def chat_async(user_message, server_id, channel_id):
     """Async wrapper for chat function to avoid blocking the bot"""
@@ -184,7 +226,16 @@ def execute_command(command_text):
 # When the bot is ready, print a message to the console
 @bot.event
 async def on_ready():
-    print(f'{bot.user} is online!')
+    safe_print(f'{bot.user} is online!')
+
+# Connection status tracking
+@bot.event
+async def on_connect():
+    safe_print("[INFO] Bot connected to Discord")
+
+@bot.event
+async def on_disconnect():
+    safe_print("[WARNING] Bot disconnected from Discord, attempting to reconnect...")
 
 # When a message is received, process it and respond using the Ollama model or execute commands
 last_processed_id = None
@@ -198,40 +249,50 @@ async def on_message(msg):
         return
     last_processed_id = msg.id
     
-    print(f"[DEBUG] Message received from {msg.author}: {msg.content}")
+    safe_print(f"[DEBUG] Message received from {msg.author}: {msg.content}")
     
     if msg.author == bot.user:
-        print("[DEBUG] Ignoring bot's own message")
+        safe_print("[DEBUG] Ignoring bot's own message")
         return
     
     try:
         # Get server ID (guild ID) and channel ID
         server_id = msg.guild.id if msg.guild else "DM"
         channel_id = msg.channel.id
-        print(f"[DEBUG] Server ID: {server_id}, Channel ID: {channel_id}")
+        safe_print(f"[DEBUG] Server ID: {server_id}, Channel ID: {channel_id}")
         
         # Check if message is a command (starts with /)
         if msg.content.startswith("/"):
-            print("[DEBUG] Processing as command")
+            safe_print("[DEBUG] Processing as command")
             response = execute_command(msg.content[1:])
         else:
             # Regular chat with memory (run asynchronously to avoid blocking)
-            print("[DEBUG] Processing as chat, calling chat_async...")
+            safe_print("[DEBUG] Processing as chat, calling chat_async...")
             response = await chat_async(msg.content, server_id, channel_id)
-            print(f"[DEBUG] Chat response received: {response[:50]}...")
+            safe_print(f"[DEBUG] Chat response received: {response[:50]}...")
         
-        print(f"[DEBUG] Sending reply...")
+        safe_print(f"[DEBUG] Sending reply...")
         await msg.reply(response)
-        print("[DEBUG] Reply sent successfully")
+        safe_print("[DEBUG] Reply sent successfully")
     except Exception as e:
         import traceback
-        print(f"[ERROR] Error processing message: {e}")
-        print(traceback.format_exc())
+        safe_print(f"[ERROR] Error processing message: {e}")
+        safe_print(traceback.format_exc())
         try:
             await msg.reply(f"Sorry, I encountered an error: {str(e)[:100]}")
         except:
-            print("[ERROR] Failed to send error message to Discord")
+            safe_print("[ERROR] Failed to send error message to Discord")
 #--------------------------------------
 
 # Run the bot with the Discord token
-bot.run(discord_token)
+if __name__ == "__main__":
+    try:
+        safe_print("[INFO] Starting Amy Chatbot...")
+        bot.run(discord_token)
+    except KeyboardInterrupt:
+        safe_print("[INFO] Bot interrupted by user (Ctrl+C)")
+    except Exception as e:
+        safe_print(f"[ERROR] Fatal error: {e}")
+        import traceback
+        safe_print(traceback.format_exc())
+        exit(1)
