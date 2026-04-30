@@ -138,20 +138,28 @@ def execute_command(command_text):
         return f"🎲 Rolled 2d6: **{roll1}** + **{roll2}** = **{total}**"
     
     # Dice roll command with custom sides
-    if command == "dice" or command == "roll":
+    if command == "dice":
         try:
+            amount = 1  # Default to rolling 1 dice
             sides = 6  # Default 6-sided dice
             if len(parts) > 1:
                 sides = int(parts[1])
+                if sides < 1:
+                    return "Invalid dice command. Sides must be at least 1."
             
-            if sides < 1:
-                return "Dice must have at least 1 side."
+            if len(parts) > 2:
+                amount = int(parts[2])
+                if amount < 1:
+                    return "Invalid dice command. Amount must be at least 1."
             
-            roll = random.randint(1, sides)
-            return f"🎲 Rolled a {sides}-sided dice: **{roll}**"
+            sum = 0
+            for _ in range(0, amount):
+                roll = random.randint(1, sides)
+                sum += roll
+            return f"🎲 Rolled {amount} {sides}-sided dice(s): **{sum}**"
         except ValueError:
-            return "Invalid dice command. Usage: `/dice [sides]` (default: 6)\nExample: `/dice 20`"
-    
+            return "Invalid dice command. Usage: /dice [sides] or /dice [sides] [amount]\nExample: /dice 20 or /dice 6 3"
+
     # Random number generator command
     if command == "rng":
         try:

@@ -22,14 +22,14 @@ Simply message Amy naturally - she maintains conversation context and responds t
 
 ### Available Commands
 
-| Command            | Description                                                       |
-| ------------------ | ----------------------------------------------------------------- |
-| `/help`            | Display all available commands                                    |
-| `/dice1`           | Roll a single 6-sided dice                                        |
-| `/dice2`           | Roll two 6-sided dice (shows individual rolls + total)            |
-| `/dice [sides]`    | Roll a custom dice (e.g., `/dice 20` for a 20-sided dice)         |
-| `/roll [sides]`    | Alias for the dice command                                        |
-| `/rng [min] [max]` | Generate a random number between min and max (e.g., `/rng 0 999`) |
+| Command                  | Description                                                               |
+| ------------------------ | ------------------------------------------------------------------------- |
+| `/help`                  | Display all available commands                                            |
+| `/dice1`                 | Roll a single 6-sided dice                                                |
+| `/dice2`                 | Roll two 6-sided dice (shows individual rolls + total)                    |
+| `/dice [sides]`          | Roll a custom dice (e.g., `/dice 20` for a 20-sided dice)                 |
+| `/dice [sides] [amount]` | Roll custom amount of custom dice (e.g., `/dice 3 6` for 6 3-sided dices) |
+| `/rng [min] [max]`       | Generate a random number between min and max (e.g., `/rng 0 999`)         |
 
 ## How It Runs
 
