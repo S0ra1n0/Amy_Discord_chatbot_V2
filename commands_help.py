@@ -3,7 +3,8 @@
 
 HELP_COMMAND = """**Available Commands:**
 `/help` - Display command list and usage
-`/dice1` - Roll a single 6-sided dice
+`/toggle` - Enable/disable bot responses
+`/dice1` - Roll a single 6-sided adice
 `/dice2` - Roll two 6-sided dice
 `/dice [sides]` - Roll a custom dice
   • Usage: `/dice 20`

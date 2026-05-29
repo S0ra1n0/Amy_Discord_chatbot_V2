@@ -25,6 +25,7 @@ Simply message Amy naturally - she maintains conversation context and responds t
 | Command                  | Description                                                               |
 | ------------------------ | ------------------------------------------------------------------------- |
 | `/help`                  | Display all available commands                                            |
+| `/toggle`                | Enable/disable bot responses to chat (commands still work)                |
 | `/dice1`                 | Roll a single 6-sided dice                                                |
 | `/dice2`                 | Roll two 6-sided dice (shows individual rolls + total)                    |
 | `/dice [sides]`          | Roll a custom dice (e.g., `/dice 20` for a 20-sided dice)                 |
@@ -36,9 +37,10 @@ Simply message Amy naturally - she maintains conversation context and responds t
 1. The bot connects to your Discord server using your bot token
 2. When a message is received:
    - If it starts with `/`, it's treated as a command and executed
-   - Otherwise, it's passed to Amy who responds using the Ollama model
+   - Otherwise, it's passed to Amy who responds using the Ollama model (if the bot is enabled)
 3. All conversations are stored in memory (last 10 messages per channel) for context
 4. Responses are sent back to Discord as replies
+5. Use `/toggle` to enable/disable bot chat responses without shutting down the bot
 
 ## Setup & Installation
 

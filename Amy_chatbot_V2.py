@@ -10,10 +10,11 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from commands_help import HELP_COMMAND
 from datetime import datetime
+from typing import Dict, List, Tuple, Union
 #----------------------------------
 
 #----Utility Functions------
-def safe_print(message):
+def safe_print(message: str) -> None:
     """
     Safe print function that handles Unicode encoding errors on Windows.
     Writes directly to stdout buffer to bypass cp1252 encoding.
@@ -27,13 +28,24 @@ def safe_print(message):
         sys.stdout.buffer.write(b'\n')
         sys.stdout.buffer.flush()
 
-def validate_input(user_message):
+def validate_input(user_message: str) -> Tuple[bool, Union[str, None]]:
     """
     Validate user input for truly unreadable content.
     Returns (is_valid, error_message) tuple.
     """
     # Accept everything - handle encoding errors during processing instead
     return True, None
+
+def is_ollama_available() -> bool:
+    """
+    Check if Ollama is available and responding.
+    Returns True if Ollama is running, False otherwise.
+    """
+    try:
+        ollama.list()
+        return True
+    except Exception:
+        return False
 #--------------------------------------
 
 #----Setup Discord Bot and Ollama Model------
@@ -70,11 +82,16 @@ Remember: You are here to make your master's life easier, more organized, and mo
 ''' 
 #----------------------------------------------
 
-#----Conversation Memory System------
-conversation_memory = {}
-MAX_MEMORY_MESSAGES = 10  # Store last 10 messages (approximately 5 exchanges)
+#----Bot State------
+bot_enabled: bool = True  # Global state for enabling/disabling the bot
+#----------------------------------------------
 
-def store_message(server, channel, role, content):
+#----Conversation Memory System------
+conversation_memory: Dict[Union[int, str], Dict[int, List[Dict[str, str]]]] = {}
+MAX_MEMORY_MESSAGES: int = 10  # Store last 10 messages (approximately 5 exchanges)
+
+def store_message(server: Union[int, str], channel: int, role: str, content: str) -> None:
+    """Store a message in conversation memory."""
     if server not in conversation_memory:
         conversation_memory[server] = {}
     if channel not in conversation_memory[server]:
@@ -87,15 +104,16 @@ def store_message(server, channel, role, content):
     if len(conversation_memory[server][channel]) > MAX_MEMORY_MESSAGES:
         conversation_memory[server][channel] = conversation_memory[server][channel][-MAX_MEMORY_MESSAGES:]
 
-def get_message(server, channel):
+def get_message(server: Union[int, str], channel: int) -> List[Dict[str, str]]:
+    """Retrieve conversation history for a specific channel."""
     if server in conversation_memory and channel in conversation_memory[server]:
         return conversation_memory[server][channel]
     return []  # Return empty list if channel doesn't exist yet
 #--------------------------------------
 
 #----Chat and Command Functions------
-def chat(user_message, server_id, channel_id):
-    """Send a message to the chatbot and get a response (blocking, runs in thread)"""
+def chat(user_message: str, server_id: Union[int, str], channel_id: int) -> str:
+    """Send a message to the chatbot and get a response (blocking, runs in thread)."""
     try:
         safe_print(f"[DEBUG] Chat function called with message: {user_message[:30]}...")
         
@@ -124,6 +142,12 @@ def chat(user_message, server_id, channel_id):
                 messages=messages
             )
             safe_print("[DEBUG] Ollama response received")
+        except (ConnectionError, TimeoutError) as e:
+            safe_print(f"[WARNING] Ollama is unavailable: {e}")
+            # Graceful degradation: Return friendly message when Ollama is unavailable
+            assistant_response = "I apologize, but I'm currently having trouble connecting to my knowledge system. Please try again in a moment."
+            store_message(server_id, channel_id, "assistant", assistant_response)
+            return assistant_response
         except Exception as e:
             safe_print(f"[ERROR] Ollama call failed: {e}")
             raise
@@ -149,13 +173,13 @@ def chat(user_message, server_id, channel_id):
         safe_print(f"[ERROR] Unexpected error in chat: {e}")
         raise
 
-async def chat_async(user_message, server_id, channel_id):
-    """Async wrapper for chat function to avoid blocking the bot"""
+async def chat_async(user_message: str, server_id: Union[int, str], channel_id: int) -> str:
+    """Async wrapper for chat function to avoid blocking the bot."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, chat, user_message, server_id, channel_id)
 
-def execute_command(command_text):
-    """Execute a command based on the command text"""
+def execute_command(command_text: str) -> str:
+    """Execute a command based on the command text."""
     parts = command_text.strip().split()
     
     if not parts:
@@ -166,6 +190,14 @@ def execute_command(command_text):
     # Help command
     if command == "help":
         return HELP_COMMAND # This is imported from commands_help.py
+    
+    # Toggle bot state command
+    if command == "toggle":
+        global bot_enabled
+        bot_enabled = not bot_enabled
+        state = "enabled" if bot_enabled else "disabled"
+        safe_print(f"[INFO] Bot is now {state}")
+        return f"🤖 Bot is now **{state}**"
     
     # Dice1 command - single 6-sided dice
     if command == "dice1":
@@ -225,23 +257,35 @@ def execute_command(command_text):
 #----Event Handlers for Discord Bot------
 # When the bot is ready, print a message to the console
 @bot.event
-async def on_ready():
+async def on_ready() -> None:
+    """Called when the bot successfully connects to Discord."""
     safe_print(f'{bot.user} is online!')
+    
+    # Set bot status/presence
+    activity = discord.Activity(
+        type=discord.ActivityType.watching,
+        name="conversations"
+    )
+    await bot.change_presence(activity=activity, status=discord.Status.online)
+    safe_print("[INFO] Bot status set to: Watching conversations")
 
 # Connection status tracking
 @bot.event
-async def on_connect():
+async def on_connect() -> None:
+    """Called when the bot connects to Discord."""
     safe_print("[INFO] Bot connected to Discord")
 
 @bot.event
-async def on_disconnect():
+async def on_disconnect() -> None:
+    """Called when the bot disconnects from Discord."""
     safe_print("[WARNING] Bot disconnected from Discord, attempting to reconnect...")
 
 # When a message is received, process it and respond using the Ollama model or execute commands
-last_processed_id = None
+last_processed_id: Union[int, None] = None
 
 @bot.event
-async def on_message(msg):
+async def on_message(msg: discord.Message) -> None:
+    """Process messages from users - execute commands or send to chat."""
     global last_processed_id
     
     # Prevent processing the exact same message twice in rapid succession
@@ -266,6 +310,11 @@ async def on_message(msg):
             safe_print("[DEBUG] Processing as command")
             response = execute_command(msg.content[1:])
         else:
+            # Check if bot is enabled before processing chat
+            if not bot_enabled:
+                safe_print("[DEBUG] Bot is disabled, ignoring chat message")
+                return
+            
             # Regular chat with memory (run asynchronously to avoid blocking)
             safe_print("[DEBUG] Processing as chat, calling chat_async...")
             response = await chat_async(msg.content, server_id, channel_id)
@@ -274,6 +323,12 @@ async def on_message(msg):
         safe_print(f"[DEBUG] Sending reply...")
         await msg.reply(response)
         safe_print("[DEBUG] Reply sent successfully")
+    except ConnectionError:
+        safe_print("[ERROR] Connection error - Ollama may be unavailable")
+        try:
+            await msg.reply("I'm currently unable to connect to my knowledge system. Please try again later.")
+        except Exception as e:
+            safe_print(f"[ERROR] Failed to send error message: {e}")
     except Exception as e:
         import traceback
         safe_print(f"[ERROR] Error processing message: {e}")
