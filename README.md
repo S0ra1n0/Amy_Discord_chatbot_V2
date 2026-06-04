@@ -1,17 +1,16 @@
 # Amy Chatbot V2
 
-A sophisticated Discord bot powered by local language models using Ollama. Amy acts as a personal assistant with the demeanor of a professional secretary/maid, ready to chat, answer questions, and execute commands.
+A sophisticated Discord bot powered by local language models using Ollama. Amy acts as a personal assistant with the demeanor of a professional secretary, ready to chat, answer questions, and execute commands.
 
 ## Introduction
 
-Amy is an intelligent personal assistant bot that runs on your Discord server. She provides thoughtful responses with context awareness, remembering recent conversations to provide more relevant answers. Beyond conversation, Amy can execute various commands to perform specific tasks like rolling dice.
+Amy is an intelligent personal assistant bot that runs on your Discord server. She provides thoughtful responses with context awareness, remembering recent conversations to provide more relevant answers. Beyond conversation, Amy can execute various commands to perform specific tasks (full command list in 'Available Commands' section).
 
 **Key Features:**
 
-- Conversational AI powered by Ollama (Qwen 3.5 9B model)
-- Conversation memory (remembers last 10 messages per channel)
+- Conversational AI powered by Ollama
+- Conversation memory (remembers last 10 messages per channel, could be customized)
 - Dual command system supporting `/` prefix
-- Professional and polite personality
 - Easy-to-extend command architecture
 
 ## Functions & Commands
@@ -101,6 +100,7 @@ The bot should now be online and ready to respond in your Discord server!
 ```
 Amy_chatbot_V2/
 ├── Amy_chatbot_V2.py       # Main bot file
+├── commands_help.py        # Command list file
 ├── requirements.txt        # Python dependencies
 ├── .env                    # Environment variables (Git ignored)
 ├── .env.example            # Template for environment variables
@@ -113,7 +113,7 @@ Amy_chatbot_V2/
 **Bot doesn't respond:**
 
 - Ensure Ollama is running (`ollama serve`)
-- Check that the model `qwen3:1.7b` is installed
+- Check that the model you want to use is installed
 - Verify Discord token is correct in `.env`
 
 **"Dice must have at least 1 side" error:**

@@ -62,7 +62,7 @@ intents.message_content = True
 bot = discord.Client(intents=intents)
 
 model = "qwen3:1.7b" # Ollama model name (replace with your model name)
-system_prompt = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary/maid.
+system_prompt = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary.
 
 Personality Traits:
 - Poised and professional, yet warm and approachable
