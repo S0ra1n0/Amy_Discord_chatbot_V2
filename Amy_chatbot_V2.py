@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 import ollama
 import discord
 
-from commands_help import HELP_COMMAND
+from commands_help import HELP_EVERYONE, HELP_ADMIN
 from database import ConversationDB
 #----------------------------------
 
@@ -84,12 +84,18 @@ bot_enabled: bool = True
 
 #----Admin Helper------
 def is_admin(msg: discord.Message) -> bool:
-    """Returns True if the message author is the server owner or has the admin role."""
+    """Returns True if the author is the server owner, has Administrator permission, or has the admin role."""
     if msg.guild is None:
         return False
     if msg.guild.owner_id == msg.author.id:
         return True
-    return any(role.name == ADMIN_ROLE_NAME for role in msg.author.roles)
+    # Resolve to Member to access roles/permissions (msg.author may be a bare User when not cached)
+    member = msg.guild.get_member(msg.author.id)
+    if member is None:
+        return False
+    if member.guild_permissions.administrator:
+        return True
+    return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
 #----------------------------------------------
 
 #----Rate Limiting------
@@ -181,7 +187,7 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
     command = parts[0].lower()
 
     if command == "help":
-        return HELP_COMMAND
+        return HELP_EVERYONE + (HELP_ADMIN if is_admin(msg) else "")
 
     if command == "toggle":
         if not is_admin(msg):

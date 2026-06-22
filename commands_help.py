@@ -1,9 +1,8 @@
 # commands_help.py
-"""Help command for the Amy chatbot"""
+"""Help command text for the Amy chatbot"""
 
-HELP_COMMAND = """**Available Commands:**
+HELP_EVERYONE = """**Commands — Everyone:**
 `/help` - Display command list and usage
-`/toggle` - Enable/disable bot responses
 `/dice1` - Roll a single 6-sided dice
 `/dice2` - Roll two 6-sided dice
 `/dice [sides]` - Roll a custom dice
@@ -11,6 +10,9 @@ HELP_COMMAND = """**Available Commands:**
 `/dice [sides] [amount]` - Roll multiple custom dice
   • Usage: `/dice 6 3` (rolls 3 six-sided dice)
 `/rng [min] [max]` - Generate a random number between min and max
-  • Usage: `/rng 0 999`
-`/clear` - Wipe conversation memory for this channel (Admin only)
-"""
+  • Usage: `/rng 0 999`"""
+
+HELP_ADMIN = """
+**Commands — Admin only:**
+`/toggle` - Enable/disable bot responses
+`/clear` - Wipe conversation memory for this channel"""

@@ -38,9 +38,12 @@ Simply message Amy naturally — she maintains conversation context and responds
 
 ### Admin Access
 
-A user is considered an admin if they are either:
-- The **server owner**, or
-- A member with the Discord role named **`Admin`** (configurable via `ADMIN_ROLE_NAME` in `.env`)
+A user is considered an admin if they meet **any** of the following:
+- They are the **server owner**, or
+- They have the Discord **Administrator** permission, or
+- They have the Discord role named **`Admin`** (configurable via `ADMIN_ROLE_NAME` in `.env`)
+
+> **Note:** `/help` shows admin commands only to users who qualify as admins. Regular users see only the commands available to them.
 
 ## How It Runs
 
