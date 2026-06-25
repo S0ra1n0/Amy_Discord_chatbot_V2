@@ -8,7 +8,6 @@ import asyncio
 import random
 import httpx
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, List, Tuple, Union
 
@@ -35,8 +34,18 @@ def safe_print(message: str) -> None:
         sys.stdout.buffer.flush()
 
 def strip_think_tags(text: str) -> str:
-    """Remove <think>...</think> reasoning blocks emitted by qwen3 models."""
+    """Remove complete <think>...</think> blocks emitted by qwen3 models."""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+def get_display_text(accumulated: str) -> str:
+    """
+    Return displayable text from a partial streaming accumulation.
+    Hides complete think blocks and also hides any incomplete (still-open) think block,
+    so the user sees nothing while qwen3 is reasoning and only sees the reply after </think>.
+    """
+    text = re.sub(r'<think>.*?</think>', '', accumulated, flags=re.DOTALL)
+    text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL)
+    return text.strip()
 #--------------------------------------
 
 #----Setup Discord Bot and Ollama Model------
@@ -116,6 +125,14 @@ def check_rate_limit(user_id: int) -> Tuple[bool, int]:
         return False, reset_in
     rate_limit_store[user_id].append(now)
     return True, 0
+
+def get_rate_limited_count() -> int:
+    """Return how many users are currently at or over the rate limit."""
+    now = time.time()
+    return sum(
+        1 for timestamps in rate_limit_store.values()
+        if len([t for t in timestamps if now - t < RATE_LIMIT_WINDOW]) >= RATE_LIMIT_MAX
+    )
 #----------------------------------------------
 
 #----Pending /clear Confirmations------
@@ -123,60 +140,91 @@ def check_rate_limit(user_id: int) -> Tuple[bool, int]:
 pending_clear: Dict[int, Tuple[int, int, Union[int, str]]] = {}
 #----------------------------------------------
 
-#----Chat and Command Functions------
-def chat(user_message: str, server_id: Union[int, str], channel_id: int) -> str:
-    """Send a message to the chatbot and get a response (blocking, runs in thread)."""
-    try:
-        safe_print(f"[DEBUG] Chat function called with message: {user_message[:30]}...")
+#----Streaming Chat------
+STREAM_EDIT_INTERVAL: float = 1.5  # Seconds between Discord message edits during streaming
 
-        db.store_message(server_id, channel_id, "user", user_message)
-        safe_print("[DEBUG] User message stored in memory")
-
-        history = db.get_messages(server_id, channel_id)
-        safe_print(f"[DEBUG] Conversation history retrieved: {len(history)} messages")
-
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        current_day = datetime.now().strftime("%A")
-        system_with_time = f"{system_prompt}\n\n[IMPORTANT] Current date and time: {current_time} ({current_day}). Use this information when answering questions about time."
-        messages = [{"role": "system", "content": system_with_time}] + history
-        safe_print("[DEBUG] Messages prepared for Ollama")
-
-        safe_print("[DEBUG] Calling Ollama.chat()...")
-        try:
-            response = ollama.chat(model=model, messages=messages)
-            safe_print("[DEBUG] Ollama response received")
-        except httpx.ConnectError as e:
-            safe_print(f"[WARNING] Ollama is unavailable: {e}")
-            db.pop_last_message(server_id, channel_id)
-            return "I apologize, but I'm currently having trouble connecting to my knowledge system. Please try again in a moment."
-        except Exception as e:
-            safe_print(f"[ERROR] Ollama call failed: {e}")
-            db.pop_last_message(server_id, channel_id)
-            raise
-
-        assistant_response = strip_think_tags(response['message']['content'])
-        safe_print(f"[DEBUG] Response extracted: {assistant_response[:30]}...")
-
-        if not assistant_response:
-            safe_print("[DEBUG] Warning: Ollama returned empty response, using fallback")
-            assistant_response = "I apologize, but I'm having difficulty formulating a response at the moment. Could you please rephrase your question?"
-
-        db.store_message(server_id, channel_id, "assistant", assistant_response)
-        safe_print("[DEBUG] Assistant response stored in memory")
-
-        return assistant_response
-    except UnicodeDecodeError as e:
-        safe_print(f"[ERROR] Encoding error in chat: {e}")
-        return "I cannot process your message since it has unreadable character(s), please try again with readable text."
-    except Exception as e:
-        safe_print(f"[ERROR] Unexpected error in chat: {e}")
-        raise
-
-async def chat_async(user_message: str, server_id: Union[int, str], channel_id: int) -> str:
-    """Async wrapper for chat function to avoid blocking the bot."""
+async def chat_streaming(
+    user_message: str,
+    server_id: Union[int, str],
+    channel_id: int,
+    discord_msg: discord.Message,
+) -> None:
+    """
+    Stream an Ollama response and progressively edit discord_msg as tokens arrive.
+    Handles <think> blocks by showing 'Thinking...' until actual content begins.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, chat, user_message, server_id, channel_id)
+    chunk_queue: asyncio.Queue = asyncio.Queue()
+    error_flag: Dict[str, bool] = {"occurred": False}
 
+    db.store_message(server_id, channel_id, "user", user_message)
+    history = db.get_messages(server_id, channel_id)
+
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_day = datetime.now().strftime("%A")
+    system_with_time = (
+        f"{system_prompt}\n\n[IMPORTANT] Current date and time: {current_time} ({current_day}). "
+        "Use this information when answering questions about time."
+    )
+    messages = [{"role": "system", "content": system_with_time}] + history
+
+    def stream_worker() -> None:
+        try:
+            stream = ollama.chat(model=model, messages=messages, stream=True)
+            for chunk in stream:
+                content = chunk['message']['content']
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, content)
+        except httpx.ConnectError as e:
+            safe_print(f"[WARNING] Ollama unavailable during stream: {e}")
+            error_flag["occurred"] = True
+        except Exception as e:
+            safe_print(f"[ERROR] Streaming error: {e}")
+            error_flag["occurred"] = True
+        finally:
+            loop.call_soon_threadsafe(chunk_queue.put_nowait, None)  # Sentinel: stream done
+
+    future = loop.run_in_executor(None, stream_worker)
+
+    accumulated = ""
+    last_edit = time.monotonic()
+
+    while True:
+        chunk = await chunk_queue.get()
+        if chunk is None:
+            break
+        accumulated += chunk
+
+        now = time.monotonic()
+        if now - last_edit >= STREAM_EDIT_INTERVAL:
+            display = get_display_text(accumulated)
+            content = (display + " ▌") if display else "⏳ Thinking..."
+            try:
+                await discord_msg.edit(content=content)
+                last_edit = now
+            except discord.HTTPException:
+                pass
+
+    await future  # Re-raise any thread exception
+
+    if error_flag["occurred"]:
+        db.pop_last_message(server_id, channel_id)
+        await discord_msg.edit(
+            content="I apologize, but I'm currently having trouble connecting to my knowledge system. Please try again in a moment."
+        )
+        return
+
+    final_response = strip_think_tags(accumulated)
+    if not final_response:
+        final_response = "I apologize, but I'm having difficulty formulating a response at the moment. Could you please rephrase your question?"
+
+    db.store_message(server_id, channel_id, "assistant", final_response)
+    try:
+        await discord_msg.edit(content=final_response)
+    except discord.HTTPException as e:
+        safe_print(f"[ERROR] Failed to edit final message: {e}")
+#----------------------------------------------
+
+#----Command Functions------
 async def execute_command(command_text: str, msg: discord.Message) -> str:
     """Execute a command based on the command text."""
     parts = command_text.strip().split()
@@ -198,17 +246,41 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
         safe_print(f"[INFO] Bot is now {state}")
         return f"🤖 Bot is now **{state}**"
 
+    if command == "status":
+        if not is_admin(msg):
+            return "🚫 You don't have permission to use this command. (Admin only)"
+
+        bot_state = "Enabled ✅" if bot_enabled else "Disabled ❌"
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, ollama.list)
+            ollama_state = "Connected ✅"
+        except Exception:
+            ollama_state = "Unavailable ❌"
+
+        stats = db.get_stats()
+        throttled = get_rate_limited_count()
+
+        return (
+            f"📊 **Amy Status**\n"
+            f"Bot: {bot_state}\n"
+            f"Ollama: {ollama_state} | Model: `{model}`\n"
+            f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
+            f"Rate limits: {throttled} user(s) currently throttled"
+        )
+
     if command == "clear":
         if not is_admin(msg):
             return "🚫 You don't have permission to use this command. (Admin only)"
         server_id = msg.guild.id if msg.guild else "DM"
         channel_id = msg.channel.id
-        confirm_msg = await msg.reply("⚠️ This will wipe all conversation memory for this channel. React with ✅ to confirm, or ❌ to cancel.")
+        confirm_msg = await msg.reply(
+            "⚠️ This will wipe all conversation memory for this channel. React with ✅ to confirm, or ❌ to cancel."
+        )
         await confirm_msg.add_reaction("✅")
         await confirm_msg.add_reaction("❌")
         pending_clear[confirm_msg.id] = (msg.author.id, channel_id, server_id)
 
-        # Auto-cancel after 60 seconds
         async def timeout_clear(confirm_id: int) -> None:
             await asyncio.sleep(60)
             if confirm_id in pending_clear:
@@ -310,34 +382,26 @@ async def on_message(msg: discord.Message) -> None:
             safe_print("[DEBUG] Command handled")
             return
 
-        # Check if bot is enabled before processing chat
         if not bot_enabled:
             safe_print("[DEBUG] Bot is disabled, ignoring chat message")
             return
 
-        # Rate limit check (admins are exempt)
         if not is_admin(msg):
             allowed, reset_in = check_rate_limit(msg.author.id)
             if not allowed:
                 minutes = reset_in // 60
                 seconds = reset_in % 60
-                await msg.reply(f"⏳ You've reached the limit of {RATE_LIMIT_MAX} messages per hour. Try again in {minutes}m {seconds}s.")
+                await msg.reply(
+                    f"⏳ You've reached the limit of {RATE_LIMIT_MAX} messages per hour. "
+                    f"Try again in {minutes}m {seconds}s."
+                )
                 return
 
-        safe_print("[DEBUG] Processing as chat, calling chat_async...")
-        response = await chat_async(msg.content, server_id, channel_id)
-        safe_print(f"[DEBUG] Chat response received: {response[:50]}...")
+        safe_print("[DEBUG] Processing as streaming chat...")
+        thinking_msg = await msg.reply("⏳ Thinking...")
+        await chat_streaming(msg.content, server_id, channel_id, thinking_msg)
+        safe_print("[DEBUG] Streaming response complete")
 
-        safe_print("[DEBUG] Sending reply...")
-        await msg.reply(response)
-        safe_print("[DEBUG] Reply sent successfully")
-
-    except ConnectionError:
-        safe_print("[ERROR] Connection error - Ollama may be unavailable")
-        try:
-            await msg.reply("I'm currently unable to connect to my knowledge system. Please try again later.")
-        except Exception as e:
-            safe_print(f"[ERROR] Failed to send error message: {e}")
     except Exception as e:
         import traceback
         safe_print(f"[ERROR] Error processing message: {e}")
@@ -359,7 +423,6 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User) -> Non
 
     requesting_user_id, channel_id, server_id = pending_clear[confirm_id]
 
-    # Only the user who issued /clear can confirm
     if user.id != requesting_user_id:
         return
 

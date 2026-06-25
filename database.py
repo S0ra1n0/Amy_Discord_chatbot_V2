@@ -66,3 +66,11 @@ class ConversationDB:
             (str(server), str(channel))
         )
         self.conn.commit()
+
+    def get_stats(self) -> Dict[str, int]:
+        """Return total messages stored and number of unique active channels."""
+        cursor = self.conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT server || '|' || channel) FROM messages"
+        )
+        row = cursor.fetchone()
+        return {"total_messages": row[0], "active_channels": row[1]}

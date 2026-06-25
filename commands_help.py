@@ -15,4 +15,5 @@ HELP_EVERYONE = """**Commands — Everyone:**
 HELP_ADMIN = """
 **Commands — Admin only:**
 `/toggle` - Enable/disable bot responses
-`/clear` - Wipe conversation memory for this channel"""
+`/clear` - Wipe conversation memory for this channel
+`/status` - Show bot state, Ollama connectivity, memory usage and rate limit info"""

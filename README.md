@@ -8,7 +8,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 
 **Key Features:**
 
-- Conversational AI powered by Ollama
+- Conversational AI powered by Ollama with **real-time streaming responses**
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
 - Admin access control — admin commands restricted to server owner or users with the `Admin` role
 - Rate limiting — non-admin users are capped at 5 chat messages per hour
@@ -19,7 +19,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 
 ### Chat
 
-Simply message Amy naturally — she maintains conversation context and responds thoughtfully.
+Simply message Amy naturally — she maintains conversation context and responds thoughtfully. Amy replies with a live streaming message that updates in real-time as she generates her response, so you see output immediately instead of waiting for the full reply.
 
 > **Note:** Non-admin users are limited to **5 messages per hour**. Admins (server owner or `Admin` role) have no limit.
 
@@ -29,6 +29,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | ------------------------ | ------------------------------------------------------------------------- | ---------- |
 | `/help`                  | Display all available commands                                            | Everyone   |
 | `/toggle`                | Enable/disable bot responses to chat (commands still work)                | Admin only |
+| `/status`                | Show bot state, Ollama connectivity, memory stats and rate limit info     | Admin only |
 | `/clear`                 | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
 | `/dice1`                 | Roll a single 6-sided dice                                                | Everyone   |
 | `/dice2`                 | Roll two 6-sided dice (shows individual rolls + total)                    | Everyone   |
@@ -53,9 +54,10 @@ A user is considered an admin if they meet **any** of the following:
    - Otherwise, it's passed to Amy who responds using the Ollama model (if the bot is enabled)
 3. All conversations are saved to a local SQLite database (`amy_memory.db`) — history persists across restarts
 4. Non-admin users are rate-limited to 5 chat messages per hour; excess messages receive a cooldown reply
-5. Responses are sent back to Discord as replies
+5. Chat responses stream token-by-token: Amy sends a "Thinking..." placeholder then edits it live as the model generates output
 6. Use `/toggle` (Admin only) to enable/disable bot chat responses without shutting down the bot
-7. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
+7. Use `/status` (Admin only) to check bot state, Ollama connectivity, memory stats, and how many users are currently throttled
+8. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
 
 ## Setup & Installation
 
@@ -137,6 +139,12 @@ Amy_chatbot_V2/
 - Verify your Discord token is correct in `.env`
 - Check if the bot was disabled with `/toggle`
 - Check if you have hit the rate limit (5 messages/hour for non-admins)
+- Use `/status` (Admin) to quickly diagnose connectivity and bot state
+
+**Amy replies with "Thinking..." but never updates:**
+
+- Ollama may have become unavailable mid-stream — Amy will edit the message with an error after the stream times out
+- Confirm Ollama is still running with `ollama serve`
 
 **Admin commands say "You don't have permission":**
 
