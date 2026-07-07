@@ -74,3 +74,12 @@ class ConversationDB:
         )
         row = cursor.fetchone()
         return {"total_messages": row[0], "active_channels": row[1]}
+
+    def prune_old_messages(self, days: int) -> int:
+        """Delete messages older than the given number of days. Returns rows deleted."""
+        cursor = self.conn.execute(
+            "DELETE FROM messages WHERE timestamp < datetime('now', ?)",
+            (f'-{days} days',)
+        )
+        self.conn.commit()
+        return cursor.rowcount

@@ -9,7 +9,10 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 **Key Features:**
 
 - Conversational AI powered by Ollama with **real-time streaming responses**
+- Runtime model switching — swap the active Ollama model without restarting the bot
+- Long responses/replies automatically split across multiple Discord messages instead of being truncated
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
+- Automatic daily pruning of old conversation history
 - Admin access control — admin commands restricted to server owner or users with the `Admin` role
 - Rate limiting — non-admin users are capped at 5 chat messages per hour
 - Dual command system supporting `/` prefix
@@ -30,6 +33,8 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/help`                  | Display all available commands                                            | Everyone   |
 | `/toggle`                | Enable/disable bot responses to chat (commands still work)                | Admin only |
 | `/status`                | Show bot state, Ollama connectivity, memory stats and rate limit info     | Admin only |
+| `/model`                 | Show the current Ollama model                                             | Admin only |
+| `/model [name]`          | Switch to a different installed Ollama model (e.g., `/model qwen2.5:3b`)  | Admin only |
 | `/clear`                 | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
 | `/dice1`                 | Roll a single 6-sided dice                                                | Everyone   |
 | `/dice2`                 | Roll two 6-sided dice (shows individual rolls + total)                    | Everyone   |
@@ -53,11 +58,14 @@ A user is considered an admin if they meet **any** of the following:
    - If it starts with `/`, it's treated as a command and executed
    - Otherwise, it's passed to Amy who responds using the Ollama model (if the bot is enabled)
 3. All conversations are saved to a local SQLite database (`amy_memory.db`) — history persists across restarts
-4. Non-admin users are rate-limited to 5 chat messages per hour; excess messages receive a cooldown reply
-5. Chat responses stream token-by-token: Amy sends a "Thinking..." placeholder then edits it live as the model generates output
-6. Use `/toggle` (Admin only) to enable/disable bot chat responses without shutting down the bot
-7. Use `/status` (Admin only) to check bot state, Ollama connectivity, memory stats, and how many users are currently throttled
-8. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
+4. A background task runs every 24 hours and deletes conversation history older than `DB_PRUNE_DAYS` (default 30 days)
+5. Non-admin users are rate-limited to 5 chat messages per hour; excess messages receive a cooldown reply
+6. Chat responses stream token-by-token: Amy sends a "Thinking..." placeholder then edits it live as the model generates output
+7. Any reply or streamed response longer than Discord's 2000-character limit is automatically split across multiple messages, breaking at a word/line boundary where possible
+8. Use `/toggle` (Admin only) to enable/disable bot chat responses without shutting down the bot
+9. Use `/status` (Admin only) to check bot state, Ollama connectivity, memory stats, and how many users are currently throttled
+10. Use `/model` (Admin only) to view or switch the active Ollama model at runtime — the new model is validated against Ollama's installed model list before switching
+11. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
 
 ## Setup & Installation
 
@@ -90,9 +98,11 @@ pip install -r requirements.txt
 ```
 DISCORD_TOKEN=your_actual_discord_bot_token_here
 ADMIN_ROLE_NAME=Admin
+DB_PRUNE_DAYS=30
 ```
 
-`ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
+- `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
+- `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
 
 ### Step 4: Start Ollama
 
@@ -102,11 +112,13 @@ Make sure Ollama is running and the model is available:
 ollama pull qwen3:1.7b  # Change if you use a different model
 ```
 
-Change the model name in `Amy_chatbot_V2.py` if you are not using `qwen3:1.7b`:
+Change the default model name in `Amy_chatbot_V2.py` if you are not using `qwen3:1.7b`:
 
 ```python
 model = "qwen3:1.7b"  # Ollama model name (replace with your model name)
 ```
+
+> This sets the model used at startup. Admins can switch to any other installed model at runtime with `/model [name]` without restarting the bot.
 
 ### Step 5: Run the Bot
 
@@ -146,6 +158,11 @@ Amy_chatbot_V2/
 - Ollama may have become unavailable mid-stream — Amy will edit the message with an error after the stream times out
 - Confirm Ollama is still running with `ollama serve`
 
+**`/model [name]` says "Model not found":**
+
+- The model must already be pulled locally. Run `ollama pull <model_name>` first, then try `/model <model_name>` again
+- Use `/model` with no arguments to see the current model, or `ollama list` in a terminal to see what's installed
+
 **Admin commands say "You don't have permission":**
 
 - Make sure you have the Discord role matching `ADMIN_ROLE_NAME` in `.env` (default: `Admin`), or that you are the server owner
@@ -168,6 +185,8 @@ Amy_chatbot_V2/
 - Amy maintains conversation memory per Discord channel, stored persistently in `amy_memory.db`
 - All responses are generated locally using Ollama — no data is sent to external servers
 - Adjust `MAX_MEMORY_MESSAGES` in `database.py` to change how many messages are remembered per channel
+- Adjust `DB_PRUNE_DAYS` in `.env` to change how long conversation history is retained before automatic pruning
+- Messages longer than Discord's 2000-character limit are split across multiple messages automatically — no configuration needed
 
 ---
 

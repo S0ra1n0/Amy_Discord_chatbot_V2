@@ -14,6 +14,7 @@ from typing import Dict, List, Tuple, Union
 from dotenv import load_dotenv
 import ollama
 import discord
+from discord.ext import tasks
 
 from commands_help import HELP_EVERYONE, HELP_ADMIN
 from database import ConversationDB
@@ -46,12 +47,63 @@ def get_display_text(accumulated: str) -> str:
     text = re.sub(r'<think>.*?</think>', '', accumulated, flags=re.DOTALL)
     text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL)
     return text.strip()
+
+MAX_DISCORD_LEN: int = 2000
+STREAM_CHUNK_LIMIT: int = 1990  # Leaves room for the streaming cursor suffix
+
+def find_split_index(text: str, limit: int) -> int:
+    """Find an index <= limit to split text at, preferring a newline or space boundary."""
+    if len(text) <= limit:
+        return len(text)
+    split_at = text.rfind('\n', 0, limit)
+    if split_at == -1:
+        split_at = text.rfind(' ', 0, limit)
+    if split_at <= 0:
+        return limit
+    return split_at + 1
+
+async def send_long_reply(msg: discord.Message, text: str) -> None:
+    """Reply to a message, splitting into multiple messages if text exceeds Discord's length limit."""
+    if not text:
+        return
+    remaining = text
+    first = True
+    while remaining:
+        idx = find_split_index(remaining, MAX_DISCORD_LEN)
+        chunk = remaining[:idx]
+        remaining = remaining[idx:]
+        if first:
+            await msg.reply(chunk)
+            first = False
+        else:
+            await msg.channel.send(chunk)
+
+def extract_model_names(list_response) -> List[str]:
+    """
+    Extract model names from ollama.list() output.
+    Handles both dict-based (ollama<0.4) and object-based (ollama>=0.4) response shapes.
+    """
+    if isinstance(list_response, dict):
+        models = list_response.get('models', [])
+    else:
+        models = getattr(list_response, 'models', [])
+
+    names: List[str] = []
+    for m in models:
+        if isinstance(m, dict):
+            name = m.get('name') or m.get('model')
+        else:
+            name = getattr(m, 'name', None) or getattr(m, 'model', None)
+        if name:
+            names.append(name)
+    return names
 #--------------------------------------
 
 #----Setup Discord Bot and Ollama Model------
 load_dotenv()
 discord_token = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE_NAME: str = os.getenv("ADMIN_ROLE_NAME", "Admin")
+DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
 
 if not discord_token:
     safe_print("[ERROR] DISCORD_TOKEN not found in .env file. Please add it and try again.")
@@ -135,6 +187,15 @@ def get_rate_limited_count() -> int:
     )
 #----------------------------------------------
 
+#----Auto-Prune Old Messages------
+@tasks.loop(hours=24)
+async def prune_old_messages_task() -> None:
+    loop = asyncio.get_running_loop()
+    deleted = await loop.run_in_executor(None, db.prune_old_messages, DB_PRUNE_DAYS)
+    if deleted:
+        safe_print(f"[INFO] Pruned {deleted} message(s) older than {DB_PRUNE_DAYS} days")
+#----------------------------------------------
+
 #----Pending /clear Confirmations------
 # Maps confirmation_message_id → (requesting_user_id, channel_id, server_id)
 pending_clear: Dict[int, Tuple[int, int, Union[int, str]]] = {}
@@ -185,8 +246,25 @@ async def chat_streaming(
 
     future = loop.run_in_executor(None, stream_worker)
 
+    active_msg = discord_msg
+    committed_len = 0  # Length of display text already finalized into prior messages
     accumulated = ""
     last_edit = time.monotonic()
+
+    async def flush_overflow(display: str) -> None:
+        """While pending text overflows the Discord limit, finalize the active message and start a new one."""
+        nonlocal active_msg, committed_len
+        pending = display[committed_len:]
+        while len(pending) > STREAM_CHUNK_LIMIT:
+            idx = find_split_index(pending, STREAM_CHUNK_LIMIT)
+            chunk = pending[:idx]
+            try:
+                await active_msg.edit(content=chunk)
+            except discord.HTTPException:
+                pass
+            committed_len += idx
+            active_msg = await active_msg.channel.send("⏳ Thinking...")
+            pending = display[committed_len:]
 
     while True:
         chunk = await chunk_queue.get()
@@ -197,9 +275,11 @@ async def chat_streaming(
         now = time.monotonic()
         if now - last_edit >= STREAM_EDIT_INTERVAL:
             display = get_display_text(accumulated)
-            content = (display + " ▌") if display else "⏳ Thinking..."
+            await flush_overflow(display)
+            pending = display[committed_len:]
+            content = (pending + " ▌") if pending else "⏳ Thinking..."
             try:
-                await discord_msg.edit(content=content)
+                await active_msg.edit(content=content)
                 last_edit = now
             except discord.HTTPException:
                 pass
@@ -208,9 +288,12 @@ async def chat_streaming(
 
     if error_flag["occurred"]:
         db.pop_last_message(server_id, channel_id)
-        await discord_msg.edit(
-            content="I apologize, but I'm currently having trouble connecting to my knowledge system. Please try again in a moment."
-        )
+        try:
+            await active_msg.edit(
+                content="I apologize, but I'm currently having trouble connecting to my knowledge system. Please try again in a moment."
+            )
+        except discord.HTTPException:
+            pass
         return
 
     final_response = strip_think_tags(accumulated)
@@ -218,8 +301,11 @@ async def chat_streaming(
         final_response = "I apologize, but I'm having difficulty formulating a response at the moment. Could you please rephrase your question?"
 
     db.store_message(server_id, channel_id, "assistant", final_response)
+
+    await flush_overflow(final_response)
+    pending = final_response[committed_len:]
     try:
-        await discord_msg.edit(content=final_response)
+        await active_msg.edit(content=pending if pending else "✅ Done.")
     except discord.HTTPException as e:
         safe_print(f"[ERROR] Failed to edit final message: {e}")
 #----------------------------------------------
@@ -227,6 +313,7 @@ async def chat_streaming(
 #----Command Functions------
 async def execute_command(command_text: str, msg: discord.Message) -> str:
     """Execute a command based on the command text."""
+    global bot_enabled, model
     parts = command_text.strip().split()
 
     if not parts:
@@ -240,7 +327,6 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
     if command == "toggle":
         if not is_admin(msg):
             return "🚫 You don't have permission to use this command. (Admin only)"
-        global bot_enabled
         bot_enabled = not bot_enabled
         state = "enabled" if bot_enabled else "disabled"
         safe_print(f"[INFO] Bot is now {state}")
@@ -268,6 +354,29 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
             f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
             f"Rate limits: {throttled} user(s) currently throttled"
         )
+
+    if command == "model":
+        if not is_admin(msg):
+            return "🚫 You don't have permission to use this command. (Admin only)"
+
+        if len(parts) < 2:
+            return f"🧠 Current model: `{model}`\nUsage: `/model <model_name>` to switch."
+
+        new_model = parts[1]
+        loop = asyncio.get_running_loop()
+        try:
+            available = await loop.run_in_executor(None, ollama.list)
+        except Exception as e:
+            return f"🚫 Could not reach Ollama to verify the model: {e}"
+
+        model_names = extract_model_names(available)
+        if new_model not in model_names:
+            names_list = ", ".join(f"`{n}`" for n in model_names) or "none installed"
+            return f"🚫 Model `{new_model}` not found. Installed models: {names_list}"
+
+        model = new_model
+        safe_print(f"[INFO] Model switched to {model}")
+        return f"🧠 Model switched to `{model}`"
 
     if command == "clear":
         if not is_admin(msg):
@@ -344,6 +453,10 @@ async def on_ready() -> None:
     await bot.change_presence(activity=activity, status=discord.Status.online)
     safe_print("[INFO] Bot status set to: Watching conversations")
 
+    if not prune_old_messages_task.is_running():
+        prune_old_messages_task.start()
+        safe_print(f"[INFO] Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
+
 @bot.event
 async def on_connect() -> None:
     safe_print("[INFO] Bot connected to Discord")
@@ -378,7 +491,7 @@ async def on_message(msg: discord.Message) -> None:
             safe_print("[DEBUG] Processing as command")
             response = await execute_command(msg.content[1:], msg)
             if response:
-                await msg.reply(response)
+                await send_long_reply(msg, response)
             safe_print("[DEBUG] Command handled")
             return
 
