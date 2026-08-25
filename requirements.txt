@@ -1,4 +1,8 @@
-python-dotenv==1.0.0
-ollama==0.3.0
-discord.py==2.4.0
-httpx>=0.24.0
+python-dotenv==1.2.2
+ollama==0.6.1
+httpx==0.28.1
+
+# The [voice] extra is required - it pulls PyNaCl (pinned <1.6 by discord.py) and
+# davey, both of which discord.py 2.7 needs before it will open a voice connection.
+# Installing plain "discord.py" leaves voice broken at runtime.
+discord.py[voice]==2.7.1

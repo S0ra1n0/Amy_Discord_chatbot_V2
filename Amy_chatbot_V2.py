@@ -18,6 +18,8 @@ from discord.ext import tasks
 
 from commands_help import HELP_EVERYONE, HELP_ADMIN
 from database import ConversationDB
+import voice
+from voice import VoiceManager
 #----------------------------------
 
 #----Utility Functions------
@@ -112,9 +114,13 @@ if not discord_token:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+# Privileged: must also be enabled in the Discord Developer Portal.
+# Needed so VoiceChannel.members resolves reliably (it looks up guild.get_member),
+# which is what empty-channel auto-disconnect depends on.
+intents.members = True
 bot = discord.Client(intents=intents)
 
-model = "qwen3:1.7b"
+model = "qwen3.5:2b"
 system_prompt = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary.
 
 Personality Traits:
@@ -137,6 +143,10 @@ Remember: You are here to make your master's life easier, more organized, and mo
 
 #----Database------
 db = ConversationDB()
+#----------------------------------------------
+
+#----Voice------
+voice_manager = VoiceManager(db)
 #----------------------------------------------
 
 #----Bot State------
@@ -164,19 +174,33 @@ rate_limit_store: Dict[int, List[float]] = defaultdict(list)
 RATE_LIMIT_MAX: int = 5
 RATE_LIMIT_WINDOW: int = 3600  # 1 hour in seconds
 
-def check_rate_limit(user_id: int) -> Tuple[bool, int]:
+# Voice commands get their own, much shorter window so /join can't be used to make Amy flap
+voice_cmd_store: Dict[int, List[float]] = defaultdict(list)
+VOICE_CMD_MAX: int = 3
+VOICE_CMD_WINDOW: int = 60  # 1 minute in seconds
+
+def _sliding_window_check(
+    store: Dict[int, List[float]], user_id: int, max_calls: int, window: int
+) -> Tuple[bool, int]:
     """
-    Returns (allowed, seconds_until_reset).
-    Prunes timestamps outside the window before checking.
+    Shared sliding-window limiter.
+    Returns (allowed, seconds_until_reset), pruning timestamps outside the window first.
     """
     now = time.time()
-    rate_limit_store[user_id] = [t for t in rate_limit_store[user_id] if now - t < RATE_LIMIT_WINDOW]
-    if len(rate_limit_store[user_id]) >= RATE_LIMIT_MAX:
-        oldest = rate_limit_store[user_id][0]
-        reset_in = int(RATE_LIMIT_WINDOW - (now - oldest))
-        return False, reset_in
-    rate_limit_store[user_id].append(now)
+    store[user_id] = [t for t in store[user_id] if now - t < window]
+    if len(store[user_id]) >= max_calls:
+        oldest = store[user_id][0]
+        return False, int(window - (now - oldest))
+    store[user_id].append(now)
     return True, 0
+
+def check_rate_limit(user_id: int) -> Tuple[bool, int]:
+    """Chat message limiter."""
+    return _sliding_window_check(rate_limit_store, user_id, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
+
+def check_voice_cooldown(user_id: int) -> Tuple[bool, int]:
+    """Voice command limiter."""
+    return _sliding_window_check(voice_cmd_store, user_id, VOICE_CMD_MAX, VOICE_CMD_WINDOW)
 
 def get_rate_limited_count() -> int:
     """Return how many users are currently at or over the rate limit."""
@@ -310,6 +334,134 @@ async def chat_streaming(
         safe_print(f"[ERROR] Failed to edit final message: {e}")
 #----------------------------------------------
 
+#----Voice Command Handlers------
+async def execute_voice_command(
+    command: str,
+    parts: List[str],
+    msg: discord.Message,
+    guild: discord.Guild,
+) -> str:
+    """
+    Handle /join, /create and /leave.
+
+    Takes an already-narrowed, non-optional guild so every access below is type-safe
+    rather than relying on a guard in a different branch.
+    """
+    if command == "join":
+        member = guild.get_member(msg.author.id)
+        state = member.voice if member else None
+        if state is None or state.channel is None:
+            return "🚫 You're not in a voice channel. Join one first, then use `/join`."
+
+        target = state.channel
+        perms = target.permissions_for(guild.me)
+        if not perms.connect:
+            return f"🚫 I don't have permission to connect to **{target.name}**."
+        if not perms.speak:
+            return f"🚫 I can join **{target.name}**, but I'm not allowed to speak there."
+
+        async with voice_manager.lock_for(guild.id):
+            vc = voice.get_voice_client(guild)
+            current = voice.active_channel(vc)
+            current_id = current.id if current else None
+            has_humans = voice.humans_in(current) > 0 if current else False
+
+            action = voice.decide_join_action(current_id, has_humans, target.id, is_admin(msg))
+
+            if action is voice.JoinAction.ALREADY_THERE:
+                return f"✅ I'm already in **{target.name}**."
+            if action is voice.JoinAction.BLOCKED_OCCUPIED:
+                where = current.name if current else "another channel"
+                return (
+                    f"🚫 I'm currently in **{where}** with other people. "
+                    "Join that channel, or ask an admin to move me."
+                )
+            try:
+                if action is voice.JoinAction.MOVE and vc is not None:
+                    await vc.move_to(target)
+                    return f"🔀 Moved to **{target.name}**."
+                await voice.connect_to(target)
+                return f"🔊 Joined **{target.name}**."
+            except RuntimeError as e:
+                # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
+                # Report what it actually said rather than guessing which one.
+                safe_print(f"[ERROR] Voice connect failed: {e}")
+                return (
+                    f"🚫 Voice support isn't fully installed on my host: {e}\n"
+                    "Fix: `pip install \"discord.py[voice]\"`"
+                )
+            except (discord.ClientException, asyncio.TimeoutError) as e:
+                safe_print(f"[ERROR] Voice connect failed: {e}")
+                return f"🚫 I couldn't connect to **{target.name}**. Please try again."
+
+    if command == "create":
+        if not is_admin(msg):
+            return "🚫 You don't have permission to use this command. (Admin only)"
+        if not guild.me.guild_permissions.manage_channels:
+            return "🚫 I need the **Manage Channels** permission to create a voice channel."
+
+        # Only guild text channels have a category to inherit
+        category = msg.channel.category if isinstance(msg.channel, discord.TextChannel) else None
+        name = voice.sanitize_channel_name(" ".join(parts[1:]))
+
+        async with voice_manager.lock_for(guild.id):
+            try:
+                channel = await guild.create_voice_channel(
+                    name,
+                    category=category,
+                    reason=f"/create requested by {msg.author}",
+                )
+            except discord.Forbidden:
+                return "🚫 Discord refused that. Check my **Manage Channels** permission."
+            except discord.HTTPException as e:
+                safe_print(f"[ERROR] Channel creation failed: {e}")
+                return "🚫 I couldn't create that channel. Please try again."
+
+            try:
+                vc = voice.get_voice_client(guild)
+                if vc is not None and vc.is_connected():
+                    await vc.move_to(channel)
+                else:
+                    await voice.connect_to(channel)
+            except Exception as e:
+                safe_print(f"[ERROR] Could not join newly created channel: {e}")
+                # Channel exists but Amy couldn't join - don't orphan it
+                try:
+                    await channel.delete(reason="Amy could not join the channel she created")
+                except discord.HTTPException:
+                    pass
+                if isinstance(e, RuntimeError):
+                    # Missing voice dependency - say which, so it's actionable
+                    return (
+                        f"🚫 I created the channel but voice support isn't fully installed: {e}\n"
+                        "Fix: `pip install \"discord.py[voice]\"` (channel removed again)"
+                    )
+                return "🚫 I created the channel but couldn't join it, so I removed it again."
+
+            voice_manager.mark_created(channel.id, guild.id)
+            return f"🔊 Created {channel.mention} and joined — hop in!"
+
+    if command == "leave":
+        vc = voice.get_voice_client(guild)
+        current = voice.active_channel(vc)
+        if current is None:
+            return "🚫 I'm not in a voice channel."
+
+        member = guild.get_member(msg.author.id)
+        in_same_channel = bool(
+            member and member.voice and member.voice.channel
+            and member.voice.channel.id == current.id
+        )
+        if not (is_admin(msg) or in_same_channel):
+            return "🚫 You need to be in my voice channel (or an admin) to make me leave."
+
+        async with voice_manager.lock_for(guild.id):
+            left = await voice.leave_voice(guild, voice_manager)
+        return f"👋 Left **{left}**." if left else "🚫 I'm not in a voice channel."
+
+    return f"Unknown voice command: `{command}`."
+#--------------------------------------
+
 #----Command Functions------
 async def execute_command(command_text: str, msg: discord.Message) -> str:
     """Execute a command based on the command text."""
@@ -347,10 +499,17 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
         stats = db.get_stats()
         throttled = get_rate_limited_count()
 
+        current = voice.active_channel(voice.get_voice_client(msg.guild)) if msg.guild else None
+        if current is not None:
+            voice_state = f"In **{current.name}** ({voice.humans_in(current)} listener(s))"
+        else:
+            voice_state = "Not connected"
+
         return (
             f"📊 **Amy Status**\n"
             f"Bot: {bot_state}\n"
             f"Ollama: {ollama_state} | Model: `{model}`\n"
+            f"Voice: {voice_state}\n"
             f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
             f"Rate limits: {throttled} user(s) currently throttled"
         )
@@ -377,6 +536,20 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
         model = new_model
         safe_print(f"[INFO] Model switched to {model}")
         return f"🧠 Model switched to `{model}`"
+
+    #----Voice Commands------
+    # Handled in one block so the guild guard below narrows for every voice command
+    if command in ("join", "create", "leave"):
+        guild = msg.guild
+        if guild is None:
+            return "🚫 Voice commands only work in a server, not in DMs."
+        # Light cooldown so voice commands can't be spammed (admins exempt)
+        if not is_admin(msg):
+            allowed, reset_in = check_voice_cooldown(msg.author.id)
+            if not allowed:
+                return f"⏳ Too many voice commands. Try again in {reset_in}s."
+        return await execute_voice_command(command, parts, msg, guild)
+    #--------------------------------------
 
     if command == "clear":
         if not is_admin(msg):
@@ -457,6 +630,14 @@ async def on_ready() -> None:
         prune_old_messages_task.start()
         safe_print(f"[INFO] Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
 
+    # Clean up voice channels Amy created before a restart
+    try:
+        removed = await voice.sweep_orphan_channels(bot, db, voice_manager)
+        if removed:
+            safe_print(f"[INFO] Cleaned up {removed} orphaned voice channel(s) from a previous run")
+    except Exception as e:
+        safe_print(f"[WARNING] Orphan voice channel sweep failed: {e}")
+
 @bot.event
 async def on_connect() -> None:
     safe_print("[INFO] Bot connected to Discord")
@@ -523,6 +704,39 @@ async def on_message(msg: discord.Message) -> None:
             await msg.reply("Sorry, I encountered an unexpected error. Please try again.")
         except Exception:
             safe_print("[ERROR] Failed to send error message to Discord")
+
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+) -> None:
+    """Leave (and tidy up) once the last human leaves Amy's voice channel."""
+    guild = member.guild
+
+    # Amy herself was moved or disconnected by someone else
+    if bot.user and member.id == bot.user.id:
+        if after.channel is None and before.channel is not None:
+            safe_print(f"[INFO] Amy was disconnected from voice channel: {before.channel.name}")
+            voice_manager.unmark_created(before.channel.id)
+        return
+
+    current = voice.active_channel(voice.get_voice_client(guild))
+    if current is None or voice.humans_in(current) > 0:
+        return
+
+    # Grace period, so a quick reconnect doesn't kick Amy out
+    channel_id = current.id
+    await asyncio.sleep(voice.EMPTY_DISCONNECT_DELAY)
+
+    current = voice.active_channel(voice.get_voice_client(guild))
+    if current is None or current.id != channel_id or voice.humans_in(current) > 0:
+        return
+
+    async with voice_manager.lock_for(guild.id):
+        left = await voice.leave_voice(guild, voice_manager)
+    if left:
+        safe_print(f"[INFO] Left empty voice channel: {left}")
 
 @bot.event
 async def on_reaction_add(reaction: discord.Reaction, user: discord.User) -> None:

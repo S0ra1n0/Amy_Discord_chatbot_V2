@@ -1,6 +1,6 @@
 # database.py
 import sqlite3
-from typing import Dict, List, Union
+from typing import Dict, List, Tuple, Union
 
 MAX_MEMORY_MESSAGES = 10
 
@@ -20,6 +20,12 @@ class ConversationDB:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_server_channel ON messages(server, channel);
+
+            CREATE TABLE IF NOT EXISTS bot_voice_channels (
+                channel_id INTEGER PRIMARY KEY,
+                guild_id   INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.conn.commit()
 
@@ -74,6 +80,27 @@ class ConversationDB:
         )
         row = cursor.fetchone()
         return {"total_messages": row[0], "active_channels": row[1]}
+
+    #----Bot-created voice channels (survive restarts so orphans can be cleaned up)------
+    def add_bot_voice_channel(self, channel_id: int, guild_id: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO bot_voice_channels (channel_id, guild_id) VALUES (?, ?)",
+            (int(channel_id), int(guild_id))
+        )
+        self.conn.commit()
+
+    def remove_bot_voice_channel(self, channel_id: int) -> None:
+        self.conn.execute(
+            "DELETE FROM bot_voice_channels WHERE channel_id = ?",
+            (int(channel_id),)
+        )
+        self.conn.commit()
+
+    def get_bot_voice_channels(self) -> List[Tuple[int, int]]:
+        """Return [(channel_id, guild_id), ...] for every voice channel Amy created."""
+        cursor = self.conn.execute("SELECT channel_id, guild_id FROM bot_voice_channels")
+        return [(row[0], row[1]) for row in cursor.fetchall()]
+    #--------------------------------------
 
     def prune_old_messages(self, days: int) -> int:
         """Delete messages older than the given number of days. Returns rows deleted."""

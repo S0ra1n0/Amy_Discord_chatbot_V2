@@ -10,7 +10,9 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/dice [sides] [amount]` - Roll multiple custom dice
   • Usage: `/dice 6 3` (rolls 3 six-sided dice)
 `/rng [min] [max]` - Generate a random number between min and max
-  • Usage: `/rng 0 999`"""
+  • Usage: `/rng 0 999`
+`/join` - Bring me into the voice channel you're in
+`/leave` - Make me leave the voice channel (must be in it with me, or an admin)"""
 
 HELP_ADMIN = """
 **Commands — Admin only:**
@@ -19,4 +21,6 @@ HELP_ADMIN = """
 `/status` - Show bot state, Ollama connectivity, memory usage and rate limit info
 `/model` - Show the current Ollama model
 `/model [name]` - Switch to a different installed Ollama model
-  • Usage: `/model qwen2.5:3b`"""
+  • Usage: `/model qwen2.5:3b`
+`/create [name]` - Create a new voice channel and join it
+  • Usage: `/create Music Room`"""
