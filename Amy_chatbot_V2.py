@@ -597,24 +597,34 @@ async def execute_music_command(
             return f"🚫 The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."
 
         query = " ".join(parts[1:])
+
+        # Resolving hits the network and can take a few seconds, so acknowledge
+        # immediately and edit this message once we know the result.
+        status_msg = await msg.reply(f"🔍 Searching for **{query}**...")
         try:
             track = await music.resolve_metadata(query, requested_by=str(msg.author))
         except Exception as e:
             safe_print(f"[ERROR] Could not resolve '{query}': {e}")
-            return f"🚫 I couldn't find anything for `{query}`."
+            await status_msg.edit(content=f"🚫 I couldn't find anything for `{query}`.")
+            return ""
 
         player.queue.append(track)
         player.cancel_idle()
+        duration = music.format_duration(track.duration)
 
         if vc is not None and (vc.is_playing() or vc.is_paused()):
-            position = len(player.queue)
-            return (
-                f"➕ Queued **{track.title}** `[{music.format_duration(track.duration)}]` "
-                f"— position {position}"
+            await status_msg.edit(
+                content=(
+                    f"➕ Queued **{track.title}** `[{duration}]` "
+                    f"— position {len(player.queue)}"
+                )
             )
+            return ""
 
+        await status_msg.edit(content=f"⏳ Loading **{track.title}**...")
         await advance_playback(guild)
-        return f"🎵 Playing **{track.title}** `[{music.format_duration(track.duration)}]`"
+        await status_msg.edit(content=f"🎵 Playing **{track.title}** `[{duration}]`")
+        return ""
 
     # --- everything below needs an active connection ---
     if vc is None or not vc.is_connected():
@@ -665,10 +675,19 @@ async def execute_music_command(
         if parsed is None:
             return "🚫 Volume must be a whole number between 0 and 100."
         player.volume = parsed / 100
-        # Apply live if something is playing
+        # Applies instantly only on the PCM path; an opus-passthrough track has no
+        # volume stage, so the change lands when the next track starts.
         if isinstance(vc.source, discord.PCMVolumeTransformer):
             vc.source.volume = player.volume
-        return f"🔊 Volume set to **{parsed}%**."
+            return f"🔊 Volume set to **{parsed}%**."
+
+        if parsed >= 100:
+            return "🔊 Volume set to **100%** (full quality, lowest CPU)."
+        return (
+            f"🔊 Volume set to **{parsed}%** — applies from the next track.\n"
+            "_Note: below 100% Amy has to decode audio rather than pass it through, "
+            "which costs more CPU and can stutter on a busy machine._"
+        )
 
     if command == "loop":
         if not in_voice_with_amy() and not is_admin(msg):
@@ -865,6 +884,14 @@ async def on_ready() -> None:
     if not prune_old_messages_task.is_running():
         prune_old_messages_task.start()
         safe_print(f"[INFO] Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
+
+    # Load the opus encoder up front so the first track doesn't stall while it loads
+    if not discord.opus.is_loaded():
+        try:
+            discord.opus._load_default()
+            safe_print("[INFO] Opus encoder loaded")
+        except Exception as e:
+            safe_print(f"[WARNING] Could not preload opus: {e}")
 
     # Clean up voice channels Amy created before a restart
     try:

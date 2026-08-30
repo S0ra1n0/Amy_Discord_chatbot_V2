@@ -87,7 +87,17 @@ Voice commands are limited to **3 per minute** per non-admin user, so they can't
 
 If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tracks queue up to **100** deep, and `/queue` shows the first 10 with a count of the rest.
 
+`/play` replies immediately with **🔍 Searching...**, then updates that same message as it resolves and starts playing, so you can see it's working during the few seconds YouTube lookup takes.
+
 **Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly).
+
+### Volume and audio quality
+
+Volume defaults to **100%**, and that's deliberate. At full volume Amy copies the opus stream from YouTube straight to Discord with no decoding or re-encoding — far less CPU, which is the main cause of stuttering.
+
+Setting volume **below 100%** forces her to decode audio to raw PCM so the level can be scaled. That works fine, but costs noticeably more CPU and is more likely to stutter on a busy machine. The change also applies from the **next track**, since a passthrough stream has no volume stage to adjust mid-song.
+
+If you just want Amy quieter, prefer Discord's own per-user volume slider (right-click Amy → Volume). It's client-side, costs nothing, and is per-listener.
 
 **Amy disconnects on her own in two cases:** 60 seconds after the last person leaves her channel, and 5 minutes after the queue runs dry. Either way the queue is cleared, so she never resumes stale music when re-summoned.
 
@@ -327,8 +337,13 @@ Both must print `True`. Note that discord.py pins `PyNaCl<1.6`, so a bare `pip i
 
 **Music stutters or cuts out:**
 
-- Usually network. The FFmpeg source already reconnects automatically (`-reconnect 1`), but a weak connection to either YouTube or Discord will still audibly drop.
-- Very long queues are fine — stream URLs are resolved one track at a time, right before playing, so they can't expire while waiting.
+Discord audio must deliver a packet every 20ms, so stuttering is almost always the host machine missing that deadline rather than a bug. In rough order of impact:
+
+- **Check CPU load.** A machine already running near capacity will drop packets. Note that Ollama inference spikes CPU hard — if Amy stutters *while she's answering a chat message*, that's the cause. A smaller model, or not chatting during playback, fixes it.
+- **Keep volume at 100%.** Below that, Amy must decode and re-encode audio instead of passing it through, which costs meaningfully more CPU. Use Discord's per-user volume slider instead (right-click Amy → Volume).
+- **Network.** The stream reconnects automatically through brief drops (`-reconnect`, `-reconnect_on_network_error`), but a weak link to YouTube or Discord will still be audible.
+
+Long queues are not a factor — stream URLs are resolved one track at a time, immediately before playing, so they can't expire while waiting.
 
 **Amy leaves voice on her own / never leaves:**
 
@@ -362,7 +377,8 @@ Both must print `True`. Note that discord.py pins `PyNaCl<1.6`, so a bare `pip i
 - Amy self-deafens when joining voice (she never needs to receive audio)
 - Music requires **FFmpeg**; YouTube/SoundCloud sources additionally require **yt-dlp** (both covered in setup)
 - Stream URLs are resolved one track at a time, immediately before playing — YouTube links expire after a few hours, so resolving a long queue up front would leave later tracks pointing at dead links
-- Volume is applied through `PCMVolumeTransformer`, which is why playback decodes to PCM rather than passing opus through untouched
+- At 100% volume audio is passed through as opus with no transcoding; below 100% it decodes to PCM so `PCMVolumeTransformer` can scale it, which costs more CPU
+- `/volume` below 100% takes effect from the next track, since a passthrough stream has no volume stage to adjust mid-song
 - Adjust `IDLE_DISCONNECT_DELAY`, `MAX_QUEUE_SIZE`, or `DEFAULT_VOLUME` in `music.py` to tune playback behaviour
 
 ---

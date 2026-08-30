@@ -15,14 +15,25 @@ import discord
 log: Callable[[str], None] = print
 
 #----Configuration------
-# Streams die without reconnect flags; -vn drops any video track
-FFMPEG_BEFORE_OPTIONS: str = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+# -nostdin stops FFmpeg competing for the console; the reconnect flags keep a stream
+# alive through transient network drops instead of ending the track. All verified
+# supported by FFmpeg 9.x.
+FFMPEG_BEFORE_OPTIONS: str = (
+    "-nostdin "
+    "-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 "
+    "-reconnect_delay_max 5"
+)
 FFMPEG_OPTIONS: str = "-vn"
 
 IDLE_DISCONNECT_DELAY: int = 300  # Leave 5 minutes after the queue runs dry
 MAX_QUEUE_SIZE: int = 100
 QUEUE_PAGE_SIZE: int = 10
-DEFAULT_VOLUME: float = 0.5
+
+# Full volume by default so playback can take the cheap opus-passthrough path (see
+# build_source). Listeners can still adjust Amy per-user in Discord's own volume slider.
+DEFAULT_VOLUME: float = 1.0
+# At/above this, volume is effectively unchanged, so no PCM transform is needed
+OPUS_PASSTHROUGH_THRESHOLD: float = 0.99
 
 
 def find_ffmpeg() -> Optional[str]:
@@ -143,7 +154,8 @@ def total_duration(queue: Deque[Track]) -> Optional[int]:
 #----Track Resolution------
 # yt-dlp types its params as a TypedDict; this is an open options bag, so keep it untyped
 YTDL_OPTIONS: Any = {
-    "format": "bestaudio/best",
+    # Prefer an opus stream so build_source can copy it through untouched
+    "format": "bestaudio[acodec=opus]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -251,26 +263,41 @@ class MusicManager:
 
 
 #----Playback Engine------
-def build_source(stream_url: str, volume: float, ffmpeg: Optional[str]) -> discord.AudioSource:
+async def build_source(
+    stream_url: str, volume: float, ffmpeg: Optional[str]
+) -> discord.AudioSource:
     """
-    Wrap an FFmpeg source so its volume can be changed while playing.
+    Build an audio source, picking the cheapest path that still honours `volume`.
 
-    PCMVolumeTransformer needs PCM, so this deliberately uses FFmpegPCMAudio rather than
-    the cheaper FFmpegOpusAudio - opus sources can't have their volume adjusted.
+    At full volume it uses FFmpegOpusAudio.from_probe, which copies an already-opus
+    stream straight through - no decode to PCM and no re-encode. YouTube serves opus,
+    so this skips nearly all transcoding and markedly reduces CPU, which is what causes
+    stuttering on a loaded machine.
+
+    Below full volume that isn't possible: PCMVolumeTransformer needs PCM samples to
+    scale, so it falls back to decoding. Quieter playback therefore costs more CPU.
     """
-    if ffmpeg:
-        source = discord.FFmpegPCMAudio(
-            stream_url,
-            executable=ffmpeg,
-            before_options=FFMPEG_BEFORE_OPTIONS,
-            options=FFMPEG_OPTIONS,
-        )
-    else:
-        source = discord.FFmpegPCMAudio(
-            stream_url,
-            before_options=FFMPEG_BEFORE_OPTIONS,
-            options=FFMPEG_OPTIONS,
-        )
+    executable = ffmpeg or "ffmpeg"
+
+    if volume >= OPUS_PASSTHROUGH_THRESHOLD:
+        try:
+            return await discord.FFmpegOpusAudio.from_probe(
+                stream_url,
+                method="fallback",
+                executable=executable,
+                before_options=FFMPEG_BEFORE_OPTIONS,
+                options=FFMPEG_OPTIONS,
+            )
+        except Exception as e:
+            # Probing can fail on odd sources; PCM always works
+            log(f"[WARNING] Opus probe failed, using PCM: {e}")
+
+    source = discord.FFmpegPCMAudio(
+        stream_url,
+        executable=executable,
+        before_options=FFMPEG_BEFORE_OPTIONS,
+        options=FFMPEG_OPTIONS,
+    )
     return discord.PCMVolumeTransformer(source, volume=volume)
 
 
@@ -282,7 +309,7 @@ async def play_track(
 ) -> None:
     """Resolve `track` and start playing it on `voice_client`."""
     stream_url = await resolve_stream_url(track)
-    source = build_source(stream_url, player.volume, find_ffmpeg())
+    source = await build_source(stream_url, player.volume, find_ffmpeg())
 
     player.current = track
     player.cancel_idle()
