@@ -9,7 +9,8 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 **Key Features:**
 
 - Conversational AI powered by Ollama with **real-time streaming responses**
-- **Voice channel support** — summon Amy into your voice channel, or have her create one (groundwork for music playback)
+- **Voice channel support** — summon Amy into your voice channel, or have her create one
+- **Music playback** — queue tracks from YouTube (by search or URL), direct audio URLs, or local files, with pause/skip/loop/volume
 - Runtime model switching — swap the active Ollama model without restarting the bot
 - Long responses/replies automatically split across multiple Discord messages instead of being truncated
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
@@ -44,6 +45,14 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/join`                  | Bring Amy into the voice channel you're currently in                      | Everyone   |
 | `/leave`                 | Make Amy leave her voice channel                                          | In-channel or admin |
 | `/create [name]`         | Create a new voice channel and have Amy join it (e.g., `/create Music Room`) | Admin only |
+| `/play [query]`          | Queue a track — song name, YouTube/audio URL, or local file path          | In-channel |
+| `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
+| `/skip`                  | Skip the current track                                                    | In-channel |
+| `/stop`                  | Stop, clear the queue, and disconnect                                     | In-channel or admin |
+| `/queue`                 | Show what's playing and what's queued                                     | Everyone   |
+| `/nowplaying` / `/np`    | Show the current track                                                    | Everyone   |
+| `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
+| `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
 
 ### Admin Access
 
@@ -64,7 +73,25 @@ Amy can join **guild voice channels** — the ones in your server's sidebar. (Di
 
 Amy **auto-leaves after 60 seconds** once the last human leaves her channel, deleting the channel if she created it. Channels she created also get cleaned up on the next startup if the bot restarts while one is still lying around.
 
-Voice commands are limited to **3 per minute** per non-admin user, so they can't be used to make Amy flap between channels.
+Voice commands are limited to **3 per minute** per non-admin user, so they can't be used to make Amy flap between channels. `/queue` and `/nowplaying` are exempt — checking what's playing never costs you a slot.
+
+### Music
+
+`/play` accepts three kinds of input:
+
+| Input | Example |
+| ----- | ------- |
+| Song name (searches YouTube) | `/play never gonna give you up` |
+| A URL (YouTube, SoundCloud, direct audio, radio stream) | `/play https://youtu.be/dQw4w9WgXcQ` |
+| A local file path on the bot's machine | `/play C:\Music\song.mp3` |
+
+If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tracks queue up to **100** deep, and `/queue` shows the first 10 with a count of the rest.
+
+**Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly).
+
+**Amy disconnects on her own in two cases:** 60 seconds after the last person leaves her channel, and 5 minutes after the queue runs dry. Either way the queue is cleared, so she never resumes stale music when re-summoned.
+
+> **A note on YouTube:** playback relies on `yt-dlp`. YouTube changes its internals regularly, so if `/play` suddenly stops finding tracks, update it — `pip install -U yt-dlp` — rather than assuming the bot broke. Be aware that streaming YouTube audio is contrary to YouTube's Terms of Service; that's the reason large public music bots have been shut down. Fine for a private personal bot, but worth knowing.
 
 ## How It Runs
 
@@ -82,6 +109,7 @@ Voice commands are limited to **3 per minute** per non-admin user, so they can't
 10. Use `/model` (Admin only) to view or switch the active Ollama model at runtime — the new model is validated against Ollama's installed model list before switching
 11. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
 12. Use `/join`, `/create` and `/leave` to control which voice channel Amy sits in; she auto-leaves 60s after the last person departs
+13. `/play` queues music and pulls Amy into your voice channel if she isn't already there; the queue advances automatically, and she disconnects 5 minutes after it runs dry
 
 ## Setup & Installation
 
@@ -143,10 +171,12 @@ Both must print `True`.
 DISCORD_TOKEN=your_actual_discord_bot_token_here
 ADMIN_ROLE_NAME=Admin
 DB_PRUNE_DAYS=30
+FFMPEG_PATH=
 ```
 
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
+- `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 
 ### Step 5: Enable the Server Members Intent (required)
 
@@ -164,7 +194,25 @@ Amy also needs these permissions in your server (Server Settings → Roles → h
 
 Note that a single voice channel can override the role-level setting, so a channel-specific deny will still block her there. `/join` reports exactly which permission is missing.
 
-### Step 6: Start Ollama
+### Step 6: Install FFmpeg (required for music)
+
+FFmpeg decodes every audio source. Without it the bot runs fine but `/play` refuses to start.
+
+```bash
+winget install Gyan.FFmpeg
+```
+
+macOS: `brew install ffmpeg`. Linux: `sudo apt install ffmpeg`.
+
+**Restart your terminal afterwards** — the installer updates PATH, but already-running shells keep the old copy. Verify:
+
+```bash
+ffmpeg -version
+```
+
+If you can't restart, or FFmpeg lives somewhere unusual, set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe` instead. `/status` reports whether Amy can currently find it.
+
+### Step 7: Start Ollama
 
 Make sure Ollama is running and the model is available:
 
@@ -180,7 +228,7 @@ model = "qwen3.5:2b"  # Ollama model name (replace with your model name)
 
 > This sets the model used at startup. Admins can switch to any other installed model at runtime with `/model [name]` without restarting the bot.
 
-### Step 7: Run the Bot
+### Step 8: Run the Bot
 
 With the venv active:
 
@@ -205,6 +253,7 @@ Amy_chatbot_V2/
 ├── Amy_chatbot_V2.py       # Main bot file
 ├── database.py             # SQLite conversation memory layer
 ├── voice.py                # Voice channel connection management
+├── music.py                # Track resolution, queues, and playback engine
 ├── commands_help.py        # Help command text
 ├── requirements.txt        # Pinned Python dependencies
 ├── amy_memory.db           # SQLite conversation store, auto-created (Git ignored)
@@ -267,6 +316,20 @@ Both must print `True`. Note that discord.py pins `PyNaCl<1.6`, so a bare `pip i
 
 - Grant **Manage Channels** to Amy's role. She needs it both to create the channel and to delete it afterwards.
 
+**`/play` says FFmpeg isn't available:**
+
+- FFmpeg isn't installed, or isn't on the PATH of the process running the bot. Install it (Step 6) and **restart your terminal** — a fresh install won't reach an already-running shell. Alternatively set `FFMPEG_PATH` in `.env`.
+- `/status` shows whether Amy can currently find FFmpeg.
+
+**`/play` can't find any tracks / used to work and now doesn't:**
+
+- Update yt-dlp: `pip install -U yt-dlp`. YouTube changes its internals often, and this is the usual cause rather than a bug in the bot.
+
+**Music stutters or cuts out:**
+
+- Usually network. The FFmpeg source already reconnects automatically (`-reconnect 1`), but a weak connection to either YouTube or Discord will still audibly drop.
+- Very long queues are fine — stream URLs are resolved one track at a time, right before playing, so they can't expire while waiting.
+
 **Amy leaves voice on her own / never leaves:**
 
 - She auto-leaves 60 seconds after the last non-bot member departs. If she *never* leaves, occupancy detection is failing — this is the classic symptom of the **Server Members Intent** being off, since `VoiceChannel.members` can't resolve members without it.
@@ -297,7 +360,10 @@ Both must print `True`. Note that discord.py pins `PyNaCl<1.6`, so a bare `pip i
 - Messages longer than Discord's 2000-character limit are split across multiple messages automatically — no configuration needed
 - Voice is limited to guild voice channels; Discord does not expose DM or group-DM calls to bots
 - Amy self-deafens when joining voice (she never needs to receive audio)
-- Music playback is not implemented yet — it will additionally require **FFmpeg** on your PATH
+- Music requires **FFmpeg**; YouTube/SoundCloud sources additionally require **yt-dlp** (both covered in setup)
+- Stream URLs are resolved one track at a time, immediately before playing — YouTube links expire after a few hours, so resolving a long queue up front would leave later tracks pointing at dead links
+- Volume is applied through `PCMVolumeTransformer`, which is why playback decodes to PCM rather than passing opus through untouched
+- Adjust `IDLE_DISCONNECT_DELAY`, `MAX_QUEUE_SIZE`, or `DEFAULT_VOLUME` in `music.py` to tune playback behaviour
 
 ---
 

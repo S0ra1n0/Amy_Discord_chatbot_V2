@@ -20,6 +20,8 @@ from commands_help import HELP_EVERYONE, HELP_ADMIN
 from database import ConversationDB
 import voice
 from voice import VoiceManager
+import music
+from music import LoopMode, MusicManager
 #----------------------------------
 
 #----Utility Functions------
@@ -145,8 +147,10 @@ Remember: You are here to make your master's life easier, more organized, and mo
 db = ConversationDB()
 #----------------------------------------------
 
-#----Voice------
+#----Voice & Music------
 voice_manager = VoiceManager(db)
+music_manager = MusicManager()
+music.log = safe_print  # let music.py log through the Windows-safe printer
 #----------------------------------------------
 
 #----Bot State------
@@ -456,10 +460,231 @@ async def execute_voice_command(
             return "🚫 You need to be in my voice channel (or an admin) to make me leave."
 
         async with voice_manager.lock_for(guild.id):
-            left = await voice.leave_voice(guild, voice_manager)
+            left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
         return f"👋 Left **{left}**." if left else "🚫 I'm not in a voice channel."
 
     return f"Unknown voice command: `{command}`."
+#--------------------------------------
+
+#----Command Groups------
+VOICE_COMMANDS = ("join", "create", "leave")
+MUSIC_COMMANDS = (
+    "play", "pause", "resume", "skip", "stop", "queue", "nowplaying", "np", "volume", "loop",
+)
+# Harmless reads - exempt from the voice cooldown so checking the queue never costs a slot
+MUSIC_READONLY_COMMANDS = ("queue", "nowplaying", "np")
+#--------------------------------------
+
+#----Music Playback Engine------
+async def advance_playback(guild: discord.Guild) -> None:
+    """
+    Play the next track. Called when one finishes, and to kick off the first track.
+    Runs under the player lock so a finishing track and a new /play can't race.
+    """
+    player = music_manager.player_for(guild.id)
+    async with player.lock:
+        vc = voice.get_voice_client(guild)
+        if vc is None or not vc.is_connected():
+            player.reset()
+            return
+
+        next_track = music.advance_queue(player.current, player.queue, player.loop_mode)
+        if next_track is None:
+            player.current = None
+            safe_print("[INFO] Queue empty - starting idle timer")
+            player.idle_task = asyncio.create_task(idle_disconnect(guild))
+            return
+
+        loop = asyncio.get_running_loop()
+        after = music.make_after_callback(loop, lambda: advance_playback(guild))
+        try:
+            await music.play_track(vc, player, next_track, after)
+        except Exception as e:
+            safe_print(f"[ERROR] Could not play '{next_track.title}': {e}")
+            # Skip the bad track rather than stalling the whole queue
+            player.current = None
+            asyncio.create_task(advance_playback(guild))
+
+
+async def idle_disconnect(guild: discord.Guild) -> None:
+    """Leave after IDLE_DISCONNECT_DELAY if the queue is still empty."""
+    try:
+        await asyncio.sleep(music.IDLE_DISCONNECT_DELAY)
+    except asyncio.CancelledError:
+        return
+
+    player = music_manager.player_for(guild.id)
+    if player.current is not None or player.queue:
+        return
+    vc = voice.get_voice_client(guild)
+    if vc is None or not vc.is_connected() or vc.is_playing():
+        return
+
+    async with voice_manager.lock_for(guild.id):
+        left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+    if left:
+        safe_print(f"[INFO] Left {left} after being idle")
+#--------------------------------------
+
+#----Music Command Handlers------
+async def execute_music_command(
+    command: str,
+    parts: List[str],
+    msg: discord.Message,
+    guild: discord.Guild,
+) -> str:
+    """Handle the music commands. `guild` is already narrowed to non-optional."""
+    player = music_manager.player_for(guild.id)
+    vc = voice.get_voice_client(guild)
+    member = guild.get_member(msg.author.id)
+
+    def in_voice_with_amy() -> bool:
+        current = voice.active_channel(vc)
+        return bool(
+            current and member and member.voice and member.voice.channel
+            and member.voice.channel.id == current.id
+        )
+
+    # --- read-only commands, no connection required ---
+    if command == "queue":
+        return music.render_queue(player.current, player.queue, player.loop_mode)
+
+    if command in ("nowplaying", "np"):
+        if player.current is None:
+            return "🎵 Nothing is playing right now."
+        t = player.current
+        return (
+            f"🎵 **Now playing:** {t.title} `[{music.format_duration(t.duration)}]`\n"
+            f"Requested by {t.requested_by}"
+        )
+
+    # --- /play: joins if needed, then queues ---
+    if command == "play":
+        if len(parts) < 2:
+            return "🚫 What should I play? Usage: `/play <song name, URL, or file path>`"
+
+        if music.find_ffmpeg() is None:
+            return (
+                "🚫 FFmpeg isn't available on my host, so I can't play audio.\n"
+                "Install it, or set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe`."
+            )
+
+        # Join the requester's channel if not already connected
+        if voice.active_channel(vc) is None:
+            state = member.voice if member else None
+            if state is None or state.channel is None:
+                return "🚫 You're not in a voice channel. Join one first, then use `/play`."
+            perms = state.channel.permissions_for(guild.me)
+            if not perms.connect or not perms.speak:
+                return f"🚫 I need Connect and Speak permissions in **{state.channel.name}**."
+            try:
+                async with voice_manager.lock_for(guild.id):
+                    await voice.connect_to(state.channel)
+                vc = voice.get_voice_client(guild)
+            except RuntimeError as e:
+                safe_print(f"[ERROR] Voice connect failed: {e}")
+                return (
+                    f"🚫 Voice support isn't fully installed on my host: {e}\n"
+                    "Fix: `pip install \"discord.py[voice]\"`"
+                )
+            except Exception as e:
+                safe_print(f"[ERROR] Voice connect failed: {e}")
+                return "🚫 I couldn't join your voice channel. Please try again."
+        elif not in_voice_with_amy() and not is_admin(msg):
+            return "🚫 You need to be in my voice channel to queue tracks."
+
+        if len(player.queue) >= music.MAX_QUEUE_SIZE:
+            return f"🚫 The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."
+
+        query = " ".join(parts[1:])
+        try:
+            track = await music.resolve_metadata(query, requested_by=str(msg.author))
+        except Exception as e:
+            safe_print(f"[ERROR] Could not resolve '{query}': {e}")
+            return f"🚫 I couldn't find anything for `{query}`."
+
+        player.queue.append(track)
+        player.cancel_idle()
+
+        if vc is not None and (vc.is_playing() or vc.is_paused()):
+            position = len(player.queue)
+            return (
+                f"➕ Queued **{track.title}** `[{music.format_duration(track.duration)}]` "
+                f"— position {position}"
+            )
+
+        await advance_playback(guild)
+        return f"🎵 Playing **{track.title}** `[{music.format_duration(track.duration)}]`"
+
+    # --- everything below needs an active connection ---
+    if vc is None or not vc.is_connected():
+        return "🚫 I'm not in a voice channel."
+
+    if command == "pause":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return "🚫 You need to be in my voice channel to do that."
+        if not vc.is_playing():
+            return "🚫 Nothing is playing."
+        vc.pause()
+        return "⏸️ Paused."
+
+    if command == "resume":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return "🚫 You need to be in my voice channel to do that."
+        if not vc.is_paused():
+            return "🚫 Nothing is paused."
+        vc.resume()
+        return "▶️ Resumed."
+
+    if command == "skip":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return "🚫 You need to be in my voice channel to skip."
+        if not (vc.is_playing() or vc.is_paused()):
+            return "🚫 Nothing is playing."
+        skipped = player.current.title if player.current else "the current track"
+        vc.stop()  # triggers the after-callback, which advances the queue
+        return f"⏭️ Skipped **{skipped}**."
+
+    if command == "stop":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return "🚫 You need to be in my voice channel (or be an admin) to stop playback."
+        player.queue.clear()
+        player.loop_mode = LoopMode.OFF
+        player.current = None
+        vc.stop()
+        async with voice_manager.lock_for(guild.id):
+            left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+        return f"⏹️ Stopped and left **{left}**." if left else "⏹️ Stopped."
+
+    if command == "volume":
+        if not is_admin(msg):
+            return "🚫 You don't have permission to use this command. (Admin only)"
+        if len(parts) < 2:
+            return f"🔊 Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`"
+        parsed = music.parse_volume(parts[1])
+        if parsed is None:
+            return "🚫 Volume must be a whole number between 0 and 100."
+        player.volume = parsed / 100
+        # Apply live if something is playing
+        if isinstance(vc.source, discord.PCMVolumeTransformer):
+            vc.source.volume = player.volume
+        return f"🔊 Volume set to **{parsed}%**."
+
+    if command == "loop":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return "🚫 You need to be in my voice channel to do that."
+        if len(parts) < 2:
+            return (
+                f"🔁 Loop is **{player.loop_mode.value}**.\n"
+                "Usage: `/loop off`, `/loop track`, or `/loop queue`"
+            )
+        try:
+            player.loop_mode = LoopMode(parts[1].lower())
+        except ValueError:
+            return "🚫 Loop mode must be `off`, `track`, or `queue`."
+        return f"🔁 Loop set to **{player.loop_mode.value}**."
+
+    return f"Unknown music command: `{command}`."
 #--------------------------------------
 
 #----Command Functions------
@@ -505,11 +730,20 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
         else:
             voice_state = "Not connected"
 
+        ffmpeg_state = "Found ✅" if music.find_ffmpeg() else "Missing ❌"
+        if msg.guild:
+            mp = music_manager.player_for(msg.guild.id)
+            playing = mp.current.title if mp.current else "nothing"
+            music_state = f"{playing} | {len(mp.queue)} queued | loop {mp.loop_mode.value}"
+        else:
+            music_state = "n/a"
+
         return (
             f"📊 **Amy Status**\n"
             f"Bot: {bot_state}\n"
             f"Ollama: {ollama_state} | Model: `{model}`\n"
             f"Voice: {voice_state}\n"
+            f"Music: {music_state} | FFmpeg: {ffmpeg_state}\n"
             f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
             f"Rate limits: {throttled} user(s) currently throttled"
         )
@@ -537,18 +771,20 @@ async def execute_command(command_text: str, msg: discord.Message) -> str:
         safe_print(f"[INFO] Model switched to {model}")
         return f"🧠 Model switched to `{model}`"
 
-    #----Voice Commands------
-    # Handled in one block so the guild guard below narrows for every voice command
-    if command in ("join", "create", "leave"):
+    #----Voice & Music Commands------
+    # Handled in one block so the guild guard below narrows for every one of them
+    if command in VOICE_COMMANDS or command in MUSIC_COMMANDS:
         guild = msg.guild
         if guild is None:
-            return "🚫 Voice commands only work in a server, not in DMs."
-        # Light cooldown so voice commands can't be spammed (admins exempt)
-        if not is_admin(msg):
+            return "🚫 Voice and music commands only work in a server, not in DMs."
+        # Light cooldown so these can't be spammed (admins and read-only commands exempt)
+        if not is_admin(msg) and command not in MUSIC_READONLY_COMMANDS:
             allowed, reset_in = check_voice_cooldown(msg.author.id)
             if not allowed:
                 return f"⏳ Too many voice commands. Try again in {reset_in}s."
-        return await execute_voice_command(command, parts, msg, guild)
+        if command in VOICE_COMMANDS:
+            return await execute_voice_command(command, parts, msg, guild)
+        return await execute_music_command(command, parts, msg, guild)
     #--------------------------------------
 
     if command == "clear":
@@ -734,7 +970,7 @@ async def on_voice_state_update(
         return
 
     async with voice_manager.lock_for(guild.id):
-        left = await voice.leave_voice(guild, voice_manager)
+        left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
     if left:
         safe_print(f"[INFO] Left empty voice channel: {left}")
 

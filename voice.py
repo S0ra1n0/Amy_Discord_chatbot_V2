@@ -3,7 +3,7 @@
 
 import asyncio
 from enum import Enum
-from typing import Dict, Optional, Set, Union
+from typing import Callable, Dict, Optional, Set, Union
 
 import discord
 
@@ -116,18 +116,30 @@ class VoiceManager:
         return channel_id in self.bot_created
 
 
-async def leave_voice(guild: discord.Guild, manager: VoiceManager) -> Optional[str]:
+async def leave_voice(
+    guild: discord.Guild,
+    manager: VoiceManager,
+    on_cleanup: Optional[Callable[[int], None]] = None,
+) -> Optional[str]:
     """
     Disconnect from the guild's voice channel, deleting it if Amy created it.
     Returns the channel name that was left, or None if not connected.
+
+    `on_cleanup` is called with the guild id after disconnecting - the music layer uses
+    it to clear the queue, so a stale queue can't survive a disconnect and resume later.
     """
     vc = get_voice_client(guild)
     channel = active_channel(vc)
     if vc is None or channel is None:
+        if on_cleanup is not None:
+            on_cleanup(guild.id)  # Clear state even if we were already disconnected
         return None
 
     name = channel.name
     await vc.disconnect(force=False)
+
+    if on_cleanup is not None:
+        on_cleanup(guild.id)
 
     if manager.is_bot_created(channel.id):
         try:

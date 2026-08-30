@@ -6,3 +6,7 @@ httpx==0.28.1
 # davey, both of which discord.py 2.7 needs before it will open a voice connection.
 # Installing plain "discord.py" leaves voice broken at runtime.
 discord.py[voice]==2.7.1
+
+# Resolves YouTube/SoundCloud queries to playable stream URLs. Sites change often, so
+# this is intentionally unpinned - run `pip install -U yt-dlp` if /play stops finding tracks.
+yt-dlp>=2026.8.19
