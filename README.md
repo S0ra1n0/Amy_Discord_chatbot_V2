@@ -83,9 +83,11 @@ Voice commands are limited to **3 per minute** per non-admin user, so they can't
 | ----- | ------- |
 | Song name (searches YouTube) | `/play never gonna give you up` |
 | A URL (YouTube, SoundCloud, direct audio, radio stream) | `/play https://youtu.be/dQw4w9WgXcQ` |
-| A local file path on the bot's machine | `/play C:\Music\song.mp3` |
+| A local file, if `MUSIC_DIR` is configured | `/play song.mp3` |
 
 If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tracks queue up to **100** deep, and `/queue` shows the first 10 with a count of the rest.
+
+**Local files are off by default.** Set `MUSIC_DIR` in `.env` to a folder to enable them, and `/play` will only read files inside it — `..`, symlinks, and absolute paths pointing elsewhere are all rejected. Without this restriction, any server member could name any path on the host and confirm whether it exists.
 
 `/play` replies immediately with **🔍 Searching...**, then updates that same message as it resolves and starts playing, so you can see it's working during the few seconds YouTube lookup takes.
 
@@ -187,6 +189,7 @@ FFMPEG_PATH=
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
+- `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
 
 ### Step 5: Enable the Server Members Intent (required)
 

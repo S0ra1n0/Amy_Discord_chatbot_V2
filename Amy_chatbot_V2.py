@@ -216,12 +216,35 @@ def get_rate_limited_count() -> int:
 #----------------------------------------------
 
 #----Auto-Prune Old Messages------
+def prune_rate_limit_stores() -> int:
+    """
+    Drop users whose rate-limit windows have fully expired.
+
+    The sliding-window check trims each user's timestamps but never removes the entry
+    itself, so without this every user who ever spoke keeps a dict slot forever.
+    """
+    now = time.time()
+    removed = 0
+    for store, window in ((rate_limit_store, RATE_LIMIT_WINDOW),
+                          (voice_cmd_store, VOICE_CMD_WINDOW)):
+        stale = [uid for uid, ts in store.items()
+                 if not any(now - t < window for t in ts)]
+        for uid in stale:
+            del store[uid]
+            removed += 1
+    return removed
+
+
 @tasks.loop(hours=24)
 async def prune_old_messages_task() -> None:
     loop = asyncio.get_running_loop()
     deleted = await loop.run_in_executor(None, db.prune_old_messages, DB_PRUNE_DAYS)
     if deleted:
         safe_print(f"[INFO] Pruned {deleted} message(s) older than {DB_PRUNE_DAYS} days")
+
+    dropped = prune_rate_limit_stores()
+    if dropped:
+        safe_print(f"[INFO] Dropped {dropped} expired rate-limit entr(ies)")
 #----------------------------------------------
 
 #----Pending /clear Confirmations------
@@ -488,10 +511,17 @@ async def advance_playback(guild: discord.Guild) -> None:
             player.reset()
             return
 
+        # Another call may have started a track while this one waited for the lock
+        # (resolving a stream URL holds it for seconds). Starting a second one would
+        # raise "Already playing audio" and silently drop the track.
+        if vc.is_playing() or vc.is_paused():
+            return
+
         next_track = music.advance_queue(player.current, player.queue, player.loop_mode)
         if next_track is None:
             player.current = None
             safe_print("[INFO] Queue empty - starting idle timer")
+            player.cancel_idle()  # never stack timers; a stale one could disconnect later
             player.idle_task = asyncio.create_task(idle_disconnect(guild))
             return
 
@@ -569,6 +599,10 @@ async def execute_music_command(
                 "Install it, or set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe`."
             )
 
+        # Checked before joining, so Amy doesn't connect only to refuse the track
+        if len(player.queue) >= music.MAX_QUEUE_SIZE:
+            return f"🚫 The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."
+
         # Join the requester's channel if not already connected
         if voice.active_channel(vc) is None:
             state = member.voice if member else None
@@ -593,19 +627,18 @@ async def execute_music_command(
         elif not in_voice_with_amy() and not is_admin(msg):
             return "🚫 You need to be in my voice channel to queue tracks."
 
-        if len(player.queue) >= music.MAX_QUEUE_SIZE:
-            return f"🚫 The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."
-
         query = " ".join(parts[1:])
+        # Echoed back into a Discord message, so keep it well under the 2000-char limit
+        shown = query if len(query) <= 100 else query[:100] + "..."
 
         # Resolving hits the network and can take a few seconds, so acknowledge
         # immediately and edit this message once we know the result.
-        status_msg = await msg.reply(f"🔍 Searching for **{query}**...")
+        status_msg = await msg.reply(f"🔍 Searching for **{shown}**...")
         try:
             track = await music.resolve_metadata(query, requested_by=str(msg.author))
         except Exception as e:
-            safe_print(f"[ERROR] Could not resolve '{query}': {e}")
-            await status_msg.edit(content=f"🚫 I couldn't find anything for `{query}`.")
+            safe_print(f"[ERROR] Could not resolve '{query[:200]}': {e}")
+            await status_msg.edit(content=f"🚫 I couldn't find anything for `{shown}`.")
             return ""
 
         player.queue.append(track)

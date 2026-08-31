@@ -5,7 +5,7 @@ import asyncio
 import os
 import shutil
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional
 
@@ -34,6 +34,34 @@ QUEUE_PAGE_SIZE: int = 10
 DEFAULT_VOLUME: float = 1.0
 # At/above this, volume is effectively unchanged, so no PCM transform is needed
 OPUS_PASSTHROUGH_THRESHOLD: float = 0.99
+
+
+def get_music_dir() -> Optional[str]:
+    """The directory local playback is restricted to, or None if the feature is off."""
+    raw = os.getenv("MUSIC_DIR")
+    if not raw:
+        return None
+    path = os.path.realpath(raw)
+    return path if os.path.isdir(path) else None
+
+
+def resolve_local_path(query: str) -> Optional[str]:
+    """
+    Resolve `query` to a file inside MUSIC_DIR, or None if it isn't one.
+
+    Local playback is opt-in and sandboxed on purpose. Treating any /play argument as a
+    possible filesystem path would let any member of the server probe the host for files
+    (including .env) and have FFmpeg open them. realpath() collapses ".." and symlinks
+    before the containment check, so escaping the directory isn't possible, and an
+    absolute path outside it is rejected too.
+    """
+    base = get_music_dir()
+    if base is None:
+        return None
+    candidate = os.path.realpath(os.path.join(base, query))
+    if candidate != base and not candidate.startswith(base + os.sep):
+        return None
+    return candidate if os.path.isfile(candidate) else None
 
 
 def find_ffmpeg() -> Optional[str]:
@@ -125,7 +153,10 @@ def render_queue(
 
     if queue:
         lines.append("")
-        lines.append(f"**Up next ({len(queue)} track(s)):**")
+        total = total_duration(queue)
+        header = f"**Up next ({len(queue)} track(s)"
+        header += f", {format_duration(total)} total):**" if total is not None else "):**"
+        lines.append(header)
         for i, track in enumerate(list(queue)[:limit], start=1):
             lines.append(
                 f"`{i}.` {track.title} `[{format_duration(track.duration)}]` — {track.requested_by}"
@@ -188,10 +219,11 @@ async def resolve_metadata(query: str, requested_by: str) -> Track:
     Build a Track from a query, URL, or local file path.
     Only fetches title/duration - the stream URL is resolved later, at play time.
     """
-    if os.path.isfile(query):
+    local = resolve_local_path(query)
+    if local is not None:
         return Track(
-            title=os.path.basename(query),
-            query=query,
+            title=os.path.basename(local),
+            query=local,
             duration=None,
             requested_by=requested_by,
             is_local=True,
