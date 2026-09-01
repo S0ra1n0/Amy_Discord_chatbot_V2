@@ -20,7 +20,11 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/pause` / `/resume` - Pause or resume playback
 `/skip` - Skip the current track
 `/stop` - Stop, clear the queue, and leave
-`/queue` - Show what's playing and what's next
+`/queue [page]` - Show what's playing and what's queued
+  • Usage: `/queue 2` for the next page
+`/remove [position]` - Remove a track you queued
+`/skipto [position]` - Jump ahead to a queued track
+`/shuffle` - Shuffle the queued tracks
 `/nowplaying` - Show the current track (alias: `/np`)
 `/loop [off|track|queue]` - Set repeat mode"""
 
@@ -34,4 +38,5 @@ HELP_ADMIN = """
   • Usage: `/model qwen2.5:3b`
 `/create [name]` - Create a new voice channel and join it
   • Usage: `/create Music Room`
-`/volume [0-100]` - Show or set playback volume"""
+`/volume [0-100]` - Show or set playback volume
+`/clearqueue` - Empty the queue (current track keeps playing)"""

@@ -3,11 +3,13 @@
 
 import asyncio
 import os
+import random
 import shutil
+import urllib.parse
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Tuple
 
 import discord
 
@@ -27,7 +29,12 @@ FFMPEG_OPTIONS: str = "-vn"
 
 IDLE_DISCONNECT_DELAY: int = 300  # Leave 5 minutes after the queue runs dry
 MAX_QUEUE_SIZE: int = 100
+MAX_PLAYLIST_TRACKS: int = 50  # Cap one playlist so it can't monopolise the queue
 QUEUE_PAGE_SIZE: int = 10
+
+# Emoji used in queue listings, as escapes so the source stays ASCII-safe
+NOW_PLAYING_PREFIX: str = "🎵"  # musical note
+LOOP_PREFIX: str = "🔁"        # repeat arrows
 
 # Full volume by default so playback can take the cheap opus-passthrough path (see
 # build_source). Listeners can still adjust Amy per-user in Discord's own volume slider.
@@ -124,7 +131,10 @@ def parse_volume(raw: str) -> Optional[int]:
 
 
 def advance_queue(
-    current: Optional[Track], queue: Deque[Track], mode: LoopMode
+    current: Optional[Track],
+    queue: Deque[Track],
+    mode: LoopMode,
+    force_next: bool = False,
 ) -> Optional[Track]:
     """
     Pick the next track, applying the loop mode. Mutates `queue`.
@@ -132,41 +142,119 @@ def advance_queue(
     OFF   - drop the finished track, take the next one
     TRACK - replay the finished track
     QUEUE - send the finished track to the back, take the next one
+
+    `force_next` is set when the user explicitly asked to skip. Without it, TRACK loop
+    would replay the same song and /skip would appear to do nothing. QUEUE rotation is
+    still honoured on a skip, so a skipped track returns later in the cycle.
     """
-    if mode is LoopMode.TRACK and current is not None:
+    if mode is LoopMode.TRACK and current is not None and not force_next:
         return current
     if mode is LoopMode.QUEUE and current is not None:
         queue.append(current)
     return queue.popleft() if queue else None
 
 
+def total_pages(queue_len: int, page_size: int = QUEUE_PAGE_SIZE) -> int:
+    """How many pages a queue of this length spans. Always at least 1."""
+    if queue_len <= 0:
+        return 1
+    return (queue_len + page_size - 1) // page_size
+
+
+def clamp_page(page: int, queue_len: int, page_size: int = QUEUE_PAGE_SIZE) -> int:
+    """Clamp a requested page number into the valid range."""
+    if page < 1:
+        return 1
+    return min(page, total_pages(queue_len, page_size))
+
+
+def remove_at(queue: Deque[Track], index: int) -> Optional[Track]:
+    """
+    Remove the track at 1-based position `index` and return it.
+    Returns None if the position doesn't exist, so callers can report a clean error.
+    """
+    if index < 1 or index > len(queue):
+        return None
+    items = list(queue)
+    track = items.pop(index - 1)
+    queue.clear()
+    queue.extend(items)
+    return track
+
+
+def peek_at(queue: Deque[Track], index: int) -> Optional[Track]:
+    """Look at the track at 1-based position `index` without removing it."""
+    if index < 1 or index > len(queue):
+        return None
+    return list(queue)[index - 1]
+
+
+def shuffle_queue(queue: Deque[Track]) -> None:
+    """Randomise the pending queue in place. The currently playing track is untouched."""
+    items = list(queue)
+    random.shuffle(items)
+    queue.clear()
+    queue.extend(items)
+
+
+def drop_before(queue: Deque[Track], index: int) -> int:
+    """
+    Drop everything before 1-based position `index` (used by /skipto).
+    Returns how many tracks were discarded; 0 if the position is invalid.
+    """
+    if index < 1 or index > len(queue):
+        return 0
+    dropped = index - 1
+    for _ in range(dropped):
+        queue.popleft()
+    return dropped
+
+
 def render_queue(
-    current: Optional[Track], queue: Deque[Track], loop_mode: LoopMode, limit: int = QUEUE_PAGE_SIZE
+    current: Optional[Track],
+    queue: Deque[Track],
+    loop_mode: LoopMode,
+    page: int = 1,
+    page_size: int = QUEUE_PAGE_SIZE,
 ) -> str:
-    """Human-readable queue listing for /queue."""
+    """
+    Human-readable queue listing for /queue, one page at a time.
+
+    Positions shown are absolute (page 2 starts at 11) so the numbers line up with
+    what /remove and /skipto expect.
+    """
     lines: List[str] = []
     if current is not None:
-        lines.append(f"🎵 **Now playing:** {current.title} `[{format_duration(current.duration)}]`")
-        lines.append(f"   requested by {current.requested_by}")
+        lines.append(NOW_PLAYING_PREFIX + " **Now playing:** " + current.title
+                     + " `[" + format_duration(current.duration) + "]`")
+        lines.append("   requested by " + current.requested_by)
     else:
-        lines.append("🎵 **Nothing is playing.**")
+        lines.append(NOW_PLAYING_PREFIX + " **Nothing is playing.**")
 
     if queue:
+        pages = total_pages(len(queue), page_size)
+        page = clamp_page(page, len(queue), page_size)
+        start_i = (page - 1) * page_size
+
         lines.append("")
         total = total_duration(queue)
-        header = f"**Up next ({len(queue)} track(s)"
-        header += f", {format_duration(total)} total):**" if total is not None else "):**"
+        header = "**Up next (" + str(len(queue)) + " track(s)"
+        if total is not None:
+            header += ", " + format_duration(total) + " total"
+        header += ") — page " + str(page) + "/" + str(pages) + ":**"
         lines.append(header)
-        for i, track in enumerate(list(queue)[:limit], start=1):
-            lines.append(
-                f"`{i}.` {track.title} `[{format_duration(track.duration)}]` — {track.requested_by}"
-            )
-        if len(queue) > limit:
-            lines.append(f"...and {len(queue) - limit} more")
+
+        for offset, track in enumerate(list(queue)[start_i:start_i + page_size]):
+            position = start_i + offset + 1
+            lines.append("`" + str(position) + ".` " + track.title
+                         + " `[" + format_duration(track.duration) + "]` — "
+                         + track.requested_by)
+        if pages > 1:
+            lines.append("_Use `/queue <page>` to see more (1-" + str(pages) + ")._")
 
     if loop_mode is not LoopMode.OFF:
         lines.append("")
-        lines.append(f"🔁 Loop: **{loop_mode.value}**")
+        lines.append(LOOP_PREFIX + " Loop: **" + loop_mode.value + "**")
 
     return "\n".join(lines)
 
@@ -191,9 +279,57 @@ YTDL_OPTIONS: Any = {
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
-    "ignoreerrors": False,
+    "ignoreerrors": True,
     "skip_download": True,
 }
+
+
+# Playlist lookups run "flat": metadata only, no per-video resolution, so a 50-track
+# playlist costs one request instead of fifty. Stream URLs are still resolved lazily at
+# play time by resolve_stream_url, which is what keeps expiring links from piling up.
+YTDL_FLAT_OPTIONS: Any = dict(
+    YTDL_OPTIONS,
+    noplaylist=False,
+    extract_flat=True,
+    ignoreerrors=True,
+)
+
+
+def is_playlist_url(query: str) -> bool:
+    """
+    True only for a genuine playlist URL.
+
+    A share link like watch?v=VIDEO&list=PLAYLIST carries a list id but is a request for
+    that one video, so it deliberately returns False - otherwise pasting an ordinary
+    YouTube link could dump hundreds of tracks into the queue.
+    """
+    try:
+        parsed = urllib.parse.urlparse(query.strip())
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+
+    params = urllib.parse.parse_qs(parsed.query)
+    if "list" not in params:
+        return False
+    if "v" in params:
+        return False        # watch?v=VIDEO&list=... -> that one video
+    # youtu.be/VIDEO?list=... carries the video id in the path, not a "v" param
+    if parsed.netloc.lower().endswith("youtu.be") and parsed.path.strip("/"):
+        return False
+    return True
+
+
+def _ytdl_extract_flat(url: str) -> Dict[str, Any]:
+    """Blocking flat playlist lookup. Always called through an executor."""
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL(YTDL_FLAT_OPTIONS) as ydl:
+        raw = ydl.extract_info(url, download=False)
+    if raw is None:
+        raise ValueError("no result")
+    return dict(raw)
 
 
 def _ytdl_extract(query: str) -> Dict[str, Any]:
@@ -240,6 +376,42 @@ async def resolve_metadata(query: str, requested_by: str) -> Track:
     )
 
 
+async def resolve_playlist(
+    url: str, requested_by: str, limit: int = MAX_PLAYLIST_TRACKS
+) -> Tuple[str, List[Track], int]:
+    """
+    Resolve a playlist URL into Tracks.
+
+    Returns (playlist_title, tracks, skipped). `skipped` counts both entries yt-dlp
+    could not read (private, deleted, age-gated) and those cut by `limit`, so the caller
+    can tell the user exactly what did not load.
+    """
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, _ytdl_extract_flat, url)
+
+    raw_entries = info.get("entries") or []
+    usable = []
+    unavailable = 0
+    for entry in raw_entries:
+        if not entry:
+            unavailable += 1          # ignoreerrors turns failed entries into None
+            continue
+        page = entry.get("url") or entry.get("webpage_url") or entry.get("id")
+        title = entry.get("title")
+        if not page or not title:
+            unavailable += 1
+            continue
+        usable.append((title, page, entry.get("duration")))
+
+    over_limit = max(0, len(usable) - limit)
+    tracks = [
+        Track(title=title, query=page, duration=duration, requested_by=requested_by)
+        for title, page, duration in usable[:limit]
+    ]
+    playlist_title = info.get("title") or "playlist"
+    return playlist_title, tracks, unavailable + over_limit
+
+
 async def resolve_stream_url(track: Track) -> str:
     """Resolve the actual playable URL. Called immediately before playback."""
     if track.is_local:
@@ -264,6 +436,9 @@ class GuildPlayer:
         self.volume: float = DEFAULT_VOLUME
         self.idle_task: Optional[asyncio.Task] = None
         self.lock: asyncio.Lock = asyncio.Lock()
+        # Set by /skip and /skipto, consumed by the next advance so an explicit skip
+        # isn't swallowed by TRACK loop mode
+        self.skip_requested: bool = False
 
     def cancel_idle(self) -> None:
         if self.idle_task is not None and not self.idle_task.done():
@@ -275,6 +450,7 @@ class GuildPlayer:
         self.queue.clear()
         self.current = None
         self.loop_mode = LoopMode.OFF
+        self.skip_requested = False
 
 
 class MusicManager:

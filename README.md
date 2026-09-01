@@ -10,7 +10,8 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 
 - Conversational AI powered by Ollama with **real-time streaming responses**
 - **Voice channel support** — summon Amy into your voice channel, or have her create one
-- **Music playback** — queue tracks from YouTube (by search or URL), direct audio URLs, or local files, with pause/skip/loop/volume
+- **Music playback** — queue tracks from YouTube (search, URL, or whole playlists), direct audio URLs, or local files
+- **Queue management** — paginated listing, remove, shuffle, skip-to, and clear
 - Runtime model switching — swap the active Ollama model without restarting the bot
 - Long responses/replies automatically split across multiple Discord messages instead of being truncated
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
@@ -49,7 +50,11 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
 | `/skip`                  | Skip the current track                                                    | In-channel |
 | `/stop`                  | Stop, clear the queue, and disconnect                                     | In-channel or admin |
-| `/queue`                 | Show what's playing and what's queued                                     | Everyone   |
+| `/queue [page]`          | Show what's playing and what's queued, 10 per page                        | Everyone   |
+| `/remove [position]`     | Remove a queued track (your own; admins can remove any)                   | In-channel |
+| `/skipto [position]`     | Jump ahead to a queued track, dropping the ones before it                 | In-channel |
+| `/shuffle`               | Shuffle the queued tracks (current track keeps playing)                   | In-channel |
+| `/clearqueue`            | Empty the queue without stopping the current track                        | Admin only |
 | `/nowplaying` / `/np`    | Show the current track                                                    | Everyone   |
 | `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
@@ -77,21 +82,24 @@ Voice commands are limited to **3 per minute** per non-admin user, so they can't
 
 ### Music
 
-`/play` accepts three kinds of input:
+`/play` accepts four kinds of input:
 
 | Input | Example |
 | ----- | ------- |
 | Song name (searches YouTube) | `/play never gonna give you up` |
 | A URL (YouTube, SoundCloud, direct audio, radio stream) | `/play https://youtu.be/dQw4w9WgXcQ` |
+| A **playlist** URL (queues up to 50 tracks) | `/play https://youtube.com/playlist?list=...` |
 | A local file, if `MUSIC_DIR` is configured | `/play song.mp3` |
 
-If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tracks queue up to **100** deep, and `/queue` shows the first 10 with a count of the rest.
+If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tracks queue up to **100** deep, and `/queue` pages through them 10 at a time (`/queue 2`). Positions shown are absolute, so the numbers line up with what `/remove` and `/skipto` expect.
+
+**Playlists.** Pasting a playlist URL queues up to **50** tracks at once; Amy reports how many loaded and how many were skipped as unavailable or over the cap. Share links that name a single video (`watch?v=VIDEO&list=PLAYLIST` and `youtu.be/VIDEO?list=PLAYLIST`) queue **only that one video**, so an ordinary YouTube link can't dump hundreds of tracks into the queue. Unavailable entries (private, deleted, age-restricted) are skipped rather than failing the whole request.
 
 **Local files are off by default.** Set `MUSIC_DIR` in `.env` to a folder to enable them, and `/play` will only read files inside it — `..`, symlinks, and absolute paths pointing elsewhere are all rejected. Without this restriction, any server member could name any path on the host and confirm whether it exists.
 
 `/play` replies immediately with **🔍 Searching...**, then updates that same message as it resolves and starts playing, so you can see it's working during the few seconds YouTube lookup takes.
 
-**Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly).
+**Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly). An explicit `/skip` or `/skipto` always moves on, even under `track` loop — otherwise the song would repeat forever with no way out. Under `queue` loop a skipped track still rotates to the back.
 
 ### Volume and audio quality
 
@@ -382,7 +390,8 @@ Long queues are not a factor — stream URLs are resolved one track at a time, i
 - Stream URLs are resolved one track at a time, immediately before playing — YouTube links expire after a few hours, so resolving a long queue up front would leave later tracks pointing at dead links
 - At 100% volume audio is passed through as opus with no transcoding; below 100% it decodes to PCM so `PCMVolumeTransformer` can scale it, which costs more CPU
 - `/volume` below 100% takes effect from the next track, since a passthrough stream has no volume stage to adjust mid-song
-- Adjust `IDLE_DISCONNECT_DELAY`, `MAX_QUEUE_SIZE`, or `DEFAULT_VOLUME` in `music.py` to tune playback behaviour
+- Adjust `IDLE_DISCONNECT_DELAY`, `MAX_QUEUE_SIZE`, `MAX_PLAYLIST_TRACKS`, `QUEUE_PAGE_SIZE`, or `DEFAULT_VOLUME` in `music.py` to tune playback behaviour
+- Playlists are fetched with yt-dlp's `extract_flat`, so a 50-track playlist costs one request rather than fifty; each track's stream URL is still resolved individually just before it plays
 
 ---
 

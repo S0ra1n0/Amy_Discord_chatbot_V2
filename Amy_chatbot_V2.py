@@ -489,10 +489,24 @@ async def execute_voice_command(
     return f"Unknown voice command: `{command}`."
 #--------------------------------------
 
+#----Reply Emoji------
+# Written as escapes so the source stays ASCII-safe on Windows consoles
+SEARCH: str = "🔍"     # magnifying glass
+NOTE: str = "🎵"       # musical note
+PLUS: str = "➕"           # heavy plus
+DENY: str = "🚫"       # prohibited
+HOURGLASS: str = "⏳"      # hourglass
+SHUFFLE: str = "🔀"    # shuffle arrows
+TRASH: str = "🗑"      # wastebasket
+NEXT: str = "⏭"           # next track
+NEWLINE: str = "\n"
+#--------------------------------------
+
 #----Command Groups------
 VOICE_COMMANDS = ("join", "create", "leave")
 MUSIC_COMMANDS = (
     "play", "pause", "resume", "skip", "stop", "queue", "nowplaying", "np", "volume", "loop",
+    "remove", "shuffle", "clearqueue", "skipto",
 )
 # Harmless reads - exempt from the voice cooldown so checking the queue never costs a slot
 MUSIC_READONLY_COMMANDS = ("queue", "nowplaying", "np")
@@ -517,7 +531,12 @@ async def advance_playback(guild: discord.Guild) -> None:
         if vc.is_playing() or vc.is_paused():
             return
 
-        next_track = music.advance_queue(player.current, player.queue, player.loop_mode)
+        # A user-requested skip overrides TRACK loop for this one advance
+        force_next = player.skip_requested
+        player.skip_requested = False
+        next_track = music.advance_queue(
+            player.current, player.queue, player.loop_mode, force_next=force_next
+        )
         if next_track is None:
             player.current = None
             safe_print("[INFO] Queue empty - starting idle timer")
@@ -577,7 +596,13 @@ async def execute_music_command(
 
     # --- read-only commands, no connection required ---
     if command == "queue":
-        return music.render_queue(player.current, player.queue, player.loop_mode)
+        page = 1
+        if len(parts) > 1:
+            try:
+                page = int(parts[1])
+            except ValueError:
+                return DENY + " Page must be a number. Usage: `/queue` or `/queue 2`"
+        return music.render_queue(player.current, player.queue, player.loop_mode, page=page)
 
     if command in ("nowplaying", "np"):
         if player.current is None:
@@ -630,15 +655,55 @@ async def execute_music_command(
         query = " ".join(parts[1:])
         # Echoed back into a Discord message, so keep it well under the 2000-char limit
         shown = query if len(query) <= 100 else query[:100] + "..."
+        author = str(msg.author)
 
         # Resolving hits the network and can take a few seconds, so acknowledge
         # immediately and edit this message once we know the result.
-        status_msg = await msg.reply(f"🔍 Searching for **{shown}**...")
+        status_msg = await msg.reply(SEARCH + " Searching for **" + shown + "**...")
+
+        # --- playlist URL: queue many tracks at once ---
+        if music.is_playlist_url(query):
+            await status_msg.edit(content=SEARCH + " Loading playlist...")
+            try:
+                title, tracks, skipped = await music.resolve_playlist(query, author)
+            except Exception as e:
+                safe_print("[ERROR] Could not load playlist: " + str(e))
+                await status_msg.edit(content=DENY + " I couldn't load that playlist.")
+                return ""
+
+            if not tracks:
+                await status_msg.edit(content=DENY + " That playlist had no playable tracks.")
+                return ""
+
+            # Never exceed the overall queue cap, even if the playlist cap allowed more
+            room = music.MAX_QUEUE_SIZE - len(player.queue)
+            if len(tracks) > room:
+                skipped += len(tracks) - room
+                tracks = tracks[:room]
+
+            player.queue.extend(tracks)
+            player.cancel_idle()
+
+            summary = PLUS + " Queued **" + str(len(tracks)) + "** track(s) from **" + title + "**"
+            if skipped:
+                summary += " (" + str(skipped) + " skipped, unavailable or over the limit)"
+
+            if vc is not None and (vc.is_playing() or vc.is_paused()):
+                await status_msg.edit(content=summary)
+                return ""
+
+            await status_msg.edit(content=summary + NEWLINE + "Starting playback...")
+            await advance_playback(guild)
+            now = player.current.title if player.current else tracks[0].title
+            await status_msg.edit(content=summary + NEWLINE + NOTE + " Now playing **" + now + "**")
+            return ""
+
+        # --- single track ---
         try:
-            track = await music.resolve_metadata(query, requested_by=str(msg.author))
+            track = await music.resolve_metadata(query, requested_by=author)
         except Exception as e:
-            safe_print(f"[ERROR] Could not resolve '{query[:200]}': {e}")
-            await status_msg.edit(content=f"🚫 I couldn't find anything for `{shown}`.")
+            safe_print("[ERROR] Could not resolve query: " + str(e))
+            await status_msg.edit(content=DENY + " I couldn't find anything for `" + shown + "`.")
             return ""
 
         player.queue.append(track)
@@ -647,16 +712,14 @@ async def execute_music_command(
 
         if vc is not None and (vc.is_playing() or vc.is_paused()):
             await status_msg.edit(
-                content=(
-                    f"➕ Queued **{track.title}** `[{duration}]` "
-                    f"— position {len(player.queue)}"
-                )
+                content=PLUS + " Queued **" + track.title + "** `[" + duration + "]` at position "
+                        + str(len(player.queue))
             )
             return ""
 
-        await status_msg.edit(content=f"⏳ Loading **{track.title}**...")
+        await status_msg.edit(content=HOURGLASS + " Loading **" + track.title + "**...")
         await advance_playback(guild)
-        await status_msg.edit(content=f"🎵 Playing **{track.title}** `[{duration}]`")
+        await status_msg.edit(content=NOTE + " Playing **" + track.title + "** `[" + duration + "]`")
         return ""
 
     # --- everything below needs an active connection ---
@@ -685,6 +748,7 @@ async def execute_music_command(
         if not (vc.is_playing() or vc.is_paused()):
             return "🚫 Nothing is playing."
         skipped = player.current.title if player.current else "the current track"
+        player.skip_requested = True
         vc.stop()  # triggers the after-callback, which advances the queue
         return f"⏭️ Skipped **{skipped}**."
 
@@ -735,6 +799,67 @@ async def execute_music_command(
         except ValueError:
             return "🚫 Loop mode must be `off`, `track`, or `queue`."
         return f"🔁 Loop set to **{player.loop_mode.value}**."
+
+    if command == "remove":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return DENY + " You need to be in my voice channel to do that."
+        if len(parts) < 2:
+            return DENY + " Which one? Usage: `/remove <position>` (see `/queue`)"
+        try:
+            index = int(parts[1])
+        except ValueError:
+            return DENY + " Position must be a number. Usage: `/remove <position>`"
+
+        target = music.peek_at(player.queue, index)
+        if target is None:
+            return DENY + " There's no track at position " + str(index) + "."
+        # Users may only remove what they queued; admins may remove anything
+        if target.requested_by != str(msg.author) and not is_admin(msg):
+            return (DENY + " That track was queued by " + target.requested_by
+                    + ". You can only remove your own.")
+
+        music.remove_at(player.queue, index)  # `target` above already proved it exists
+        return TRASH + " Removed **" + target.title + "** from the queue."
+
+    if command == "shuffle":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return DENY + " You need to be in my voice channel to do that."
+        if len(player.queue) < 2:
+            return DENY + " Not enough tracks queued to shuffle."
+        music.shuffle_queue(player.queue)
+        return SHUFFLE + " Shuffled **" + str(len(player.queue)) + "** queued track(s)."
+
+    if command == "clearqueue":
+        if not is_admin(msg):
+            return DENY + " You don't have permission to use this command. (Admin only)"
+        count = len(player.queue)
+        if count == 0:
+            return DENY + " The queue is already empty."
+        player.queue.clear()
+        return TRASH + " Cleared **" + str(count) + "** queued track(s). Current track keeps playing."
+
+    if command == "skipto":
+        if not in_voice_with_amy() and not is_admin(msg):
+            return DENY + " You need to be in my voice channel to do that."
+        if len(parts) < 2:
+            return DENY + " Skip to where? Usage: `/skipto <position>` (see `/queue`)"
+        try:
+            index = int(parts[1])
+        except ValueError:
+            return DENY + " Position must be a number. Usage: `/skipto <position>`"
+
+        target = music.peek_at(player.queue, index)
+        if target is None:
+            return DENY + " There's no track at position " + str(index) + "."
+
+        dropped = music.drop_before(player.queue, index)
+        player.skip_requested = True
+        # stop() fires the after-callback, which pulls the next track off the queue
+        vc.stop()
+        reply = NEXT + " Skipping to **" + target.title + "**"
+        if dropped:
+            reply += " (" + str(dropped) + " track(s) skipped)"
+        return reply + "."
 
     return f"Unknown music command: `{command}`."
 #--------------------------------------
