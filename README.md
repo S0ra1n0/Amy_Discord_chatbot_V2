@@ -12,6 +12,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - **Voice channel support** — summon Amy into your voice channel, or have her create one
 - **Music playback** — queue tracks from YouTube (search, URL, or whole playlists), direct audio URLs, or local files
 - **Queue management** — paginated listing, remove, shuffle, skip-to, and clear
+- **`/search` picker** — choose from the top 5 matches instead of accepting the first hit
 - **Rich embeds and player buttons** — now-playing card with thumbnail, plus Pause/Skip/Stop buttons that survive a bot restart
 - Runtime model switching — swap the active Ollama model without restarting the bot
 - Long responses/replies automatically split across multiple Discord messages instead of being truncated
@@ -48,6 +49,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/leave`                 | Make Amy leave her voice channel                                          | In-channel or admin |
 | `/create [name]`         | Create a new voice channel and have Amy join it (e.g., `/create Music Room`) | Admin only |
 | `/play [query]`          | Queue a track — song name, YouTube/audio URL, or local file path          | In-channel |
+| `/search [song]`         | Show the top 5 matches and pick one from a menu                           | In-channel |
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
 | `/skip`                  | Skip the current track                                                    | In-channel |
 | `/stop`                  | Stop, clear the queue, and disconnect                                     | In-channel or admin |
@@ -101,6 +103,16 @@ If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tra
 `/play` replies immediately with **🔍 Searching...**, then updates that same message as it resolves and starts playing, so you can see it's working during the few seconds YouTube lookup takes.
 
 **Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly). An explicit `/skip` or `/skipto` always moves on, even under `track` loop — otherwise the song would repeat forever with no way out. Under `queue` loop a skipped track still rotates to the back.
+
+### Searching
+
+`/play` takes whichever result YouTube ranks first, which is not always the one you meant.
+`/search <song>` instead lists the **top 5** matches and gives you a dropdown to pick from.
+
+Only the person who ran the search can choose from their own results, and the menu expires
+after **60 seconds** — it then greys out rather than acting on a stale search. Picking a
+track behaves exactly like `/play`: Amy joins your channel if she isn't already, and either
+starts playing or adds it to the queue.
 
 ### Player controls
 

@@ -130,6 +130,25 @@ def queue_embed(
     return embed
 
 
+MAX_SELECT_LABEL: int = 100     # Discord's limit on a select option label
+
+
+def search_results_embed(query: str, tracks) -> discord.Embed:
+    """Numbered list of search hits, matching the order of the select menu below it."""
+    lines = []
+    for i, track in enumerate(tracks, start=1):
+        lines.append(
+            f"`{i}.` {track.title} `[{music.format_duration(track.duration)}]`"
+        )
+    embed = discord.Embed(
+        description=_clip(chr(10).join(lines), MAX_EMBED_DESC),
+        colour=COLOUR_INFO,
+    )
+    embed.set_author(name=f"Results for: {_clip(query, 200)}")
+    embed.set_footer(text="Pick one from the menu below")
+    return embed
+
+
 def voice_embed(description: str, colour: int = COLOUR_OK, heading: str = "Voice") -> discord.Embed:
     """Generic card for join/leave/create replies."""
     embed = discord.Embed(description=_clip(description, MAX_EMBED_DESC), colour=colour)

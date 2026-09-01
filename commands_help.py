@@ -17,6 +17,8 @@ HELP_EVERYONE = """**Commands — Everyone:**
 **Music:**
 `/play [song, URL, or file]` - Queue a track (I'll join your channel)
   • Usage: `/play never gonna give you up`
+`/search [song]` - Show the top 5 matches and pick one
+  • Usage: `/search never gonna give you up`
 `/pause` / `/resume` - Pause or resume playback
 `/skip` - Skip the current track
 `/stop` - Stop, clear the queue, and leave

@@ -521,7 +521,7 @@ NEWLINE: str = "\n"
 VOICE_COMMANDS = ("join", "create", "leave")
 MUSIC_COMMANDS = (
     "play", "pause", "resume", "skip", "stop", "queue", "nowplaying", "np", "volume", "loop",
-    "remove", "shuffle", "clearqueue", "skipto",
+    "remove", "shuffle", "clearqueue", "skipto", "search",
 )
 # Harmless reads - exempt from the voice cooldown so checking the queue never costs a slot
 MUSIC_READONLY_COMMANDS = ("queue", "nowplaying", "np")
@@ -644,6 +644,104 @@ class PlayerControls(discord.ui.View):
 
         async with voice_manager.lock_for(guild.id):
             await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+
+
+class SearchResults(discord.ui.View):
+    """
+    Dropdown of /search hits.
+
+    Unlike PlayerControls this holds per-message state (the specific results), so it
+    cannot be a persistent view. It expires after SEARCH_TIMEOUT and disables itself,
+    which is fine: a stale search is not worth acting on.
+    """
+
+    SEARCH_TIMEOUT: float = 60.0
+
+    def __init__(self, tracks, requester_id: int, guild: discord.Guild) -> None:
+        super().__init__(timeout=self.SEARCH_TIMEOUT)
+        self.tracks = tracks
+        self.requester_id = requester_id
+        self.guild = guild
+        self.message: Optional[discord.Message] = None
+
+        options = []
+        for i, track in enumerate(tracks):
+            options.append(discord.SelectOption(
+                label=ui._clip(track.title, ui.MAX_SELECT_LABEL),
+                description=music.format_duration(track.duration),
+                value=str(i),
+            ))
+        self.picker.options = options
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only whoever ran /search may choose from their own results
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            embed=ui.error_embed("Only the person who searched can pick from this list."),
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        self.picker.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.select(placeholder="Choose a track...", min_values=1, max_values=1)
+    async def picker(self, interaction: discord.Interaction,
+                     select: discord.ui.Select) -> None:
+        track = self.tracks[int(select.values[0])]
+        guild = self.guild
+        player = music_manager.player_for(guild.id)
+
+        if len(player.queue) >= music.MAX_QUEUE_SIZE:
+            await interaction.response.edit_message(
+                embed=ui.error_embed(f"The queue is full ({music.MAX_QUEUE_SIZE} tracks)."),
+                view=None)
+            return
+
+        # The searcher must be in a voice channel, exactly as /play requires
+        member = guild.get_member(interaction.user.id)
+        state = member.voice if member else None
+        if voice.active_channel(voice.get_voice_client(guild)) is None:
+            if state is None or state.channel is None:
+                await interaction.response.edit_message(
+                    embed=ui.error_embed("You're not in a voice channel."), view=None)
+                return
+            perms = state.channel.permissions_for(guild.me)
+            if not perms.connect or not perms.speak:
+                await interaction.response.edit_message(
+                    embed=ui.error_embed(
+                        f"I need Connect and Speak permissions in **{state.channel.name}**."),
+                    view=None)
+                return
+            try:
+                async with voice_manager.lock_for(guild.id):
+                    await voice.connect_to(state.channel)
+            except Exception as e:
+                safe_print(f"[ERROR] Voice connect failed during search pick: {e}")
+                await interaction.response.edit_message(
+                    embed=ui.error_embed("I couldn't join your voice channel."), view=None)
+                return
+
+        player.text_channel_id = interaction.channel_id
+        player.queue.append(track)
+        player.cancel_idle()
+        self.stop()
+
+        vc = voice.get_voice_client(guild)
+        if vc is not None and (vc.is_playing() or vc.is_paused()):
+            await interaction.response.edit_message(
+                embed=ui.queued_embed(track, len(player.queue)), view=None)
+            return
+
+        await interaction.response.edit_message(
+            embed=ui.info_embed(f"Loading **{track.title}**..."), view=None)
+        await advance_playback(guild)   # posts the now-playing card
 
 
 async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
@@ -789,6 +887,36 @@ async def execute_music_command(
                                        player.loop_mode, player.volume, paused=paused),
             view=PlayerControls(paused=paused),
         )
+
+    if command == "search":
+        if len(parts) < 2:
+            return Reply(embed=ui.error_embed(
+                "What should I search for? Usage: `/search <song name>`"))
+        if music.find_ffmpeg() is None:
+            return Reply(embed=ui.error_embed(
+                "FFmpeg isn't available on my host, so I can't play audio."))
+
+        query = " ".join(parts[1:])
+        shown = query if len(query) <= 100 else query[:100] + "..."
+        status_msg = await msg.reply(SEARCH + " Searching for **" + shown + "**...")
+        try:
+            results = await music.search_tracks(query, requested_by=str(msg.author))
+        except Exception as e:
+            safe_print("[ERROR] Search failed: " + str(e))
+            await status_msg.edit(content=None,
+                                  embed=ui.error_embed("That search went wrong. Try again."))
+            return ""
+
+        if not results:
+            await status_msg.edit(content=None, embed=ui.error_embed(
+                "Nothing found for `" + shown + "`."))
+            return ""
+
+        view = SearchResults(results, msg.author.id, guild)
+        await status_msg.edit(content=None,
+                              embed=ui.search_results_embed(query, results), view=view)
+        view.message = status_msg   # so on_timeout can grey out the menu
+        return ""
 
     # --- /play: joins if needed, then queues ---
     if command == "play":

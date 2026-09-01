@@ -30,6 +30,7 @@ FFMPEG_OPTIONS: str = "-vn"
 IDLE_DISCONNECT_DELAY: int = 300  # Leave 5 minutes after the queue runs dry
 MAX_QUEUE_SIZE: int = 100
 MAX_PLAYLIST_TRACKS: int = 50  # Cap one playlist so it can't monopolise the queue
+SEARCH_RESULTS: int = 5        # Options offered by /search (Discord allows 25 max)
 QUEUE_PAGE_SIZE: int = 10
 
 # Emoji used in queue listings, as escapes so the source stays ASCII-safe
@@ -413,6 +414,36 @@ async def resolve_playlist(
     ]
     playlist_title = info.get("title") or "playlist"
     return playlist_title, tracks, unavailable + over_limit
+
+
+async def search_tracks(
+    query: str, requested_by: str, limit: int = SEARCH_RESULTS
+) -> List[Track]:
+    """
+    Return the top `limit` search hits so the user can choose, rather than /play silently
+    taking the first one. Uses the flat extractor, so all results cost a single request.
+    """
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(
+        None, _ytdl_extract_flat, f"ytsearch{int(limit)}:{query}"
+    )
+
+    tracks: List[Track] = []
+    for entry in (info.get("entries") or []):
+        if not entry:
+            continue                      # ignoreerrors turns a failed hit into None
+        page = entry.get("url") or entry.get("webpage_url") or entry.get("id")
+        title = entry.get("title")
+        if not page or not title:
+            continue
+        tracks.append(Track(
+            title=title,
+            query=page,
+            duration=entry.get("duration"),
+            requested_by=requested_by,
+            thumbnail=entry.get("thumbnail"),
+        ))
+    return tracks
 
 
 async def resolve_stream_url(track: Track) -> str:
