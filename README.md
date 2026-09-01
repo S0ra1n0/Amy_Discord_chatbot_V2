@@ -304,6 +304,7 @@ Amy_chatbot_V2/
 ├── database.py             # SQLite conversation memory layer
 ├── voice.py                # Voice channel connection management
 ├── music.py                # Track resolution, queues, and playback engine
+├── ui.py                   # Embed builders and the reply wrapper
 ├── commands_help.py        # Help command text
 ├── requirements.txt        # Pinned Python dependencies
 ├── amy_memory.db           # SQLite conversation store, auto-created (Git ignored)

@@ -390,14 +390,14 @@ async def execute_voice_command(
         member = guild.get_member(msg.author.id)
         state = member.voice if member else None
         if state is None or state.channel is None:
-            return "🚫 You're not in a voice channel. Join one first, then use `/join`."
+            return Reply(embed=ui.error_embed("You're not in a voice channel. Join one first, then use `/join`."))
 
         target = state.channel
         perms = target.permissions_for(guild.me)
         if not perms.connect:
-            return f"🚫 I don't have permission to connect to **{target.name}**."
+            return Reply(embed=ui.error_embed(f"I don't have permission to connect to **{target.name}**."))
         if not perms.speak:
-            return f"🚫 I can join **{target.name}**, but I'm not allowed to speak there."
+            return Reply(embed=ui.error_embed(f"I can join **{target.name}**, but I'm not allowed to speak there."))
 
         async with voice_manager.lock_for(guild.id):
             vc = voice.get_voice_client(guild)
@@ -408,13 +408,13 @@ async def execute_voice_command(
             action = voice.decide_join_action(current_id, has_humans, target.id, is_admin(msg))
 
             if action is voice.JoinAction.ALREADY_THERE:
-                return f"✅ I'm already in **{target.name}**."
+                return Reply(embed=ui.info_embed(f"I'm already in **{target.name}**."))
             if action is voice.JoinAction.BLOCKED_OCCUPIED:
                 where = current.name if current else "another channel"
-                return (
-                    f"🚫 I'm currently in **{where}** with other people. "
+                return Reply(embed=ui.error_embed(
+                    f"I'm currently in **{where}** with other people. "
                     "Join that channel, or ask an admin to move me."
-                )
+                ))
             try:
                 if action is voice.JoinAction.MOVE and vc is not None:
                     await vc.move_to(target)
@@ -425,19 +425,19 @@ async def execute_voice_command(
                 # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
                 # Report what it actually said rather than guessing which one.
                 safe_print(f"[ERROR] Voice connect failed: {e}")
-                return (
-                    f"🚫 Voice support isn't fully installed on my host: {e}\n"
+                return Reply(embed=ui.error_embed(
+                    f"Voice support isn't fully installed on my host: {e}\n"
                     "Fix: `pip install \"discord.py[voice]\"`"
-                )
+                ))
             except (discord.ClientException, asyncio.TimeoutError) as e:
                 safe_print(f"[ERROR] Voice connect failed: {e}")
-                return f"🚫 I couldn't connect to **{target.name}**. Please try again."
+                return Reply(embed=ui.error_embed(f"I couldn't connect to **{target.name}**. Please try again."))
 
     if command == "create":
         if not is_admin(msg):
-            return "🚫 You don't have permission to use this command. (Admin only)"
+            return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
         if not guild.me.guild_permissions.manage_channels:
-            return "🚫 I need the **Manage Channels** permission to create a voice channel."
+            return Reply(embed=ui.error_embed("I need the **Manage Channels** permission to create a voice channel."))
 
         # Only guild text channels have a category to inherit
         category = msg.channel.category if isinstance(msg.channel, discord.TextChannel) else None
@@ -451,10 +451,10 @@ async def execute_voice_command(
                     reason=f"/create requested by {msg.author}",
                 )
             except discord.Forbidden:
-                return "🚫 Discord refused that. Check my **Manage Channels** permission."
+                return Reply(embed=ui.error_embed("Discord refused that. Check my **Manage Channels** permission."))
             except discord.HTTPException as e:
                 safe_print(f"[ERROR] Channel creation failed: {e}")
-                return "🚫 I couldn't create that channel. Please try again."
+                return Reply(embed=ui.error_embed("I couldn't create that channel. Please try again."))
 
             try:
                 vc = voice.get_voice_client(guild)
@@ -471,11 +471,11 @@ async def execute_voice_command(
                     pass
                 if isinstance(e, RuntimeError):
                     # Missing voice dependency - say which, so it's actionable
-                    return (
-                        f"🚫 I created the channel but voice support isn't fully installed: {e}\n"
+                    return Reply(embed=ui.error_embed(
+                        f"I created the channel but voice support isn't fully installed: {e}\n"
                         "Fix: `pip install \"discord.py[voice]\"` (channel removed again)"
-                    )
-                return "🚫 I created the channel but couldn't join it, so I removed it again."
+                    ))
+                return Reply(embed=ui.error_embed("I created the channel but couldn't join it, so I removed it again."))
 
             voice_manager.mark_created(channel.id, guild.id)
             return Reply(embed=ui.voice_embed(
@@ -485,7 +485,7 @@ async def execute_voice_command(
         vc = voice.get_voice_client(guild)
         current = voice.active_channel(vc)
         if current is None:
-            return "🚫 I'm not in a voice channel."
+            return Reply(embed=ui.error_embed("I'm not in a voice channel."))
 
         member = guild.get_member(msg.author.id)
         in_same_channel = bool(
@@ -493,7 +493,7 @@ async def execute_voice_command(
             and member.voice.channel.id == current.id
         )
         if not (is_admin(msg) or in_same_channel):
-            return "🚫 You need to be in my voice channel (or an admin) to make me leave."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
 
         async with voice_manager.lock_for(guild.id):
             left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
@@ -507,14 +507,9 @@ async def execute_voice_command(
 #----Reply Emoji------
 # Written as escapes so the source stays ASCII-safe on Windows consoles
 SEARCH: str = "🔍"     # magnifying glass
-NOTE: str = "🎵"       # musical note
-PLUS: str = "➕"           # heavy plus
 DENY: str = "🚫"       # prohibited
 HOURGLASS: str = "⏳"      # hourglass
-SHUFFLE: str = "🔀"    # shuffle arrows
-TRASH: str = "🗑"      # wastebasket
 NEXT: str = "⏭"           # next track
-NEWLINE: str = "\n"
 #--------------------------------------
 
 #----Command Groups------
@@ -874,7 +869,7 @@ async def execute_music_command(
             try:
                 page = int(parts[1])
             except ValueError:
-                return DENY + " Page must be a number. Usage: `/queue` or `/queue 2`"
+                return Reply(embed=ui.error_embed("Page must be a number. Usage: `/queue` or `/queue 2`"))
         return Reply(embed=ui.queue_embed(player.current, player.queue,
                                           player.loop_mode, page=page))
 
@@ -921,41 +916,41 @@ async def execute_music_command(
     # --- /play: joins if needed, then queues ---
     if command == "play":
         if len(parts) < 2:
-            return "🚫 What should I play? Usage: `/play <song name, URL, or file path>`"
+            return Reply(embed=ui.error_embed("What should I play? Usage: `/play <song name, URL, or file path>`"))
 
         if music.find_ffmpeg() is None:
-            return (
-                "🚫 FFmpeg isn't available on my host, so I can't play audio.\n"
+            return Reply(embed=ui.error_embed(
+                "FFmpeg isn't available on my host, so I can't play audio.\n"
                 "Install it, or set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe`."
-            )
+            ))
 
         # Checked before joining, so Amy doesn't connect only to refuse the track
         if len(player.queue) >= music.MAX_QUEUE_SIZE:
-            return f"🚫 The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."
+            return Reply(embed=ui.error_embed(f"The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."))
 
         # Join the requester's channel if not already connected
         if voice.active_channel(vc) is None:
             state = member.voice if member else None
             if state is None or state.channel is None:
-                return "🚫 You're not in a voice channel. Join one first, then use `/play`."
+                return Reply(embed=ui.error_embed("You're not in a voice channel. Join one first, then use `/play`."))
             perms = state.channel.permissions_for(guild.me)
             if not perms.connect or not perms.speak:
-                return f"🚫 I need Connect and Speak permissions in **{state.channel.name}**."
+                return Reply(embed=ui.error_embed(f"I need Connect and Speak permissions in **{state.channel.name}**."))
             try:
                 async with voice_manager.lock_for(guild.id):
                     await voice.connect_to(state.channel)
                 vc = voice.get_voice_client(guild)
             except RuntimeError as e:
                 safe_print(f"[ERROR] Voice connect failed: {e}")
-                return (
-                    f"🚫 Voice support isn't fully installed on my host: {e}\n"
+                return Reply(embed=ui.error_embed(
+                    f"Voice support isn't fully installed on my host: {e}\n"
                     "Fix: `pip install \"discord.py[voice]\"`"
-                )
+                ))
             except Exception as e:
                 safe_print(f"[ERROR] Voice connect failed: {e}")
-                return "🚫 I couldn't join your voice channel. Please try again."
+                return Reply(embed=ui.error_embed("I couldn't join your voice channel. Please try again."))
         elif not in_voice_with_amy() and not is_admin(msg):
-            return "🚫 You need to be in my voice channel to queue tracks."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to queue tracks."))
 
         # advance_playback has no message context, so remember where to post the card
         player.text_channel_id = msg.channel.id
@@ -1025,20 +1020,20 @@ async def execute_music_command(
 
     # --- everything below needs an active connection ---
     if vc is None or not vc.is_connected():
-        return "🚫 I'm not in a voice channel."
+        return Reply(embed=ui.error_embed("I'm not in a voice channel."))
 
     if command == "pause":
         if not in_voice_with_amy() and not is_admin(msg):
-            return "🚫 You need to be in my voice channel to do that."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if not vc.is_playing():
-            return "🚫 Nothing is playing."
+            return Reply(embed=ui.error_embed("Nothing is playing."))
         vc.pause()
         await refresh_now_playing(guild, paused=True)
         return Reply(embed=ui.info_embed("Paused."))
 
     if command == "resume":
         if not in_voice_with_amy() and not is_admin(msg):
-            return "🚫 You need to be in my voice channel to do that."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if not vc.is_paused():
             return Reply(embed=ui.error_embed("Nothing is paused."))
         vc.resume()
@@ -1047,9 +1042,9 @@ async def execute_music_command(
 
     if command == "skip":
         if not in_voice_with_amy() and not is_admin(msg):
-            return "🚫 You need to be in my voice channel to skip."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to skip."))
         if not (vc.is_playing() or vc.is_paused()):
-            return "🚫 Nothing is playing."
+            return Reply(embed=ui.error_embed("Nothing is playing."))
         skipped = player.current.title if player.current else "the current track"
         player.skip_requested = True
         vc.stop()  # triggers the after-callback, which advances the queue
@@ -1057,7 +1052,7 @@ async def execute_music_command(
 
     if command == "stop":
         if not in_voice_with_amy() and not is_admin(msg):
-            return "🚫 You need to be in my voice channel (or be an admin) to stop playback."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel (or be an admin) to stop playback."))
         player.queue.clear()
         player.loop_mode = LoopMode.OFF
         player.current = None
@@ -1069,7 +1064,7 @@ async def execute_music_command(
 
     if command == "volume":
         if not is_admin(msg):
-            return "🚫 You don't have permission to use this command. (Admin only)"
+            return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
         if len(parts) < 2:
             return Reply(embed=ui.info_embed(
                 f"Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`"))
@@ -1085,39 +1080,39 @@ async def execute_music_command(
 
         if parsed >= 100:
             return Reply(embed=ui.info_embed("Volume set to **100%** (full quality, lowest CPU)."))
-        return (
-            f"🔊 Volume set to **{parsed}%** — applies from the next track.\n"
+        return Reply(embed=ui.info_embed(
+            f"Volume set to **{parsed}%** — applies from the next track.\n"
             "_Note: below 100% Amy has to decode audio rather than pass it through, "
             "which costs more CPU and can stutter on a busy machine._"
-        )
+        ))
 
     if command == "loop":
         if not in_voice_with_amy() and not is_admin(msg):
-            return "🚫 You need to be in my voice channel to do that."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(parts) < 2:
-            return (
-                f"🔁 Loop is **{player.loop_mode.value}**.\n"
+            return Reply(embed=ui.info_embed(
+                f"Loop is **{player.loop_mode.value}**.\n"
                 "Usage: `/loop off`, `/loop track`, or `/loop queue`"
-            )
+            ))
         try:
             player.loop_mode = LoopMode(parts[1].lower())
         except ValueError:
-            return "🚫 Loop mode must be `off`, `track`, or `queue`."
+            return Reply(embed=ui.error_embed("Loop mode must be `off`, `track`, or `queue`."))
         return Reply(embed=ui.info_embed(f"Loop set to **{player.loop_mode.value}**."))
 
     if command == "remove":
         if not in_voice_with_amy() and not is_admin(msg):
-            return DENY + " You need to be in my voice channel to do that."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(parts) < 2:
-            return DENY + " Which one? Usage: `/remove <position>` (see `/queue`)"
+            return Reply(embed=ui.error_embed("Which one? Usage: `/remove <position>` (see `/queue`)"))
         try:
             index = int(parts[1])
         except ValueError:
-            return DENY + " Position must be a number. Usage: `/remove <position>`"
+            return Reply(embed=ui.error_embed("Position must be a number. Usage: `/remove <position>`"))
 
         target = music.peek_at(player.queue, index)
         if target is None:
-            return DENY + " There's no track at position " + str(index) + "."
+            return Reply(embed=ui.error_embed("There's no track at position " + str(index) + "."))
         # Users may only remove what they queued; admins may remove anything
         if target.requested_by != str(msg.author) and not is_admin(msg):
             return (DENY + " That track was queued by " + target.requested_by
@@ -1128,35 +1123,35 @@ async def execute_music_command(
 
     if command == "shuffle":
         if not in_voice_with_amy() and not is_admin(msg):
-            return DENY + " You need to be in my voice channel to do that."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(player.queue) < 2:
-            return DENY + " Not enough tracks queued to shuffle."
+            return Reply(embed=ui.error_embed("Not enough tracks queued to shuffle."))
         music.shuffle_queue(player.queue)
         return Reply(embed=ui.info_embed("Shuffled **" + str(len(player.queue)) + "** queued track(s)."))
 
     if command == "clearqueue":
         if not is_admin(msg):
-            return DENY + " You don't have permission to use this command. (Admin only)"
+            return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
         count = len(player.queue)
         if count == 0:
-            return DENY + " The queue is already empty."
+            return Reply(embed=ui.error_embed("The queue is already empty."))
         player.queue.clear()
         return Reply(embed=ui.info_embed(
             "Cleared **" + str(count) + "** queued track(s). Current track keeps playing."))
 
     if command == "skipto":
         if not in_voice_with_amy() and not is_admin(msg):
-            return DENY + " You need to be in my voice channel to do that."
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(parts) < 2:
-            return DENY + " Skip to where? Usage: `/skipto <position>` (see `/queue`)"
+            return Reply(embed=ui.error_embed("Skip to where? Usage: `/skipto <position>` (see `/queue`)"))
         try:
             index = int(parts[1])
         except ValueError:
-            return DENY + " Position must be a number. Usage: `/skipto <position>`"
+            return Reply(embed=ui.error_embed("Position must be a number. Usage: `/skipto <position>`"))
 
         target = music.peek_at(player.queue, index)
         if target is None:
-            return DENY + " There's no track at position " + str(index) + "."
+            return Reply(embed=ui.error_embed("There's no track at position " + str(index) + "."))
 
         dropped = music.drop_before(player.queue, index)
         player.skip_requested = True
