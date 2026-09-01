@@ -9,7 +9,7 @@ import random
 import httpx
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 import ollama
@@ -22,6 +22,8 @@ import voice
 from voice import VoiceManager
 import music
 from music import LoopMode, MusicManager
+import ui
+from ui import Reply
 #----------------------------------
 
 #----Utility Functions------
@@ -158,19 +160,29 @@ bot_enabled: bool = True
 #----------------------------------------------
 
 #----Admin Helper------
-def is_admin(msg: discord.Message) -> bool:
-    """Returns True if the author is the server owner, has Administrator permission, or has the admin role."""
-    if msg.guild is None:
+def is_admin_member(guild: Optional[discord.Guild], user_id: int) -> bool:
+    """
+    True if the user owns the guild, has Administrator, or holds the admin role.
+
+    Takes ids rather than a Message so both text commands and button interactions can
+    share one definition of "admin".
+    """
+    if guild is None:
         return False
-    if msg.guild.owner_id == msg.author.id:
+    if guild.owner_id == user_id:
         return True
-    # Resolve to Member to access roles/permissions (msg.author may be a bare User when not cached)
-    member = msg.guild.get_member(msg.author.id)
+    # Resolve to Member for roles/permissions (the cache may not hold every user)
+    member = guild.get_member(user_id)
     if member is None:
         return False
     if member.guild_permissions.administrator:
         return True
     return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
+
+
+def is_admin(msg: discord.Message) -> bool:
+    """Admin check for a text command."""
+    return is_admin_member(msg.guild, msg.author.id)
 #----------------------------------------------
 
 #----Rate Limiting------
@@ -367,7 +379,7 @@ async def execute_voice_command(
     parts: List[str],
     msg: discord.Message,
     guild: discord.Guild,
-) -> str:
+) -> Union[str, Reply]:
     """
     Handle /join, /create and /leave.
 
@@ -406,9 +418,9 @@ async def execute_voice_command(
             try:
                 if action is voice.JoinAction.MOVE and vc is not None:
                     await vc.move_to(target)
-                    return f"🔀 Moved to **{target.name}**."
+                    return Reply(embed=ui.voice_embed(f"Moved to **{target.name}**."))
                 await voice.connect_to(target)
-                return f"🔊 Joined **{target.name}**."
+                return Reply(embed=ui.voice_embed(f"Joined **{target.name}**."))
             except RuntimeError as e:
                 # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
                 # Report what it actually said rather than guessing which one.
@@ -466,7 +478,8 @@ async def execute_voice_command(
                 return "🚫 I created the channel but couldn't join it, so I removed it again."
 
             voice_manager.mark_created(channel.id, guild.id)
-            return f"🔊 Created {channel.mention} and joined — hop in!"
+            return Reply(embed=ui.voice_embed(
+                f"Created {channel.mention} and joined — hop in!", heading="Voice channel created"))
 
     if command == "leave":
         vc = voice.get_voice_client(guild)
@@ -484,7 +497,9 @@ async def execute_voice_command(
 
         async with voice_manager.lock_for(guild.id):
             left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
-        return f"👋 Left **{left}**." if left else "🚫 I'm not in a voice channel."
+        if not left:
+            return Reply(embed=ui.error_embed("I'm not in a voice channel."))
+        return Reply(embed=ui.voice_embed(f"Left **{left}**.", heading="Voice"))
 
     return f"Unknown voice command: `{command}`."
 #--------------------------------------
@@ -510,6 +525,161 @@ MUSIC_COMMANDS = (
 )
 # Harmless reads - exempt from the voice cooldown so checking the queue never costs a slot
 MUSIC_READONLY_COMMANDS = ("queue", "nowplaying", "np")
+#--------------------------------------
+
+#----Player Buttons------
+def may_control_playback(guild: Optional[discord.Guild], user_id: int) -> bool:
+    """
+    Same rule the text commands use: you must be in Amy's voice channel, or be an admin.
+    Shared so a button can never become a way around a command's permission check.
+    """
+    if guild is None:
+        return False
+    if is_admin_member(guild, user_id):
+        return True
+    current = voice.active_channel(voice.get_voice_client(guild))
+    if current is None:
+        return False
+    member = guild.get_member(user_id)
+    return bool(
+        member and member.voice and member.voice.channel
+        and member.voice.channel.id == current.id
+    )
+
+
+class PlayerControls(discord.ui.View):
+    """
+    Buttons under the now-playing message.
+
+    Persistent: timeout=None with fixed custom_ids, registered once via bot.add_view().
+    A default View expires after 180s, which would leave dead buttons partway through a
+    song. Every handler resolves state from interaction.guild_id, so one instance serves
+    every message and the buttons keep working across a restart.
+    """
+
+    def __init__(self, paused: bool = False) -> None:
+        super().__init__(timeout=None)
+        # Reflect current state on the toggle rather than showing two buttons
+        self.pause_button.label = "Resume" if paused else "Pause"
+        self.pause_button.emoji = "▶" if paused else "⏸"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if may_control_playback(interaction.guild, interaction.user.id):
+            return True
+        await interaction.response.send_message(
+            embed=ui.error_embed("You need to be in my voice channel (or an admin) to use these."),
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Pause", emoji="⏸", style=discord.ButtonStyle.secondary,
+                       custom_id="amy:pause")
+    async def pause_button(self, interaction: discord.Interaction,
+                           button: discord.ui.Button) -> None:
+        guild = interaction.guild
+        vc = voice.get_voice_client(guild) if guild else None
+        if guild is None or vc is None or not vc.is_connected():
+            await interaction.response.send_message(
+                embed=ui.error_embed("I'm not in a voice channel."), ephemeral=True)
+            return
+
+        player = music_manager.player_for(guild.id)
+        if vc.is_paused():
+            vc.resume()
+            paused = False
+        elif vc.is_playing():
+            vc.pause()
+            paused = True
+        else:
+            await interaction.response.send_message(
+                embed=ui.error_embed("Nothing is playing."), ephemeral=True)
+            return
+
+        if player.current is None:
+            await interaction.response.defer()
+            return
+        await interaction.response.edit_message(
+            embed=ui.now_playing_embed(player.current, len(player.queue),
+                                       player.loop_mode, player.volume, paused=paused),
+            view=PlayerControls(paused=paused),
+        )
+
+    @discord.ui.button(label="Skip", emoji="⏭", style=discord.ButtonStyle.primary,
+                       custom_id="amy:skip")
+    async def skip_button(self, interaction: discord.Interaction,
+                          button: discord.ui.Button) -> None:
+        guild = interaction.guild
+        vc = voice.get_voice_client(guild) if guild else None
+        if guild is None or vc is None or not (vc.is_playing() or vc.is_paused()):
+            await interaction.response.send_message(
+                embed=ui.error_embed("Nothing is playing."), ephemeral=True)
+            return
+
+        player = music_manager.player_for(guild.id)
+        player.skip_requested = True  # so TRACK loop can't swallow an explicit skip
+        await interaction.response.defer()
+        vc.stop()  # after-callback advances the queue and refreshes the message
+
+    @discord.ui.button(label="Stop", emoji="⏹", style=discord.ButtonStyle.danger,
+                       custom_id="amy:stop")
+    async def stop_button(self, interaction: discord.Interaction,
+                          button: discord.ui.Button) -> None:
+        guild = interaction.guild
+        vc = voice.get_voice_client(guild) if guild else None
+        if guild is None or vc is None or not vc.is_connected():
+            await interaction.response.send_message(
+                embed=ui.error_embed("I'm not in a voice channel."), ephemeral=True)
+            return
+
+        player = music_manager.player_for(guild.id)
+        finished = player.current or player.last_played
+        player.queue.clear()
+        player.loop_mode = LoopMode.OFF
+        player.current = None
+        vc.stop()
+
+        embed = (ui.now_playing_embed(finished, stopped=True) if finished
+                 else ui.info_embed("Playback stopped."))
+        await interaction.response.edit_message(embed=embed, view=None)
+
+        async with voice_manager.lock_for(guild.id):
+            await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+
+
+async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
+                              paused: bool = False) -> None:
+    """
+    Keep one now-playing message per guild, edited in place as tracks change, so a long
+    queue doesn't post a message per track. Posts a fresh one if the old is unreachable.
+    """
+    player = music_manager.player_for(guild.id)
+    channel = bot.get_channel(player.text_channel_id) if player.text_channel_id else None
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    if stopped or player.current is None:
+        last = player.last_played
+        if last is None:
+            return
+        embed = ui.now_playing_embed(last, stopped=True)
+        view = None
+    else:
+        embed = ui.now_playing_embed(player.current, len(player.queue),
+                                     player.loop_mode, player.volume, paused=paused)
+        view = PlayerControls(paused=paused)
+
+    if player.now_playing_msg is not None:
+        try:
+            await player.now_playing_msg.edit(embed=embed, view=view)
+            return
+        except discord.HTTPException:
+            player.now_playing_msg = None  # deleted or unreachable; fall through
+
+    try:
+        player.now_playing_msg = await channel.send(
+            embed=embed, view=view or discord.utils.MISSING)
+    except discord.HTTPException as e:
+        safe_print(f"[WARNING] Could not post now-playing message: {e}")
 #--------------------------------------
 
 #----Music Playback Engine------
@@ -538,7 +708,10 @@ async def advance_playback(guild: discord.Guild) -> None:
             player.current, player.queue, player.loop_mode, force_next=force_next
         )
         if next_track is None:
+            if player.current is not None:
+                player.last_played = player.current
             player.current = None
+            await refresh_now_playing(guild, stopped=True)
             safe_print("[INFO] Queue empty - starting idle timer")
             player.cancel_idle()  # never stack timers; a stale one could disconnect later
             player.idle_task = asyncio.create_task(idle_disconnect(guild))
@@ -548,6 +721,8 @@ async def advance_playback(guild: discord.Guild) -> None:
         after = music.make_after_callback(loop, lambda: advance_playback(guild))
         try:
             await music.play_track(vc, player, next_track, after)
+            player.last_played = next_track
+            await refresh_now_playing(guild)
         except Exception as e:
             safe_print(f"[ERROR] Could not play '{next_track.title}': {e}")
             # Skip the bad track rather than stalling the whole queue
@@ -581,7 +756,7 @@ async def execute_music_command(
     parts: List[str],
     msg: discord.Message,
     guild: discord.Guild,
-) -> str:
+) -> Union[str, Reply]:
     """Handle the music commands. `guild` is already narrowed to non-optional."""
     player = music_manager.player_for(guild.id)
     vc = voice.get_voice_client(guild)
@@ -602,15 +777,17 @@ async def execute_music_command(
                 page = int(parts[1])
             except ValueError:
                 return DENY + " Page must be a number. Usage: `/queue` or `/queue 2`"
-        return music.render_queue(player.current, player.queue, player.loop_mode, page=page)
+        return Reply(embed=ui.queue_embed(player.current, player.queue,
+                                          player.loop_mode, page=page))
 
     if command in ("nowplaying", "np"):
         if player.current is None:
-            return "🎵 Nothing is playing right now."
-        t = player.current
-        return (
-            f"🎵 **Now playing:** {t.title} `[{music.format_duration(t.duration)}]`\n"
-            f"Requested by {t.requested_by}"
+            return Reply(embed=ui.info_embed("Nothing is playing right now."))
+        paused = bool(vc and vc.is_paused())
+        return Reply(
+            embed=ui.now_playing_embed(player.current, len(player.queue),
+                                       player.loop_mode, player.volume, paused=paused),
+            view=PlayerControls(paused=paused),
         )
 
     # --- /play: joins if needed, then queues ---
@@ -652,6 +829,9 @@ async def execute_music_command(
         elif not in_voice_with_amy() and not is_admin(msg):
             return "🚫 You need to be in my voice channel to queue tracks."
 
+        # advance_playback has no message context, so remember where to post the card
+        player.text_channel_id = msg.channel.id
+
         query = " ".join(parts[1:])
         # Echoed back into a Discord message, so keep it well under the 2000-char limit
         shown = query if len(query) <= 100 else query[:100] + "..."
@@ -684,18 +864,10 @@ async def execute_music_command(
             player.queue.extend(tracks)
             player.cancel_idle()
 
-            summary = PLUS + " Queued **" + str(len(tracks)) + "** track(s) from **" + title + "**"
-            if skipped:
-                summary += " (" + str(skipped) + " skipped, unavailable or over the limit)"
-
-            if vc is not None and (vc.is_playing() or vc.is_paused()):
-                await status_msg.edit(content=summary)
-                return ""
-
-            await status_msg.edit(content=summary + NEWLINE + "Starting playback...")
-            await advance_playback(guild)
-            now = player.current.title if player.current else tracks[0].title
-            await status_msg.edit(content=summary + NEWLINE + NOTE + " Now playing **" + now + "**")
+            await status_msg.edit(content=None,
+                                  embed=ui.playlist_embed(title, len(tracks), skipped))
+            if vc is None or not (vc.is_playing() or vc.is_paused()):
+                await advance_playback(guild)   # posts its own now-playing card
             return ""
 
         # --- single track ---
@@ -711,15 +883,16 @@ async def execute_music_command(
         duration = music.format_duration(track.duration)
 
         if vc is not None and (vc.is_playing() or vc.is_paused()):
-            await status_msg.edit(
-                content=PLUS + " Queued **" + track.title + "** `[" + duration + "]` at position "
-                        + str(len(player.queue))
-            )
+            await status_msg.edit(content=None,
+                                  embed=ui.queued_embed(track, len(player.queue)))
             return ""
 
         await status_msg.edit(content=HOURGLASS + " Loading **" + track.title + "**...")
-        await advance_playback(guild)
-        await status_msg.edit(content=NOTE + " Playing **" + track.title + "** `[" + duration + "]`")
+        await advance_playback(guild)   # posts the now-playing card with controls
+        try:
+            await status_msg.delete()   # the card replaces this status line
+        except discord.HTTPException:
+            pass
         return ""
 
     # --- everything below needs an active connection ---
@@ -732,15 +905,17 @@ async def execute_music_command(
         if not vc.is_playing():
             return "🚫 Nothing is playing."
         vc.pause()
-        return "⏸️ Paused."
+        await refresh_now_playing(guild, paused=True)
+        return Reply(embed=ui.info_embed("Paused."))
 
     if command == "resume":
         if not in_voice_with_amy() and not is_admin(msg):
             return "🚫 You need to be in my voice channel to do that."
         if not vc.is_paused():
-            return "🚫 Nothing is paused."
+            return Reply(embed=ui.error_embed("Nothing is paused."))
         vc.resume()
-        return "▶️ Resumed."
+        await refresh_now_playing(guild, paused=False)
+        return Reply(embed=ui.info_embed("Resumed."))
 
     if command == "skip":
         if not in_voice_with_amy() and not is_admin(msg):
@@ -750,7 +925,7 @@ async def execute_music_command(
         skipped = player.current.title if player.current else "the current track"
         player.skip_requested = True
         vc.stop()  # triggers the after-callback, which advances the queue
-        return f"⏭️ Skipped **{skipped}**."
+        return Reply(embed=ui.info_embed(f"Skipped **{skipped}**."))
 
     if command == "stop":
         if not in_voice_with_amy() and not is_admin(msg):
@@ -761,25 +936,27 @@ async def execute_music_command(
         vc.stop()
         async with voice_manager.lock_for(guild.id):
             left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
-        return f"⏹️ Stopped and left **{left}**." if left else "⏹️ Stopped."
+        return Reply(embed=ui.info_embed(
+            f"Stopped and left **{left}**." if left else "Stopped."))
 
     if command == "volume":
         if not is_admin(msg):
             return "🚫 You don't have permission to use this command. (Admin only)"
         if len(parts) < 2:
-            return f"🔊 Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`"
+            return Reply(embed=ui.info_embed(
+                f"Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`"))
         parsed = music.parse_volume(parts[1])
         if parsed is None:
-            return "🚫 Volume must be a whole number between 0 and 100."
+            return Reply(embed=ui.error_embed("Volume must be a whole number between 0 and 100."))
         player.volume = parsed / 100
         # Applies instantly only on the PCM path; an opus-passthrough track has no
         # volume stage, so the change lands when the next track starts.
         if isinstance(vc.source, discord.PCMVolumeTransformer):
             vc.source.volume = player.volume
-            return f"🔊 Volume set to **{parsed}%**."
+            return Reply(embed=ui.info_embed(f"Volume set to **{parsed}%**."))
 
         if parsed >= 100:
-            return "🔊 Volume set to **100%** (full quality, lowest CPU)."
+            return Reply(embed=ui.info_embed("Volume set to **100%** (full quality, lowest CPU)."))
         return (
             f"🔊 Volume set to **{parsed}%** — applies from the next track.\n"
             "_Note: below 100% Amy has to decode audio rather than pass it through, "
@@ -798,7 +975,7 @@ async def execute_music_command(
             player.loop_mode = LoopMode(parts[1].lower())
         except ValueError:
             return "🚫 Loop mode must be `off`, `track`, or `queue`."
-        return f"🔁 Loop set to **{player.loop_mode.value}**."
+        return Reply(embed=ui.info_embed(f"Loop set to **{player.loop_mode.value}**."))
 
     if command == "remove":
         if not in_voice_with_amy() and not is_admin(msg):
@@ -819,7 +996,7 @@ async def execute_music_command(
                     + ". You can only remove your own.")
 
         music.remove_at(player.queue, index)  # `target` above already proved it exists
-        return TRASH + " Removed **" + target.title + "** from the queue."
+        return Reply(embed=ui.info_embed("Removed **" + target.title + "** from the queue."))
 
     if command == "shuffle":
         if not in_voice_with_amy() and not is_admin(msg):
@@ -827,7 +1004,7 @@ async def execute_music_command(
         if len(player.queue) < 2:
             return DENY + " Not enough tracks queued to shuffle."
         music.shuffle_queue(player.queue)
-        return SHUFFLE + " Shuffled **" + str(len(player.queue)) + "** queued track(s)."
+        return Reply(embed=ui.info_embed("Shuffled **" + str(len(player.queue)) + "** queued track(s)."))
 
     if command == "clearqueue":
         if not is_admin(msg):
@@ -836,7 +1013,8 @@ async def execute_music_command(
         if count == 0:
             return DENY + " The queue is already empty."
         player.queue.clear()
-        return TRASH + " Cleared **" + str(count) + "** queued track(s). Current track keeps playing."
+        return Reply(embed=ui.info_embed(
+            "Cleared **" + str(count) + "** queued track(s). Current track keeps playing."))
 
     if command == "skipto":
         if not in_voice_with_amy() and not is_admin(msg):
@@ -865,7 +1043,7 @@ async def execute_music_command(
 #--------------------------------------
 
 #----Command Functions------
-async def execute_command(command_text: str, msg: discord.Message) -> str:
+async def execute_command(command_text: str, msg: discord.Message) -> Union[str, Reply]:
     """Execute a command based on the command text."""
     global bot_enabled, model
     parts = command_text.strip().split()
@@ -1043,6 +1221,10 @@ async def on_ready() -> None:
         prune_old_messages_task.start()
         safe_print(f"[INFO] Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
 
+    # Register the persistent player buttons so they keep working across restarts
+    bot.add_view(PlayerControls())
+    safe_print("[INFO] Player controls registered")
+
     # Load the opus encoder up front so the first track doesn't stall while it loads
     if not discord.opus.is_loaded():
         try:
@@ -1092,7 +1274,14 @@ async def on_message(msg: discord.Message) -> None:
         if msg.content.startswith("/"):
             safe_print("[DEBUG] Processing as command")
             response = await execute_command(msg.content[1:], msg)
-            if response:
+            if isinstance(response, Reply):
+                # discord.py wants MISSING, not None, for "don't set this field"
+                await msg.reply(
+                    content=response.content or discord.utils.MISSING,
+                    embed=response.embed or discord.utils.MISSING,
+                    view=response.view or discord.utils.MISSING,
+                )
+            elif response:
                 await send_long_reply(msg, response)
             safe_print("[DEBUG] Command handled")
             return

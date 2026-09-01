@@ -104,6 +104,7 @@ class Track:
     duration: Optional[int] = None
     requested_by: str = "unknown"
     is_local: bool = False
+    thumbnail: Optional[str] = None
 
 
 #----Pure Helpers (no Discord/network, unit testable)------
@@ -373,6 +374,7 @@ async def resolve_metadata(query: str, requested_by: str) -> Track:
         query=info.get("webpage_url") or query,
         duration=info.get("duration"),
         requested_by=requested_by,
+        thumbnail=info.get("thumbnail"),
     )
 
 
@@ -401,12 +403,13 @@ async def resolve_playlist(
         if not page or not title:
             unavailable += 1
             continue
-        usable.append((title, page, entry.get("duration")))
+        usable.append((title, page, entry.get("duration"), entry.get("thumbnail")))
 
     over_limit = max(0, len(usable) - limit)
     tracks = [
-        Track(title=title, query=page, duration=duration, requested_by=requested_by)
-        for title, page, duration in usable[:limit]
+        Track(title=title, query=page, duration=duration,
+              requested_by=requested_by, thumbnail=thumb)
+        for title, page, duration, thumb in usable[:limit]
     ]
     playlist_title = info.get("title") or "playlist"
     return playlist_title, tracks, unavailable + over_limit
@@ -439,6 +442,11 @@ class GuildPlayer:
         # Set by /skip and /skipto, consumed by the next advance so an explicit skip
         # isn't swallowed by TRACK loop mode
         self.skip_requested: bool = False
+        # Where to post the now-playing card, and the live message itself. advance_playback
+        # runs from the audio thread's callback and has no message context of its own.
+        self.text_channel_id: Optional[int] = None
+        self.now_playing_msg: Optional[discord.Message] = None
+        self.last_played: Optional[Track] = None   # for the "finished" card once current clears
 
     def cancel_idle(self) -> None:
         if self.idle_task is not None and not self.idle_task.done():
@@ -451,6 +459,8 @@ class GuildPlayer:
         self.current = None
         self.loop_mode = LoopMode.OFF
         self.skip_requested = False
+        self.now_playing_msg = None
+        self.last_played = None
 
 
 class MusicManager:

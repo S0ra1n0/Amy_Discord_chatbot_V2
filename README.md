@@ -12,6 +12,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - **Voice channel support** — summon Amy into your voice channel, or have her create one
 - **Music playback** — queue tracks from YouTube (search, URL, or whole playlists), direct audio URLs, or local files
 - **Queue management** — paginated listing, remove, shuffle, skip-to, and clear
+- **Rich embeds and player buttons** — now-playing card with thumbnail, plus Pause/Skip/Stop buttons that survive a bot restart
 - Runtime model switching — swap the active Ollama model without restarting the bot
 - Long responses/replies automatically split across multiple Discord messages instead of being truncated
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
@@ -100,6 +101,22 @@ If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tra
 `/play` replies immediately with **🔍 Searching...**, then updates that same message as it resolves and starts playing, so you can see it's working during the few seconds YouTube lookup takes.
 
 **Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly). An explicit `/skip` or `/skipto` always moves on, even under `track` loop — otherwise the song would repeat forever with no way out. Under `queue` loop a skipped track still rotates to the back.
+
+### Player controls
+
+The now-playing card carries three buttons — **Pause/Resume**, **Skip** and **Stop**.
+
+They follow exactly the same permission rule as the text commands: you must be in Amy's
+voice channel, or be an admin. Pressing one without permission gets a private (ephemeral)
+refusal that nobody else sees, so a button is never a way around a command's check.
+
+The buttons are *persistent*: they have no expiry and keep working after Amy restarts. A
+default Discord component set expires after three minutes, which would leave dead buttons
+partway through a song.
+
+Amy keeps **one** now-playing card per server and edits it in place as tracks change, rather
+than posting a new message for every track in a long queue. `/nowplaying` always posts a
+fresh card if the old one has scrolled away.
 
 ### Volume and audio quality
 
@@ -386,6 +403,7 @@ Long queues are not a factor — stream URLs are resolved one track at a time, i
 - Messages longer than Discord's 2000-character limit are split across multiple messages automatically — no configuration needed
 - Voice is limited to guild voice channels; Discord does not expose DM or group-DM calls to bots
 - Amy self-deafens when joining voice (she never needs to receive audio)
+- Embeds are used for music and voice replies; chat, `/help`, `/status`, dice and `/rng` stay plain text
 - Music requires **FFmpeg**; YouTube/SoundCloud sources additionally require **yt-dlp** (both covered in setup)
 - Stream URLs are resolved one track at a time, immediately before playing — YouTube links expire after a few hours, so resolving a long queue up front would leave later tracks pointing at dead links
 - At 100% volume audio is passed through as opus with no transcoding; below 100% it decodes to PCM so `PCMVolumeTransformer` can scale it, which costs more CPU
