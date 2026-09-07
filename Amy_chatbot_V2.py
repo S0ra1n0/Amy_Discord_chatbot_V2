@@ -72,22 +72,6 @@ def find_split_index(text: str, limit: int) -> int:
         return limit
     return split_at + 1
 
-async def send_long_reply(msg: discord.Message, text: str) -> None:
-    """Reply to a message, splitting into multiple messages if text exceeds Discord's length limit."""
-    if not text:
-        return
-    remaining = text
-    first = True
-    while remaining:
-        idx = find_split_index(remaining, MAX_DISCORD_LEN)
-        chunk = remaining[:idx]
-        remaining = remaining[idx:]
-        if first:
-            await msg.reply(chunk)
-            first = False
-        else:
-            await msg.channel.send(chunk)
-
 def extract_model_names(list_response) -> List[str]:
     """
     Extract model names from ollama.list() output.
@@ -207,7 +191,8 @@ def admin_only():
     return app_commands.check(predicate)
 
 
-async def send_reply(interaction: discord.Interaction, result) -> None:
+async def send_reply(interaction: discord.Interaction, result,
+                     ephemeral: bool = False) -> None:
     """
     Deliver whatever a handler returned.
 
@@ -217,21 +202,32 @@ async def send_reply(interaction: discord.Interaction, result) -> None:
     if not result:
         return
 
-    kwargs = {}
     if isinstance(result, Reply):
+        kwargs = {}
         if result.content:
             kwargs["content"] = result.content
         if result.embed is not None:
             kwargs["embed"] = result.embed
         if result.view is not None:
             kwargs["view"] = result.view
-    else:
-        kwargs["content"] = result[:MAX_DISCORD_LEN]
+        if ephemeral:
+            kwargs["ephemeral"] = True
+        if interaction.response.is_done():
+            await interaction.followup.send(**kwargs)
+        else:
+            await interaction.response.send_message(**kwargs)
+        return
 
-    if interaction.response.is_done():
-        await interaction.followup.send(**kwargs)
-    else:
-        await interaction.response.send_message(**kwargs)
+    # Plain text: split at a word boundary rather than truncating. Discord rejects a
+    # message over 2000 characters outright, so a growing /help would start erroring.
+    remaining = result
+    while remaining:
+        idx = find_split_index(remaining, MAX_DISCORD_LEN)
+        chunk, remaining = remaining[:idx], remaining[idx:]
+        if interaction.response.is_done():
+            await interaction.followup.send(chunk, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(chunk, ephemeral=ephemeral)
 #--------------------------------------
 
 #----Admin Helper------
@@ -1458,8 +1454,9 @@ async def simple_music(
 @tree.command(name="help", description="Show Amy's commands")
 async def slash_help(interaction: discord.Interaction) -> None:
     is_adm = is_admin_member(interaction.guild, interaction.user.id)
-    await interaction.response.send_message(
-        HELP_EVERYONE + (HELP_ADMIN if is_adm else ""), ephemeral=True)
+    # Via send_reply so it splits if the command list outgrows 2000 characters
+    await send_reply(interaction, HELP_EVERYONE + (HELP_ADMIN if is_adm else ""),
+                     ephemeral=True)
 
 
 @tree.command(name="dice", description="Roll dice")

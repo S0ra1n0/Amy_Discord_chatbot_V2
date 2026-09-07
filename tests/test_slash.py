@@ -105,6 +105,40 @@ for name in sorted(GUILD_ONLY):
     ok = (allowed is not None and not allowed.private_channel) or c.guild_only
     check("/%-12s guild-only" % name, ok, allowed)
 
+print("=== long replies split instead of being truncated or rejected ===")
+# Discord rejects any message over 2000 chars outright. /help is the one that grows as
+# commands are added, so it must go through the splitter rather than a direct send.
+import asyncio
+from commands_help import HELP_EVERYONE, HELP_ADMIN
+
+full = HELP_EVERYONE + HELP_ADMIN
+print("        /help admin view is %d chars (limit %d)" % (len(full), amy.MAX_DISCORD_LEN))
+
+sent = []
+class Resp:
+    def __init__(self): self._done = False
+    def is_done(self): return self._done
+    async def send_message(self, content=None, **kw):
+        self._done = True; sent.append(content)
+class Follow:
+    async def send(self, content=None, **kw): sent.append(content)
+class It:
+    def __init__(self): self.response = Resp(); self.followup = Follow()
+
+it = It()
+asyncio.run(amy.send_reply(it, "x " * 3000))     # ~6000 chars
+check("splits an over-long reply", len(sent) > 1, len(sent))
+check("every part fits Discord's limit",
+      all(len(c) <= amy.MAX_DISCORD_LEN for c in sent), [len(c) for c in sent])
+check("nothing is lost", sum(len(c) for c in sent) == len("x " * 3000))
+
+sent.clear()
+it2 = It()
+asyncio.run(amy.send_reply(it2, full, ephemeral=True))
+check("/help sends in one piece today", len(sent) == 1, len(sent))
+check("/help fits the limit", len(sent[0]) <= amy.MAX_DISCORD_LEN, len(sent[0]))
+
+print()
 print()
 if fails:
     print("%d CHECK(S) FAILED" % len(fails))

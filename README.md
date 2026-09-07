@@ -154,7 +154,7 @@ starts playing or adds it to the queue.
 
 The now-playing card carries three buttons — **Pause/Resume**, **Skip** and **Stop**.
 
-They follow exactly the same permission rule as the text commands: you must be in Amy's
+They follow exactly the same permission rule as the equivalent commands: you must be in Amy's
 voice channel, or be an admin. Pressing one without permission gets a private (ephemeral)
 refusal that nobody else sees, so a button is never a way around a command's check.
 
@@ -345,6 +345,7 @@ Amy_chatbot_V2/
 ├── voice.py                # Voice channel connection management
 ├── music.py                # Track resolution, queues, and playback engine
 ├── ui.py                   # Embed builders and the reply wrapper
+├── websearch.py            # DuckDuckGo search and the web_search tool
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
