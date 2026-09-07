@@ -40,14 +40,16 @@ check("Discord 2000-char limit documented",
       str(amy.MAX_DISCORD_LEN) in readme)
 
 print()
-print("=== commands: code vs README vs help text ===")
 src = open("Amy_chatbot_V2.py", encoding="utf-8").read()
-dispatched = set(re.findall(r'command == "([a-z0-9]+)"', src))
-dispatched |= set(re.findall(r'command in \(([^)]*)\)', src)[0].replace('"', '').replace(' ', '').split(',')) \
-    if re.findall(r'command in \(([^)]*)\)', src) else set()
-for cmd in sorted(dispatched):
-    check("/%s in help text" % cmd, "`/%s" % cmd in helptxt)
-    check("/%s in README table" % cmd, "`/%s" % cmd in readme)
+print("=== every registered command is documented ===")
+# The command tree is the source of truth now, rather than scraping the source for string
+# literals. A command that exists but isn't documented fails here.
+sys.path.insert(0, os.path.join(PROJ, "tests"))
+from _fakes import load_bot
+_bot = load_bot()
+for c in sorted(_bot.tree.walk_commands(), key=lambda x: x.name):
+    check("/%-12s in help text" % c.name, "`/" + c.name in helptxt)
+    check("/%-12s in README table" % c.name, "`/" + c.name in readme)
 
 print()
 print("=== config consistency ===")

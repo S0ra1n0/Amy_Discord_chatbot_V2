@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import ollama
 import discord
 from discord.ext import tasks
+from discord import app_commands
 
 from commands_help import HELP_EVERYONE, HELP_ADMIN
 from database import ConversationDB
@@ -112,6 +113,9 @@ load_dotenv()
 discord_token = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE_NAME: str = os.getenv("ADMIN_ROLE_NAME", "Admin")
 DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
+# Guild-scoped command sync is instant; global sync can take an hour to appear.
+_raw_guild = os.getenv("GUILD_ID", "").strip()
+GUILD_ID: Optional[int] = int(_raw_guild) if _raw_guild.isdigit() else None
 
 if not discord_token:
     safe_print("[ERROR] DISCORD_TOKEN not found in .env file. Please add it and try again.")
@@ -119,7 +123,6 @@ if not discord_token:
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.reactions = True
 # Privileged: must also be enabled in the Discord Developer Portal.
 # Needed so VoiceChannel.members resolves reliably (it looks up guild.get_member),
 # which is what empty-channel auto-disconnect depends on.
@@ -160,6 +163,61 @@ music.log = safe_print  # let music.py log through the Windows-safe printer
 #----Bot State------
 bot_enabled: bool = True
 #----------------------------------------------
+
+#----Slash Command Tree------
+tree = app_commands.CommandTree(bot)
+
+
+async def deny(interaction: discord.Interaction, message: str) -> None:
+    """Refuse a command privately, so permission errors don't clutter the channel."""
+    embed = ui.error_embed(message)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def admin_only():
+    """
+    Gate a slash command behind Amy's admin rule.
+
+    Discord's own permission checks can't express this: admin means server owner OR the
+    Administrator permission OR the configured role, so it reuses is_admin_member.
+    """
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if is_admin_member(interaction.guild, interaction.user.id):
+            return True
+        await deny(interaction, "You don't have permission to use this command. (Admin only)")
+        return False
+    return app_commands.check(predicate)
+
+
+async def send_reply(interaction: discord.Interaction, result) -> None:
+    """
+    Deliver whatever a handler returned.
+
+    Handlers return a str, a ui.Reply, or "" when they already sent their own message.
+    Uses followup when the interaction was deferred, otherwise responds directly.
+    """
+    if not result:
+        return
+
+    kwargs = {}
+    if isinstance(result, Reply):
+        if result.content:
+            kwargs["content"] = result.content
+        if result.embed is not None:
+            kwargs["embed"] = result.embed
+        if result.view is not None:
+            kwargs["view"] = result.view
+    else:
+        kwargs["content"] = result[:MAX_DISCORD_LEN]
+
+    if interaction.response.is_done():
+        await interaction.followup.send(**kwargs)
+    else:
+        await interaction.response.send_message(**kwargs)
+#--------------------------------------
 
 #----Admin Helper------
 def is_admin_member(guild: Optional[discord.Guild], user_id: int) -> bool:
@@ -259,11 +317,6 @@ async def prune_old_messages_task() -> None:
     dropped = prune_rate_limit_stores()
     if dropped:
         safe_print(f"[INFO] Dropped {dropped} expired rate-limit entr(ies)")
-#----------------------------------------------
-
-#----Pending /clear Confirmations------
-# Maps confirmation_message_id → (requesting_user_id, channel_id, server_id)
-pending_clear: Dict[int, Tuple[int, int, Union[int, str]]] = {}
 #----------------------------------------------
 
 #----Streaming Chat------
@@ -379,7 +432,7 @@ async def chat_streaming(
 async def execute_voice_command(
     command: str,
     parts: List[str],
-    msg: discord.Message,
+    interaction: discord.Interaction,
     guild: discord.Guild,
 ) -> Union[str, Reply]:
     """
@@ -389,7 +442,7 @@ async def execute_voice_command(
     rather than relying on a guard in a different branch.
     """
     if command == "join":
-        member = guild.get_member(msg.author.id)
+        member = guild.get_member(interaction.user.id)
         state = member.voice if member else None
         if state is None or state.channel is None:
             return Reply(embed=ui.error_embed("You're not in a voice channel. Join one first, then use `/join`."))
@@ -407,7 +460,7 @@ async def execute_voice_command(
             current_id = current.id if current else None
             has_humans = voice.humans_in(current) > 0 if current else False
 
-            action = voice.decide_join_action(current_id, has_humans, target.id, is_admin(msg))
+            action = voice.decide_join_action(current_id, has_humans, target.id, is_admin_member(interaction.guild, interaction.user.id))
 
             if action is voice.JoinAction.ALREADY_THERE:
                 return Reply(embed=ui.info_embed(f"I'm already in **{target.name}**."))
@@ -436,13 +489,13 @@ async def execute_voice_command(
                 return Reply(embed=ui.error_embed(f"I couldn't connect to **{target.name}**. Please try again."))
 
     if command == "create":
-        if not is_admin(msg):
+        if not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
         if not guild.me.guild_permissions.manage_channels:
             return Reply(embed=ui.error_embed("I need the **Manage Channels** permission to create a voice channel."))
 
         # Only guild text channels have a category to inherit
-        category = msg.channel.category if isinstance(msg.channel, discord.TextChannel) else None
+        category = interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None
         name = voice.sanitize_channel_name(" ".join(parts[1:]))
 
         async with voice_manager.lock_for(guild.id):
@@ -450,7 +503,7 @@ async def execute_voice_command(
                 channel = await guild.create_voice_channel(
                     name,
                     category=category,
-                    reason=f"/create requested by {msg.author}",
+                    reason=f"/create requested by {interaction.user}",
                 )
             except discord.Forbidden:
                 return Reply(embed=ui.error_embed("Discord refused that. Check my **Manage Channels** permission."))
@@ -489,12 +542,12 @@ async def execute_voice_command(
         if current is None:
             return Reply(embed=ui.error_embed("I'm not in a voice channel."))
 
-        member = guild.get_member(msg.author.id)
+        member = guild.get_member(interaction.user.id)
         in_same_channel = bool(
             member and member.voice and member.voice.channel
             and member.voice.channel.id == current.id
         )
-        if not (is_admin(msg) or in_same_channel):
+        if not (is_admin_member(interaction.guild, interaction.user.id) or in_same_channel):
             return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
 
         async with voice_manager.lock_for(guild.id):
@@ -515,13 +568,8 @@ NEXT: str = "⏭"           # next track
 #--------------------------------------
 
 #----Command Groups------
-VOICE_COMMANDS = ("join", "create", "leave")
-MUSIC_COMMANDS = (
-    "play", "pause", "resume", "skip", "stop", "queue", "nowplaying", "np", "volume", "loop",
-    "remove", "shuffle", "clearqueue", "skipto", "search",
-)
 # Harmless reads - exempt from the voice cooldown so checking the queue never costs a slot
-MUSIC_READONLY_COMMANDS = ("queue", "nowplaying", "np")
+MUSIC_READONLY_COMMANDS = ("queue", "nowplaying")
 #--------------------------------------
 
 #----Player Buttons------
@@ -848,13 +896,13 @@ async def idle_disconnect(guild: discord.Guild) -> None:
 async def execute_music_command(
     command: str,
     parts: List[str],
-    msg: discord.Message,
+    interaction: discord.Interaction,
     guild: discord.Guild,
 ) -> Union[str, Reply]:
     """Handle the music commands. `guild` is already narrowed to non-optional."""
     player = music_manager.player_for(guild.id)
     vc = voice.get_voice_client(guild)
-    member = guild.get_member(msg.author.id)
+    member = guild.get_member(interaction.user.id)
 
     def in_voice_with_amy() -> bool:
         current = voice.active_channel(vc)
@@ -894,9 +942,9 @@ async def execute_music_command(
 
         query = " ".join(parts[1:])
         shown = query if len(query) <= 100 else query[:100] + "..."
-        status_msg = await msg.reply(SEARCH + " Searching for **" + shown + "**...")
+        status_msg = await interaction.followup.send(SEARCH + " Searching for **" + shown + "**...", wait=True)
         try:
-            results = await music.search_tracks(query, requested_by=str(msg.author))
+            results = await music.search_tracks(query, requested_by=str(interaction.user))
         except Exception as e:
             safe_print("[ERROR] Search failed: " + str(e))
             await status_msg.edit(content=None,
@@ -908,7 +956,7 @@ async def execute_music_command(
                 "Nothing found for `" + shown + "`."))
             return ""
 
-        view = SearchResults(results, msg.author.id, guild)
+        view = SearchResults(results, interaction.user.id, guild)
         await status_msg.edit(content=None,
                               embed=ui.search_results_embed(query, results), view=view)
         view.message = status_msg   # so on_timeout can grey out the menu
@@ -950,20 +998,20 @@ async def execute_music_command(
             except Exception as e:
                 safe_print(f"[ERROR] Voice connect failed: {e}")
                 return Reply(embed=ui.error_embed("I couldn't join your voice channel. Please try again."))
-        elif not in_voice_with_amy() and not is_admin(msg):
+        elif not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to queue tracks."))
 
         # advance_playback has no message context, so remember where to post the card
-        player.text_channel_id = msg.channel.id
+        player.text_channel_id = interaction.channel_id
 
         query = " ".join(parts[1:])
         # Echoed back into a Discord message, so keep it well under the 2000-char limit
         shown = query if len(query) <= 100 else query[:100] + "..."
-        author = str(msg.author)
+        author = str(interaction.user)
 
         # Resolving hits the network and can take a few seconds, so acknowledge
         # immediately and edit this message once we know the result.
-        status_msg = await msg.reply(SEARCH + " Searching for **" + shown + "**...")
+        status_msg = await interaction.followup.send(SEARCH + " Searching for **" + shown + "**...", wait=True)
 
         # --- playlist URL: queue many tracks at once ---
         if music.is_playlist_url(query):
@@ -1024,7 +1072,7 @@ async def execute_music_command(
         return Reply(embed=ui.error_embed("I'm not in a voice channel."))
 
     if command == "pause":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if not vc.is_playing():
             return Reply(embed=ui.error_embed("Nothing is playing."))
@@ -1033,7 +1081,7 @@ async def execute_music_command(
         return Reply(embed=ui.info_embed("Paused."))
 
     if command == "resume":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if not vc.is_paused():
             return Reply(embed=ui.error_embed("Nothing is paused."))
@@ -1042,7 +1090,7 @@ async def execute_music_command(
         return Reply(embed=ui.info_embed("Resumed."))
 
     if command == "skip":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to skip."))
         if not (vc.is_playing() or vc.is_paused()):
             return Reply(embed=ui.error_embed("Nothing is playing."))
@@ -1052,7 +1100,7 @@ async def execute_music_command(
         return Reply(embed=ui.info_embed(f"Skipped **{skipped}**."))
 
     if command == "stop":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel (or be an admin) to stop playback."))
         player.queue.clear()
         player.loop_mode = LoopMode.OFF
@@ -1066,7 +1114,7 @@ async def execute_music_command(
             "Stopped and cleared the queue. I'll stay here — use `/leave` to send me away."))
 
     if command == "volume":
-        if not is_admin(msg):
+        if not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
         if len(parts) < 2:
             return Reply(embed=ui.info_embed(
@@ -1090,7 +1138,7 @@ async def execute_music_command(
         ))
 
     if command == "loop":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(parts) < 2:
             return Reply(embed=ui.info_embed(
@@ -1104,7 +1152,7 @@ async def execute_music_command(
         return Reply(embed=ui.info_embed(f"Loop set to **{player.loop_mode.value}**."))
 
     if command == "remove":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(parts) < 2:
             return Reply(embed=ui.error_embed("Which one? Usage: `/remove <position>` (see `/queue`)"))
@@ -1117,7 +1165,7 @@ async def execute_music_command(
         if target is None:
             return Reply(embed=ui.error_embed("There's no track at position " + str(index) + "."))
         # Users may only remove what they queued; admins may remove anything
-        if target.requested_by != str(msg.author) and not is_admin(msg):
+        if target.requested_by != str(interaction.user) and not is_admin_member(interaction.guild, interaction.user.id):
             return (DENY + " That track was queued by " + target.requested_by
                     + ". You can only remove your own.")
 
@@ -1125,7 +1173,7 @@ async def execute_music_command(
         return Reply(embed=ui.info_embed("Removed **" + target.title + "** from the queue."))
 
     if command == "shuffle":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(player.queue) < 2:
             return Reply(embed=ui.error_embed("Not enough tracks queued to shuffle."))
@@ -1133,7 +1181,7 @@ async def execute_music_command(
         return Reply(embed=ui.info_embed("Shuffled **" + str(len(player.queue)) + "** queued track(s)."))
 
     if command == "clearqueue":
-        if not is_admin(msg):
+        if not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
         count = len(player.queue)
         if count == 0:
@@ -1143,7 +1191,7 @@ async def execute_music_command(
             "Cleared **" + str(count) + "** queued track(s). Current track keeps playing."))
 
     if command == "skipto":
-        if not in_voice_with_amy() and not is_admin(msg):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
         if len(parts) < 2:
             return Reply(embed=ui.error_embed("Skip to where? Usage: `/skipto <position>` (see `/queue`)"))
@@ -1168,170 +1216,412 @@ async def execute_music_command(
     return f"Unknown music command: `{command}`."
 #--------------------------------------
 
-#----Command Functions------
-async def execute_command(command_text: str, msg: discord.Message) -> Union[str, Reply]:
-    """Execute a command based on the command text."""
-    global bot_enabled, model
-    parts = command_text.strip().split()
+#----Status and Model------
+async def build_status(interaction: discord.Interaction) -> str:
+    """Assemble the /status report. Kept out of the command so it stays readable."""
+    bot_state = "Enabled ✅" if bot_enabled else "Disabled ❌"
 
-    if not parts:
-        return "Invalid command. Use /help for available commands."
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, ollama.list)
+        ollama_state = "Connected ✅"
+    except Exception:
+        ollama_state = "Unavailable ❌"
 
-    command = parts[0].lower()
+    stats = db.get_stats()
+    throttled = get_rate_limited_count()
+    guild = interaction.guild
 
-    if command == "help":
-        return HELP_EVERYONE + (HELP_ADMIN if is_admin(msg) else "")
+    current = voice.active_channel(voice.get_voice_client(guild)) if guild else None
+    if current is not None:
+        voice_state = f"In **{current.name}** ({voice.humans_in(current)} listener(s))"
+    else:
+        voice_state = "Not connected"
 
-    if command == "toggle":
-        if not is_admin(msg):
-            return "🚫 You don't have permission to use this command. (Admin only)"
-        bot_enabled = not bot_enabled
-        state = "enabled" if bot_enabled else "disabled"
-        safe_print(f"[INFO] Bot is now {state}")
-        return f"🤖 Bot is now **{state}**"
+    ffmpeg_state = "Found ✅" if music.find_ffmpeg() else "Missing ❌"
+    if guild:
+        mp = music_manager.player_for(guild.id)
+        playing = mp.current.title if mp.current else "nothing"
+        music_state = f"{playing} | {len(mp.queue)} queued | loop {mp.loop_mode.value}"
+    else:
+        music_state = "n/a"
 
-    if command == "status":
-        if not is_admin(msg):
-            return "🚫 You don't have permission to use this command. (Admin only)"
+    return (
+        f"\U0001F4CA **Amy Status**\n"
+        f"Bot: {bot_state}\n"
+        f"Ollama: {ollama_state} | Model: `{model}`\n"
+        f"Voice: {voice_state}\n"
+        f"Music: {music_state} | FFmpeg: {ffmpeg_state}\n"
+        f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
+        f"Rate limits: {throttled} user(s) currently throttled"
+    )
 
-        bot_state = "Enabled ✅" if bot_enabled else "Disabled ❌"
 
+async def switch_model(name: str) -> str:
+    """Show the active Ollama model, or switch to another installed one."""
+    global model
+    if not name:
+        return f"\U0001F9E0 Current model: `{model}`\nPass a name to switch."
+
+    loop = asyncio.get_running_loop()
+    try:
+        available = await loop.run_in_executor(None, ollama.list)
+    except Exception as e:
+        return f"\U0001F6AB Could not reach Ollama to verify the model: {e}"
+
+    model_names = extract_model_names(available)
+    if name not in model_names:
+        names_list = ", ".join(f"`{n}`" for n in model_names) or "none installed"
+        return f"\U0001F6AB Model `{name}` not found. Installed models: {names_list}"
+
+    model = name
+    safe_print(f"[INFO] Model switched to {model}")
+    return f"\U0001F9E0 Model switched to `{model}`"
+#--------------------------------------
+
+#----Forget Confirmation------
+class ForgetConfirm(discord.ui.View):
+    """
+    Confirm/cancel buttons for /forget.
+
+    Replaces the old reaction flow: buttons need no `reactions` intent, no pending-state
+    dictionary keyed by message id, and can be scoped to the requester directly.
+    """
+
+    TIMEOUT: float = 60.0
+
+    def __init__(self, requester_id: int, server_id, channel_id: int) -> None:
+        super().__init__(timeout=self.TIMEOUT)
+        self.requester_id = requester_id
+        self.server_id = server_id
+        self.channel_id = channel_id
+        self.message: Optional[discord.Message] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            embed=ui.error_embed("Only the person who ran the command can confirm this."),
+            ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
         try:
-            await asyncio.get_running_loop().run_in_executor(None, ollama.list)
-            ollama_state = "Connected ✅"
-        except Exception:
-            ollama_state = "Unavailable ❌"
+            await self.message.edit(
+                embed=ui.info_embed("Request timed out. Nothing was deleted."), view=None)
+        except discord.HTTPException:
+            pass
 
-        stats = db.get_stats()
-        throttled = get_rate_limited_count()
+    @discord.ui.button(label="Wipe memory", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction,
+                      button: discord.ui.Button) -> None:
+        db.clear_channel(self.server_id, self.channel_id)
+        self.stop()
+        await interaction.response.edit_message(
+            embed=ui.info_embed("Conversation memory for this channel has been cleared."),
+            view=None)
 
-        current = voice.active_channel(voice.get_voice_client(msg.guild)) if msg.guild else None
-        if current is not None:
-            voice_state = f"In **{current.name}** ({voice.humans_in(current)} listener(s))"
-        else:
-            voice_state = "Not connected"
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction,
+                     button: discord.ui.Button) -> None:
+        self.stop()
+        await interaction.response.edit_message(
+            embed=ui.info_embed("Cancelled. Nothing was deleted."), view=None)
+#--------------------------------------
 
-        ffmpeg_state = "Found ✅" if music.find_ffmpeg() else "Missing ❌"
-        if msg.guild:
-            mp = music_manager.player_for(msg.guild.id)
-            playing = mp.current.title if mp.current else "nothing"
-            music_state = f"{playing} | {len(mp.queue)} queued | loop {mp.loop_mode.value}"
-        else:
-            music_state = "n/a"
-
-        return (
-            f"📊 **Amy Status**\n"
-            f"Bot: {bot_state}\n"
-            f"Ollama: {ollama_state} | Model: `{model}`\n"
-            f"Voice: {voice_state}\n"
-            f"Music: {music_state} | FFmpeg: {ffmpeg_state}\n"
-            f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
-            f"Rate limits: {throttled} user(s) currently throttled"
-        )
-
-    if command == "model":
-        if not is_admin(msg):
-            return "🚫 You don't have permission to use this command. (Admin only)"
-
-        if len(parts) < 2:
-            return f"🧠 Current model: `{model}`\nUsage: `/model <model_name>` to switch."
-
-        new_model = parts[1]
-        loop = asyncio.get_running_loop()
-        try:
-            available = await loop.run_in_executor(None, ollama.list)
-        except Exception as e:
-            return f"🚫 Could not reach Ollama to verify the model: {e}"
-
-        model_names = extract_model_names(available)
-        if new_model not in model_names:
-            names_list = ", ".join(f"`{n}`" for n in model_names) or "none installed"
-            return f"🚫 Model `{new_model}` not found. Installed models: {names_list}"
-
-        model = new_model
-        safe_print(f"[INFO] Model switched to {model}")
-        return f"🧠 Model switched to `{model}`"
-
-    #----Voice & Music Commands------
-    # Handled in one block so the guild guard below narrows for every one of them
-    if command in VOICE_COMMANDS or command in MUSIC_COMMANDS:
-        guild = msg.guild
-        if guild is None:
-            return "🚫 Voice and music commands only work in a server, not in DMs."
-        # Light cooldown so these can't be spammed (admins and read-only commands exempt)
-        if not is_admin(msg) and command not in MUSIC_READONLY_COMMANDS:
-            allowed, reset_in = check_voice_cooldown(msg.author.id)
-            if not allowed:
-                return f"⏳ Too many voice commands. Try again in {reset_in}s."
-        if command in VOICE_COMMANDS:
-            return await execute_voice_command(command, parts, msg, guild)
-        return await execute_music_command(command, parts, msg, guild)
-    #--------------------------------------
-
-    if command == "forget":
-        if not is_admin(msg):
-            return "🚫 You don't have permission to use this command. (Admin only)"
-        server_id = msg.guild.id if msg.guild else "DM"
-        channel_id = msg.channel.id
-        confirm_msg = await msg.reply(
-            "⚠️ This will wipe all conversation memory for this channel. React with ✅ to confirm, or ❌ to cancel."
-        )
-        await confirm_msg.add_reaction("✅")
-        await confirm_msg.add_reaction("❌")
-        pending_clear[confirm_msg.id] = (msg.author.id, channel_id, server_id)
-
-        async def timeout_clear(confirm_id: int) -> None:
-            await asyncio.sleep(60)
-            if confirm_id in pending_clear:
-                del pending_clear[confirm_id]
-                try:
-                    await confirm_msg.edit(content="⚠️ Request timed out. Cancelled.")
-                    await confirm_msg.clear_reactions()
-                except Exception:
-                    pass
-        asyncio.create_task(timeout_clear(confirm_msg.id))
-        return ""  # Reply already sent above
-
-    if command == "dice":
-        try:
-            sides = 6
-            amount = 1
-            if len(parts) > 1:
-                sides = int(parts[1])
-            if len(parts) > 2:
-                amount = int(parts[2])
-        except ValueError:
-            return ("Invalid dice command. Both arguments must be integers.\n"
-                    "Usage: `/dice [sides] [amount]`\nExample: `/dice 20` or `/dice 6 3`")
-
-        if not 1 <= sides <= MAX_DICE_SIDES:
-            return f"Invalid dice command. Sides must be between 1 and {MAX_DICE_SIDES}."
-        # Capped because the roll runs on the event loop: an unbounded amount would
-        # block the whole bot (chat, music and buttons) for as long as it took.
-        if not 1 <= amount <= MAX_DICE_AMOUNT:
-            return f"Invalid dice command. Amount must be between 1 and {MAX_DICE_AMOUNT}."
-
-        rolls = [random.randint(1, sides) for _ in range(amount)]
-        if amount == 1:
-            return f"🎲 Rolled 1d{sides}: **{rolls[0]}**"
-        breakdown = " + ".join(f"**{r}**" for r in rolls)
-        return f"🎲 Rolled {amount}d{sides}: {breakdown} = **{sum(rolls)}**"
+#----Slash Command Helpers------
+async def voice_gate(interaction: discord.Interaction) -> bool:
+    """
+    Apply the shared voice cooldown. Read-only music commands and admins skip it.
+    Returns False (and refuses privately) when the caller is over the limit.
+    """
+    if is_admin_member(interaction.guild, interaction.user.id):
+        return True
+    allowed, reset_in = check_voice_cooldown(interaction.user.id)
+    if allowed:
+        return True
+    await deny(interaction, f"Too many voice commands. Try again in {reset_in}s.")
+    return False
 
 
-    if command == "rng":
-        try:
-            if len(parts) < 3:
-                return "Invalid rng command. Usage: `/rng min max`\nExample: `/rng 0 999`"
-            n = int(parts[1])
-            m = int(parts[2])
-            if n > m:
-                return "Invalid rng command. Min must be less than or equal to Max."
-            result = random.randint(n, m)
-            return f"🎲 Random number between {n} and {m}: **{result}**"
-        except ValueError:
-            return "Invalid rng command. Both arguments must be integers.\nUsage: `/rng min max`\nExample: `/rng 0 999`"
+async def require_guild(interaction: discord.Interaction) -> Optional[discord.Guild]:
+    """
+    Narrow interaction.guild for the type checker.
 
-    return f"Unknown command: `{command}`. Use `/help` for available commands."
+    @app_commands.guild_only() already stops these running in DMs, but the attribute stays
+    Optional, so this makes the guarantee explicit instead of scattering asserts.
+    """
+    if interaction.guild is not None:
+        return interaction.guild
+    await deny(interaction, "That only works in a server.")
+    return None
+
+
+async def simple_music(
+    interaction: discord.Interaction, command: str, args: Optional[List[str]] = None
+) -> None:
+    """Run a music command that needs no network work, so it can answer immediately."""
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    if command not in MUSIC_READONLY_COMMANDS and not await voice_gate(interaction):
+        return
+    parts = [command] + (args or [])
+    await send_reply(
+        interaction, await execute_music_command(command, parts, interaction, guild)
+    )
+#--------------------------------------
+
+#----Slash Commands------
+# Registration only. Each validates through Discord's own typing, then delegates to the
+# handlers above. Commands doing network work defer first: Discord requires a response
+# within 3 seconds and yt-dlp resolution takes several.
+
+@tree.command(name="help", description="Show Amy's commands")
+async def slash_help(interaction: discord.Interaction) -> None:
+    is_adm = is_admin_member(interaction.guild, interaction.user.id)
+    await interaction.response.send_message(
+        HELP_EVERYONE + (HELP_ADMIN if is_adm else ""), ephemeral=True)
+
+
+@tree.command(name="dice", description="Roll dice")
+@app_commands.describe(sides="Number of sides (default 6)",
+                       amount="How many dice to roll (default 1)")
+async def slash_dice(
+    interaction: discord.Interaction,
+    sides: app_commands.Range[int, 1, MAX_DICE_SIDES] = 6,
+    amount: app_commands.Range[int, 1, MAX_DICE_AMOUNT] = 1,
+) -> None:
+    # Range makes Discord reject out-of-bounds input client-side, so the event-loop
+    # freeze this once allowed is unreachable rather than merely guarded.
+    rolls = [random.randint(1, sides) for _ in range(amount)]
+    if amount == 1:
+        await interaction.response.send_message(
+            "\U0001F3B2 Rolled 1d%d: **%d**" % (sides, rolls[0]))
+        return
+    breakdown = " + ".join("**%d**" % r for r in rolls)
+    await interaction.response.send_message(
+        "\U0001F3B2 Rolled %dd%d: %s = **%d**" % (amount, sides, breakdown, sum(rolls)))
+
+
+@tree.command(name="rng", description="Generate a random number between two values")
+@app_commands.describe(minimum="Lowest possible value", maximum="Highest possible value")
+async def slash_rng(interaction: discord.Interaction, minimum: int, maximum: int) -> None:
+    if minimum > maximum:
+        await deny(interaction, "Min must be less than or equal to Max.")
+        return
+    await interaction.response.send_message(
+        "\U0001F3B2 Random number between %d and %d: **%d**"
+        % (minimum, maximum, random.randint(minimum, maximum)))
+
+
+@tree.command(name="join", description="Bring Amy into your voice channel")
+@app_commands.guild_only()
+async def slash_join(interaction: discord.Interaction) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()
+    await send_reply(interaction,
+                     await execute_voice_command("join", ["join"], interaction, guild))
+
+
+@tree.command(name="leave", description="Make Amy leave her voice channel")
+@app_commands.guild_only()
+async def slash_leave(interaction: discord.Interaction) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()
+    await send_reply(interaction,
+                     await execute_voice_command("leave", ["leave"], interaction, guild))
+
+
+@tree.command(name="create", description="Create a voice channel and join it")
+@app_commands.describe(name="Channel name (defaults to Amy's Room)")
+@app_commands.guild_only()
+@admin_only()
+async def slash_create(interaction: discord.Interaction, name: str = "") -> None:
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()
+    parts = ["create"] + (name.split() if name else [])
+    await send_reply(interaction,
+                     await execute_voice_command("create", parts, interaction, guild))
+
+
+@tree.command(name="play", description="Play a song, URL, or playlist")
+@app_commands.describe(query="Song name, YouTube/audio URL, playlist URL, or local file")
+@app_commands.guild_only()
+async def slash_play(interaction: discord.Interaction, query: str) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()   # resolution takes seconds
+    await send_reply(interaction,
+                     await execute_music_command("play", ["play"] + query.split(),
+                                                 interaction, guild))
+
+
+@tree.command(name="search", description="Search and pick from the top results")
+@app_commands.describe(query="What to search for")
+@app_commands.guild_only()
+async def slash_search(interaction: discord.Interaction, query: str) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()
+    await send_reply(interaction,
+                     await execute_music_command("search", ["search"] + query.split(),
+                                                 interaction, guild))
+
+
+@tree.command(name="pause", description="Pause playback")
+@app_commands.guild_only()
+async def slash_pause(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "pause")
+
+
+@tree.command(name="resume", description="Resume playback")
+@app_commands.guild_only()
+async def slash_resume(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "resume")
+
+
+@tree.command(name="skip", description="Skip the current track")
+@app_commands.guild_only()
+async def slash_skip(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "skip")
+
+
+@tree.command(name="stop", description="Stop playback and clear the queue (Amy stays)")
+@app_commands.guild_only()
+async def slash_stop(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "stop")
+
+
+@tree.command(name="queue", description="Show what's playing and what's queued")
+@app_commands.describe(page="Page number (10 tracks per page)")
+@app_commands.guild_only()
+async def slash_queue(
+    interaction: discord.Interaction,
+    page: app_commands.Range[int, 1, 100] = 1,
+) -> None:
+    await simple_music(interaction, "queue", [str(page)])
+
+
+@tree.command(name="nowplaying", description="Show the current track")
+@app_commands.guild_only()
+async def slash_nowplaying(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "nowplaying")
+
+
+@tree.command(name="remove", description="Remove a track you queued")
+@app_commands.describe(position="Queue position, as shown by /queue")
+@app_commands.guild_only()
+async def slash_remove(
+    interaction: discord.Interaction,
+    position: app_commands.Range[int, 1, 100],
+) -> None:
+    await simple_music(interaction, "remove", [str(position)])
+
+
+@tree.command(name="skipto", description="Jump ahead to a queued track")
+@app_commands.describe(position="Queue position, as shown by /queue")
+@app_commands.guild_only()
+async def slash_skipto(
+    interaction: discord.Interaction,
+    position: app_commands.Range[int, 1, 100],
+) -> None:
+    await simple_music(interaction, "skipto", [str(position)])
+
+
+@tree.command(name="shuffle", description="Shuffle the queued tracks")
+@app_commands.guild_only()
+async def slash_shuffle(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "shuffle")
+
+
+@tree.command(name="loop", description="Set repeat mode")
+@app_commands.describe(mode="What to repeat")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="off", value="off"),
+    app_commands.Choice(name="track", value="track"),
+    app_commands.Choice(name="queue", value="queue"),
+])
+@app_commands.guild_only()
+async def slash_loop(interaction: discord.Interaction,
+                     mode: app_commands.Choice[str]) -> None:
+    await simple_music(interaction, "loop", [mode.value])
+
+
+@tree.command(name="clearqueue", description="Empty the queue (current track keeps playing)")
+@app_commands.guild_only()
+@admin_only()
+async def slash_clearqueue(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, "clearqueue")
+
+
+@tree.command(name="volume", description="Show or set playback volume")
+@app_commands.describe(level="Volume percent (omit to see the current value)")
+@app_commands.guild_only()
+@admin_only()
+async def slash_volume(
+    interaction: discord.Interaction,
+    level: Optional[app_commands.Range[int, 0, 100]] = None,
+) -> None:
+    args = [str(level)] if level is not None else []
+    await simple_music(interaction, "volume", args)
+
+
+@tree.command(name="toggle", description="Enable or disable Amy's chat replies")
+@admin_only()
+async def slash_toggle(interaction: discord.Interaction) -> None:
+    global bot_enabled
+    bot_enabled = not bot_enabled
+    state = "enabled" if bot_enabled else "disabled"
+    safe_print("[INFO] Bot is now " + state)
+    await interaction.response.send_message("\U0001F916 Bot is now **%s**" % state)
+
+
+@tree.command(name="status", description="Show bot, Ollama, voice and memory status")
+@admin_only()
+async def slash_status(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)   # ollama.list() hits the network
+    await send_reply(interaction, await build_status(interaction))
+
+
+@tree.command(name="model", description="Show or switch the Ollama model")
+@app_commands.describe(name="Model to switch to (omit to see the current one)")
+@admin_only()
+async def slash_model(interaction: discord.Interaction, name: str = "") -> None:
+    await interaction.response.defer()
+    await send_reply(interaction, await switch_model(name))
+
+
+@tree.command(name="forget", description="Wipe Amy's conversation memory for this channel")
+@app_commands.guild_only()
+@admin_only()
+async def slash_forget(interaction: discord.Interaction) -> None:
+    server_id = interaction.guild.id if interaction.guild else "DM"
+    view = ForgetConfirm(interaction.user.id, server_id, interaction.channel_id or 0)
+    await interaction.response.send_message(
+        embed=ui.error_embed(
+            "This will wipe all conversation memory for this channel.",
+            heading="Are you sure?"),
+        view=view,
+    )
+    view.message = await interaction.original_response()
 #--------------------------------------
 
 #----Event Handlers for Discord Bot------
@@ -1341,6 +1631,21 @@ async def on_ready() -> None:
     activity = discord.Activity(type=discord.ActivityType.watching, name="conversations")
     await bot.change_presence(activity=activity, status=discord.Status.online)
     safe_print("[INFO] Bot status set to: Watching conversations")
+
+    # Register commands with Discord. Guild-scoped so they appear immediately;
+    # a global sync can take up to an hour to propagate.
+    try:
+        if GUILD_ID:
+            scope = discord.Object(id=GUILD_ID)
+            tree.copy_global_to(guild=scope)
+            synced = await tree.sync(guild=scope)
+            safe_print(f"[INFO] Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
+        else:
+            synced = await tree.sync()
+            safe_print(f"[INFO] Synced {len(synced)} slash command(s) globally "
+                       "(may take up to an hour to appear - set GUILD_ID for instant sync)")
+    except Exception as e:
+        safe_print(f"[ERROR] Could not sync slash commands: {e}")
 
     if not prune_old_messages_task.is_running():
         prune_old_messages_task.start()
@@ -1396,21 +1701,8 @@ async def on_message(msg: discord.Message) -> None:
         channel_id = msg.channel.id
         safe_print(f"[DEBUG] Server ID: {server_id}, Channel ID: {channel_id}")
 
-        if msg.content.startswith("/"):
-            safe_print("[DEBUG] Processing as command")
-            response = await execute_command(msg.content[1:], msg)
-            if isinstance(response, Reply):
-                # discord.py wants MISSING, not None, for "don't set this field"
-                await msg.reply(
-                    content=response.content or discord.utils.MISSING,
-                    embed=response.embed or discord.utils.MISSING,
-                    view=response.view or discord.utils.MISSING,
-                )
-            elif response:
-                await send_long_reply(msg, response)
-            safe_print("[DEBUG] Command handled")
-            return
-
+        # Commands are slash commands now and arrive as interactions, not messages.
+        # Anything reaching here is conversation.
         if not bot_enabled:
             safe_print("[DEBUG] Bot is disabled, ignoring chat message")
             return
@@ -1473,33 +1765,6 @@ async def on_voice_state_update(
     if left:
         safe_print(f"[INFO] Left empty voice channel: {left}")
 
-@bot.event
-async def on_reaction_add(reaction: discord.Reaction, user: discord.User) -> None:
-    """Handle reactions for /clear confirmation."""
-    if user.bot:
-        return
-
-    confirm_id = reaction.message.id
-    if confirm_id not in pending_clear:
-        return
-
-    requesting_user_id, channel_id, server_id = pending_clear[confirm_id]
-
-    if user.id != requesting_user_id:
-        return
-
-    del pending_clear[confirm_id]
-
-    if str(reaction.emoji) == "✅":
-        db.clear_channel(server_id, channel_id)
-        await reaction.message.edit(content="🗑️ Conversation memory for this channel has been cleared.")
-    else:
-        await reaction.message.edit(content="Cancelled.")
-
-    try:
-        await reaction.message.clear_reactions()
-    except Exception:
-        pass
 #--------------------------------------
 
 if __name__ == "__main__":

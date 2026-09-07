@@ -1,108 +1,71 @@
-import io, os, sys, time, asyncio, importlib.util
-from collections import deque
+import io
+import os
+import sys
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 # Resolve the project root from this file, so the suite runs from any checkout
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PROJ); os.chdir(PROJ)
-spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
-amy = importlib.util.module_from_spec(spec); sys.modules["amy"] = amy
-spec.loader.exec_module(amy)
-amy.voice.get_voice_client = lambda g: g.voice_client
-amy.voice.active_channel = lambda vc: None if (vc is None or not vc.is_connected()) else vc.channel
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-fails = []
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok: fails.append(label); print("        got:", str(got)[:130])
+from _fakes import (Guild, Interaction, Member, VoiceChannel, VoiceClient,
+                    load_bot, run_music, seed_queue)
 
-class Perms:
-    connect = speak = manage_channels = True
-    administrator = False
-class VC:
-    def __init__(s, i, n): s.id, s.name, s.members = i, n, []
-    def permissions_for(s, w): return Perms()
-class VoiceClient:
-    def __init__(s, ch): s.channel, s.stopped, s.disconnected = ch, False, False
-    def is_connected(s): return not s.disconnected
-    def is_playing(s): return not s.stopped
-    def is_paused(s): return False
-    def stop(s): s.stopped = True
-    async def disconnect(s, force=False): s.disconnected = True
-class Member:
-    def __init__(s, i, ch=None):
-        s.id, s.bot, s.roles, s.guild_permissions = i, False, [], Perms()
-        s.voice = type("VS", (), {"channel": ch})() if ch else None
-class Guild:
-    def __init__(s, owner, m, vcl=None):
-        s.id, s.owner_id, s._m, s.voice_client = 500, owner, m, vcl
-        s.me = type("M", (), {"guild_permissions": Perms()})()
-    def get_member(s, u): return s._m if s._m and s._m.id == u else None
-class Msg:
-    def __init__(s, uid, g):
-        s.author = type("A", (), {"id": uid, "__str__": lambda self: "u"})()
-        s.guild, s.channel = g, type("C", (), {"id": 7, "category": None})()
-
-def text_of(r):
-    if isinstance(r, str): return r
-    parts = [r.content or ""]
-    if r.embed is not None:
-        parts += [r.embed.title or "", r.embed.description or ""]
-        if r.embed.author: parts.append(r.embed.author.name or "")
-        for f in r.embed.fields: parts += [f.name or "", str(f.value or "")]
-    return chr(10).join(parts)
-
-def run(cmd, msg):
-    amy.voice_cmd_store.clear()
-    return text_of(asyncio.run(amy.execute_command(cmd, msg)))
+amy = load_bot()
 
 OWNER, USER = 42, 99
-g_plain = Guild(OWNER, Member(USER))
+GUILD = 500
+fails = []
 
-print("=== /dice freeze bug is fixed ===")
-t0 = time.time()
-out = run("dice 6 1000000000", Msg(USER, g_plain))
-dt = time.time() - t0
-check("huge amount refused", "Amount must be between 1 and %d" % amy.MAX_DICE_AMOUNT in out, out)
-check("refused instantly (was ~300s)", dt < 1.0, "%.2fs" % dt)
-check("huge sides refused",
-      "Sides must be between 1 and %d" % amy.MAX_DICE_SIDES in run("dice 999999999", Msg(USER, g_plain)))
 
-t0 = time.time()
-out = run("dice 6 %d" % amy.MAX_DICE_AMOUNT, Msg(USER, g_plain))
-check("max allowed roll is fast", (time.time() - t0) < 0.5)
-check("max allowed roll succeeds", "Rolled %d" % amy.MAX_DICE_AMOUNT in out, out)
+def check(label, ok, got=""):
+    print(("  PASS " if ok else "  FAIL ") + label)
+    if not ok:
+        fails.append(label)
+        print("        got:", str(got)[:130])
+
+
+def command(name):
+    return amy.tree.get_command(name)
+
+
+print("=== the /dice freeze bug is now structurally impossible ===")
+dice = command("dice")
+params = {p.name: p for p in dice.parameters}
+check("/dice registered", dice is not None)
+check("amount is bounded by Discord",
+      params["amount"].max_value == amy.MAX_DICE_AMOUNT, params["amount"].max_value)
+check("amount has a floor of 1", params["amount"].min_value == 1)
+check("sides is bounded by Discord",
+      params["sides"].max_value == amy.MAX_DICE_SIDES, params["sides"].max_value)
+check("sides has a floor of 1", params["sides"].min_value == 1)
+print("        (Range bounds are enforced client-side, so /dice 6 1000000000 never")
+print("         reaches the event loop at all - it used to freeze the bot for ~300s)")
 
 print()
-print("=== /dice boundaries and output ===")
-check("amount 0 refused", "Amount must be" in run("dice 6 0", Msg(USER, g_plain)))
-check("negative amount refused", "Amount must be" in run("dice 6 -5", Msg(USER, g_plain)))
-check("sides 0 refused", "Sides must be" in run("dice 0", Msg(USER, g_plain)))
-check("non-numeric refused", "must be integers" in run("dice abc", Msg(USER, g_plain)))
-check("bare /dice works (replaces /dice1)", "Rolled 1d6" in run("dice", Msg(USER, g_plain)))
-out = run("dice 6 3", Msg(USER, g_plain))
-check("multi-roll shows each value (replaces /dice2)",
-      out.count("**") >= 8 and "+" in out and "=" in out, out)
-check("single roll has no breakdown", "+" not in run("dice 20", Msg(USER, g_plain)))
+print("=== deleted commands really are gone ===")
+for gone in ("dice1", "dice2", "clear", "np"):
+    check("/%s not registered" % gone, command(gone) is None)
 
 print()
-print("=== deleted commands are gone ===")
-for gone in ("dice1", "dice2", "clear"):
-    check("/%s no longer recognised" % gone,
-          "Unknown command" in run(gone, Msg(USER, g_plain)), run(gone, Msg(USER, g_plain)))
+print("=== the surviving commands are registered ===")
+expected = [
+    "help", "dice", "rng", "join", "leave", "create", "play", "search",
+    "pause", "resume", "skip", "stop", "queue", "nowplaying", "remove",
+    "skipto", "shuffle", "loop", "clearqueue", "volume", "toggle", "status",
+    "model", "forget",
+]
+for name in expected:
+    check("/%s registered" % name, command(name) is not None)
 
 print()
 print("=== /stop stops but stays connected ===")
-ch = VC(10, "Chung")
-m = Member(USER, ch)
+ch = VoiceChannel(10, "Chung")
+member = Member(USER, ch)
 vcl = VoiceClient(ch)
-g = Guild(OWNER, m, vcl)
-amy.music_manager.cleanup(500)
-p = amy.music_manager.player_for(500)
-p.queue = deque([amy.music.Track(title="t%d" % i, query="q", duration=60, requested_by="u")
-                 for i in range(3)])
-p.current = amy.music.Track(title="playing", query="q", duration=60, requested_by="u")
+guild = Guild(OWNER, member, vcl, guild_id=GUILD)
+p = seed_queue(amy, GUILD, ["t1", "t2", "t3"])
 p.loop_mode = amy.LoopMode.QUEUE
-out = run("stop", Msg(USER, g))
+out = run_music(amy, "stop", interaction=Interaction(member, guild))
 check("queue cleared", len(p.queue) == 0, len(p.queue))
 check("loop reset", p.loop_mode is amy.LoopMode.OFF, p.loop_mode)
 check("playback stopped", vcl.stopped)
@@ -112,5 +75,6 @@ check("reply points at /leave", "/leave" in out, out)
 
 print()
 if fails:
-    print("%d CHECK(S) FAILED" % len(fails)); sys.exit(1)
+    print("%d CHECK(S) FAILED" % len(fails))
+    sys.exit(1)
 print("ALL COMMAND AUDIT TESTS PASSED")

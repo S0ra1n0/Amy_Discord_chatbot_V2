@@ -23,7 +23,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/remove [position]` - Remove a track you queued
 `/skipto [position]` - Jump ahead to a queued track
 `/shuffle` - Shuffle the queued tracks
-`/nowplaying` - Show the current track (alias: `/np`)
+`/nowplaying` - Show the current track
 `/loop [off|track|queue]` - Set repeat mode"""
 
 HELP_ADMIN = """

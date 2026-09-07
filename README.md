@@ -20,7 +20,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - Automatic daily pruning of old conversation history
 - Admin access control — admin commands restricted to server owner or users with the `Admin` role
 - Rate limiting — non-admin users are capped at 5 chat messages per hour, and 3 voice commands per minute
-- Simple `/`-prefixed command system, easy to extend
+- **Native slash commands** — Amy's commands appear in Discord's own autocomplete, with typed arguments Discord validates before they reach the bot
 
 ## Functions & Commands
 
@@ -55,9 +55,25 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/skipto [position]`     | Jump ahead to a queued track, dropping the ones before it                 | In-channel |
 | `/shuffle`               | Shuffle the queued tracks (current track keeps playing)                   | In-channel |
 | `/clearqueue`            | Empty the queue without stopping the current track                        | Admin only |
-| `/nowplaying` / `/np`    | Show the current track                                                    | Everyone   |
+| `/nowplaying`            | Show the current track                                                    | Everyone   |
 | `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
+
+### How commands work
+
+Amy uses Discord's **native slash commands**. Type `/` in any channel and her commands appear
+in the autocomplete list with descriptions and typed arguments, the same as any other bot.
+
+Discord validates arguments before they reach Amy: `/dice` won't accept more than 100 dice,
+`/volume` is limited to 0–100, and `/loop` presents a three-option picker rather than free
+text. Permission refusals are **ephemeral** — only you see them, so they don't clutter the
+channel.
+
+Commands register to the server named by `GUILD_ID` in `.env`, which makes them appear
+instantly. Without it they register globally and can take up to an hour to show up.
+
+> Typing a command as an ordinary message (`/play something`) no longer works — use the
+> real slash command. Talking to Amy normally is unchanged.
 
 ### Admin Access
 
@@ -216,11 +232,13 @@ Both must print `True`.
 ```
 DISCORD_TOKEN=your_actual_discord_bot_token_here
 ADMIN_ROLE_NAME=Admin
+GUILD_ID=your_server_id
 DB_PRUNE_DAYS=30
 FFMPEG_PATH=
 ```
 
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
+- `GUILD_ID` is your server's ID. Slash commands register to that guild and appear **instantly**; leave it blank to register globally, which can take up to an hour to propagate. Enable Developer Mode in Discord, then right-click your server → Copy Server ID.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.

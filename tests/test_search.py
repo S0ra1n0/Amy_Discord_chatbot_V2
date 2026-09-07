@@ -1,4 +1,4 @@
-import io, os, sys, asyncio, importlib.util
+import io, os, sys, asyncio, inspect, importlib.util
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 # Resolve the project root from this file, so the suite runs from any checkout
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,31 +54,17 @@ check("label clipped to 100", len(v2.children[0].options[0].label) <= 100,
       len(v2.children[0].options[0].label))
 
 print()
-print("=== /search argument handling ===")
-class Perms:
-    connect = speak = manage_channels = True
-    administrator = False
-class Member:
-    def __init__(s, i): s.id, s.bot, s.roles, s.voice = i, False, [], None; s.guild_permissions = Perms()
-class Guild:
-    id, owner_id = 500, 42
-    def __init__(s, m): s._m = m; s.voice_client = None; s.me = type("M", (), {"guild_permissions": Perms()})()
-    def get_member(s, uid): return s._m if s._m.id == uid else None
-class Msg:
-    def __init__(s, uid, g): s.author = type("A", (), {"id": uid, "__str__": lambda self: "u"})(); s.guild = g; s.channel = type("C", (), {"id": 7, "category": None})()
+print("=== /search is declared correctly on the tree ===")
+# Discord enforces required parameters client-side, so a missing query can no longer
+# reach the handler at all - what matters now is that the declaration says so.
+sch = amy.tree.get_command("search")
+check("/search registered", sch is not None)
+qp = {p.name: p for p in sch.parameters}["query"]
+check("query is required", qp.required, qp.required)
+check("query is described", bool(qp.description), qp.description)
+check("/search defers (yt-dlp exceeds the 3s limit)",
+      "response.defer(" in inspect.getsource(sch.callback))
 
-def text_of(r):
-    if isinstance(r, str): return r
-    parts = [r.content or ""]
-    if r.embed is not None:
-        parts += [r.embed.title or "", r.embed.description or ""]
-        if r.embed.author: parts.append(r.embed.author.name or "")
-    return chr(10).join(parts)
-
-amy.voice_cmd_store.clear()
-g = Guild(Member(99))
-out = text_of(asyncio.run(amy.execute_command("search", Msg(99, g))))
-check("missing query rejected", "What should I search for" in out, out)
 
 print()
 print("=== live search against YouTube ===")
