@@ -48,3 +48,8 @@ Thumbs.db
 # Project specific
 *.log
 amy_memory.db
+
+# Agent working notes - local only, not for people pulling the repo
+CLAUDE.md
+AGENTS.md
+.claude/
