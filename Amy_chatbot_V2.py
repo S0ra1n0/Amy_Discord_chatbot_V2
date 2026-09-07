@@ -140,9 +140,14 @@ Limitations:
 - Always prioritize security and privacy
 
 Knowledge:
-- Your training data is frozen. You do not know today's date, current events, or anything recent.
+- Your training data is frozen, but you CAN look things up: you have a working web_search
+  tool. Never tell the user you have no internet access or cannot see current information.
 - For any question about current, recent or time-sensitive information, use the web_search
   tool rather than answering from memory. Treat search results as reference material.
+- When search results are present in the conversation, answer from them. Do not preface the
+  answer by saying you cannot access real-time data - you just searched, so you can.
+- If the results genuinely do not answer the question, say that plainly instead of filling
+  the gap from memory.
 
 Remember: You are here to make your master's life easier, more organized, and more productive. Approach each interaction with dedication and a desire to be helpful.
 '''
@@ -441,22 +446,36 @@ async def chat_streaming(
     if calls and not error_flag["occurred"]:
         call = calls[0]                      # one search per message - no tool loops
         args = call["function"].get("arguments") or {}
-        query = (args.get("query") if isinstance(args, dict) else "") or user_message
-        safe_print(f"[INFO] Web search requested: {query!r}")
+        if not isinstance(args, dict):
+            args = {}
+        query = args.get("query") or user_message
+        # Freshness is inferred from the query wording rather than asked of the model - a
+        # second tool parameter measurably cost search decisions (see websearch.py).
+        recency = websearch.infer_recency(query)
+        safe_print(f"[INFO] Web search requested: {query!r} (recency={recency or 'any'})")
 
         try:
             await active_msg.edit(content=f"🔍 Searching the web for **{query[:80]}**...")
         except discord.HTTPException:
             pass
 
-        results = await websearch.search(query)
+        # Two phases so the live message reflects what's actually happening: the result
+        # list arrives in about a second, reading the pages themselves takes a few more.
+        results = await websearch.search(query, recency=recency, with_content=False)
+        if results:
+            try:
+                await active_msg.edit(
+                    content=f"📖 Reading {len(results)} source(s) for **{query[:60]}**...")
+            except discord.HTTPException:
+                pass
+            await websearch.enrich(results)
         # tool_name ties the result back to the call. Without it the model treats the
         # results as an unattributed blob and may insist it has no web access at all.
         messages = messages + [
             {"role": "assistant", "content": "", "tool_calls": [call]},
             {"role": "tool",
              "tool_name": websearch.WEB_SEARCH_TOOL["function"]["name"],
-             "content": websearch.format_for_model(query, results)},
+             "content": websearch.format_for_model(query, results, recency=recency)},
         ]
 
         # Reset for the second pass; the first produced a tool call, not prose
@@ -1491,8 +1510,16 @@ async def slash_rng(interaction: discord.Interaction, minimum: int, maximum: int
 
 
 @tree.command(name="websearch", description="Search the web and show the results")
-@app_commands.describe(query="What to search for")
-async def slash_websearch(interaction: discord.Interaction, query: str) -> None:
+@app_commands.describe(query="What to search for",
+                       recency="Only show results from this recently")
+@app_commands.choices(recency=[
+    app_commands.Choice(name="Past day", value="day"),
+    app_commands.Choice(name="Past week", value="week"),
+    app_commands.Choice(name="Past month", value="month"),
+    app_commands.Choice(name="Past year", value="year"),
+])
+async def slash_websearch(interaction: discord.Interaction, query: str,
+                          recency: Optional[app_commands.Choice[str]] = None) -> None:
     if not WEB_SEARCH:
         await deny(interaction, "Web search is turned off on my host.")
         return
@@ -1505,7 +1532,10 @@ async def slash_websearch(interaction: discord.Interaction, query: str) -> None:
             return
 
     await interaction.response.defer()
-    results = await websearch.search(query)
+    # This view is about the raw sources, so skip fetching page bodies - they cost several
+    # seconds and never reach the embed. Amy's own searches during conversation do fetch them.
+    results = await websearch.search(query, recency=recency.value if recency else None,
+                                     with_content=False)
     await send_reply(interaction, Reply(embed=ui.search_web_embed(query, results)))
 
 

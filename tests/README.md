@@ -30,11 +30,14 @@ Individual suites can also be run directly: `python tests/test_music.py`.
 | `test_regression.py` | rate limiters, message splitting, `<think>`-tag stripping |
 | `test_security.py` | the `MUSIC_DIR` sandbox — path traversal must stay blocked |
 | `test_commands_audit.py` | `/dice` caps, removed commands, `/stop` staying connected |
+| `test_slash.py` | the slash-command tree: naming rules, descriptions, bounds, admin gating, 3s defers |
+| `test_websearch.py` | result parsing, page-text extraction, domain dedup, recency inference, the tool contract |
 | `test_docs_audit.py` | every command appears in both the help text and the README |
 
 **Network** — needs internet; slower and can fail if YouTube changes.
 
-`test_resolve.py`, `test_search.py`, `test_audio_path.py`
+`test_resolve.py`, `test_search.py`, `test_audio_path.py`, and the `--network` section of
+`test_websearch.py` (live DuckDuckGo: recency filtering, region pinning, page fetching)
 
 **Live** — needs a valid `DISCORD_TOKEN`; briefly brings the bot online.
 
@@ -48,5 +51,9 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
 - `test_ui.py` — a long track title exceeded Discord's limit and rejected the whole message
+- `test_websearch.py` — two separate regressions in how Amy searches. The tool description
+  decides whether she searches at all (a vague one scored 4/7, the explicit one 7/7), and
+  adding a second tool parameter dropped correct searches from 12/12 to 7/12. The suite pins
+  both the wording cues and the single-parameter shape.
 
 When fixing a bug, add the check that would have caught it.

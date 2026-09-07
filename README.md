@@ -43,7 +43,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/forget`                | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
 | `/dice [sides] [amount]` | Roll dice — defaults to one 6-sided; shows each roll when rolling several | Everyone   |
 | `/rng [min] [max]`       | Generate a random number between min and max (e.g., `/rng 0 999`)         | Everyone   |
-| `/websearch [query]`     | Search the web and show the results                                       | Everyone   |
+| `/websearch [query] [recency]` | Search the web and show the results, optionally limited to the past day/week/month/year | Everyone   |
 | `/join`                  | Bring Amy into the voice channel you're currently in                      | Everyone   |
 | `/leave`                 | Make Amy leave her voice channel                                          | In-channel or admin |
 | `/create [name]`         | Create a new voice channel and have Amy join it (e.g., `/create Music Room`) | Admin only |
@@ -80,7 +80,38 @@ looking up.
 Search uses **DuckDuckGo with no API key**. It parses their HTML page rather than an API, so
 like `yt-dlp` it can break when they change their markup — set `WEB_SEARCH=false` in `.env`
 to turn the feature off if that happens. Failures degrade to "I couldn't find anything"
-rather than breaking the conversation.
+rather than breaking the conversation. DuckDuckGo also throttles occasionally with an empty
+`HTTP 202`; that is transient, so Amy retries once before giving up.
+
+#### How the results are made precise
+
+A plain result snippet averages about **190 characters** and is often page furniture rather
+than an answer — Wikipedia's Ballon d'Or snippet was its table of contents. Four things
+close that gap, each measured rather than assumed:
+
+| Step | What it does | Measured effect |
+|---|---|---|
+| **Reads the pages** | Fetches the top 4 results concurrently and extracts the body text | Roughly **2 of 3** pages can be read; the tool message grows from ~1,800 to ~4,900 characters of real content |
+| **Filters by recency** | Applies DuckDuckGo's date filter when the question implies one | Filtered and unfiltered results overlapped in **0 of 6** URLs — it genuinely re-ranks |
+| **Pins the region** | Requests `us-en` instead of letting the endpoint geolocate | "hot news today" returned five Vietnamese-language sites before, CNN/BBC/Google News after |
+| **Deduplicates domains** | Keeps the first result per site, over-fetching so five sources remain | One publisher appearing three times no longer looks like three sources agreeing |
+
+Pages that can't be read — Wikipedia refuses bots by robot policy, and some sites render
+their text with JavaScript — simply keep their snippet, so a blocked fetch costs detail
+rather than the whole result. Consent banners and subscription nags are stripped out; without
+that filter one news homepage led with "We use cookies to ensure you get the best browsing
+experience" instead of any news.
+
+The freshness window is inferred from the wording of the question ("today" and "breaking" mean
+the past day, "most recent" means the past year, "latest" means the past week). This is
+deliberately **not** a second tool parameter: offering the model a `recency` argument to fill
+in dropped its correct search decisions from **12/12 to 7/12** on the same questions. Deciding
+*whether* to search matters far more than the window, so the tool stays single-parameter and
+`tests/test_websearch.py` pins that shape.
+
+The end-to-end effect, asked of the running model: *"who won the most recent Ballon d'Or?"*
+answered **"Lionel Messi in 2024"** from snippets alone — confidently wrong — and
+**"Ousmane Dembélé in 2025"**, correctly, once the pages were read.
 
 ### How commands work
 
