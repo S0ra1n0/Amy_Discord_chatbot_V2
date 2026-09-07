@@ -3,12 +3,8 @@
 
 HELP_EVERYONE = """**Commands — Everyone:**
 `/help` - Display command list and usage
-`/dice1` - Roll a single 6-sided dice
-`/dice2` - Roll two 6-sided dice
-`/dice [sides]` - Roll a custom dice
-  • Usage: `/dice 20`
-`/dice [sides] [amount]` - Roll multiple custom dice
-  • Usage: `/dice 6 3` (rolls 3 six-sided dice)
+`/dice [sides] [amount]` - Roll dice (defaults to one 6-sided)
+  • Usage: `/dice`, `/dice 20`, or `/dice 6 3`
 `/rng [min] [max]` - Generate a random number between min and max
   • Usage: `/rng 0 999`
 `/join` - Bring me into the voice channel you're in
@@ -21,7 +17,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
   • Usage: `/search never gonna give you up`
 `/pause` / `/resume` - Pause or resume playback
 `/skip` - Skip the current track
-`/stop` - Stop, clear the queue, and leave
+`/stop` - Stop playback and clear the queue (I stay in the channel)
 `/queue [page]` - Show what's playing and what's queued
   • Usage: `/queue 2` for the next page
 `/remove [position]` - Remove a track you queued
@@ -33,7 +29,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 HELP_ADMIN = """
 **Commands — Admin only:**
 `/toggle` - Enable/disable bot responses
-`/clear` - Wipe conversation memory for this channel
+`/forget` - Wipe conversation memory for this channel
 `/status` - Show bot state, Ollama connectivity, memory usage and rate limit info
 `/model` - Show the current Ollama model
 `/model [name]` - Switch to a different installed Ollama model

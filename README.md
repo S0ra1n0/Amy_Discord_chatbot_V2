@@ -39,11 +39,8 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/status`                | Show bot state, Ollama connectivity, memory stats and rate limit info     | Admin only |
 | `/model`                 | Show the current Ollama model                                             | Admin only |
 | `/model [name]`          | Switch to a different installed Ollama model (e.g., `/model qwen2.5:3b`)  | Admin only |
-| `/clear`                 | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
-| `/dice1`                 | Roll a single 6-sided dice                                                | Everyone   |
-| `/dice2`                 | Roll two 6-sided dice (shows individual rolls + total)                    | Everyone   |
-| `/dice [sides]`          | Roll a custom dice (e.g., `/dice 20` for a 20-sided dice)                 | Everyone   |
-| `/dice [sides] [amount]` | Roll multiple custom dice (e.g., `/dice 6 3` for three 6-sided dice)      | Everyone   |
+| `/forget`                | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
+| `/dice [sides] [amount]` | Roll dice — defaults to one 6-sided; shows each roll when rolling several | Everyone   |
 | `/rng [min] [max]`       | Generate a random number between min and max (e.g., `/rng 0 999`)         | Everyone   |
 | `/join`                  | Bring Amy into the voice channel you're currently in                      | Everyone   |
 | `/leave`                 | Make Amy leave her voice channel                                          | In-channel or admin |
@@ -52,7 +49,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/search [song]`         | Show the top 5 matches and pick one from a menu                           | In-channel |
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
 | `/skip`                  | Skip the current track                                                    | In-channel |
-| `/stop`                  | Stop, clear the queue, and disconnect                                     | In-channel or admin |
+| `/stop`                  | Stop playback and clear the queue (Amy stays in the channel)              | In-channel or admin |
 | `/queue [page]`          | Show what's playing and what's queued, 10 per page                        | Everyone   |
 | `/remove [position]`     | Remove a queued track (your own; admins can remove any)                   | In-channel |
 | `/skipto [position]`     | Jump ahead to a queued track, dropping the ones before it                 | In-channel |

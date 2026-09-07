@@ -54,6 +54,8 @@ def get_display_text(accumulated: str) -> str:
     text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL)
     return text.strip()
 
+MAX_DICE_SIDES: int = 1000     # Guard rails for /dice - the roll runs on the
+MAX_DICE_AMOUNT: int = 100     # event loop, so an unbounded amount freezes the bot
 MAX_DISCORD_LEN: int = 2000
 STREAM_CHUNK_LIMIT: int = 1990  # Leaves room for the streaming cursor suffix
 
@@ -630,15 +632,14 @@ class PlayerControls(discord.ui.View):
         finished = player.current or player.last_played
         player.queue.clear()
         player.loop_mode = LoopMode.OFF
+        player.skip_requested = False
         player.current = None
+        # Matches /stop: stop and stay. The idle timer still disconnects her later.
         vc.stop()
 
         embed = (ui.now_playing_embed(finished, stopped=True) if finished
                  else ui.info_embed("Playback stopped."))
         await interaction.response.edit_message(embed=embed, view=None)
-
-        async with voice_manager.lock_for(guild.id):
-            await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
 
 
 class SearchResults(discord.ui.View):
@@ -1055,12 +1056,14 @@ async def execute_music_command(
             return Reply(embed=ui.error_embed("You need to be in my voice channel (or be an admin) to stop playback."))
         player.queue.clear()
         player.loop_mode = LoopMode.OFF
+        player.skip_requested = False
         player.current = None
+        # Stop only. vc.stop() fires the after-callback, which finds an empty queue,
+        # shows the finished card and starts the idle timer - so Amy still leaves on her
+        # own after 5 minutes. /leave is the command for disconnecting straight away.
         vc.stop()
-        async with voice_manager.lock_for(guild.id):
-            left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
         return Reply(embed=ui.info_embed(
-            f"Stopped and left **{left}**." if left else "Stopped."))
+            "Stopped and cleared the queue. I'll stay here — use `/leave` to send me away."))
 
     if command == "volume":
         if not is_admin(msg):
@@ -1265,7 +1268,7 @@ async def execute_command(command_text: str, msg: discord.Message) -> Union[str,
         return await execute_music_command(command, parts, msg, guild)
     #--------------------------------------
 
-    if command == "clear":
+    if command == "forget":
         if not is_admin(msg):
             return "🚫 You don't have permission to use this command. (Admin only)"
         server_id = msg.guild.id if msg.guild else "DM"
@@ -1282,39 +1285,38 @@ async def execute_command(command_text: str, msg: discord.Message) -> Union[str,
             if confirm_id in pending_clear:
                 del pending_clear[confirm_id]
                 try:
-                    await confirm_msg.edit(content="⚠️ Clear request timed out. Cancelled.")
+                    await confirm_msg.edit(content="⚠️ Request timed out. Cancelled.")
                     await confirm_msg.clear_reactions()
                 except Exception:
                     pass
         asyncio.create_task(timeout_clear(confirm_msg.id))
         return ""  # Reply already sent above
 
-    if command == "dice1":
-        roll = random.randint(1, 6)
-        return f"🎲 Rolled 1d6: **{roll}**"
-
-    if command == "dice2":
-        roll1 = random.randint(1, 6)
-        roll2 = random.randint(1, 6)
-        total = roll1 + roll2
-        return f"🎲 Rolled 2d6: **{roll1}** + **{roll2}** = **{total}**"
-
     if command == "dice":
         try:
-            amount = 1
             sides = 6
+            amount = 1
             if len(parts) > 1:
                 sides = int(parts[1])
-                if sides < 1:
-                    return "Invalid dice command. Sides must be at least 1."
             if len(parts) > 2:
                 amount = int(parts[2])
-                if amount < 1:
-                    return "Invalid dice command. Amount must be at least 1."
-            total = sum(random.randint(1, sides) for _ in range(amount))
-            return f"🎲 Rolled {amount} {sides}-sided dice(s): **{total}**"
         except ValueError:
-            return "Invalid dice command. Usage: /dice [sides] or /dice [sides] [amount]\nExample: /dice 20 or /dice 6 3"
+            return ("Invalid dice command. Both arguments must be integers.\n"
+                    "Usage: `/dice [sides] [amount]`\nExample: `/dice 20` or `/dice 6 3`")
+
+        if not 1 <= sides <= MAX_DICE_SIDES:
+            return f"Invalid dice command. Sides must be between 1 and {MAX_DICE_SIDES}."
+        # Capped because the roll runs on the event loop: an unbounded amount would
+        # block the whole bot (chat, music and buttons) for as long as it took.
+        if not 1 <= amount <= MAX_DICE_AMOUNT:
+            return f"Invalid dice command. Amount must be between 1 and {MAX_DICE_AMOUNT}."
+
+        rolls = [random.randint(1, sides) for _ in range(amount)]
+        if amount == 1:
+            return f"🎲 Rolled 1d{sides}: **{rolls[0]}**"
+        breakdown = " + ".join(f"**{r}**" for r in rolls)
+        return f"🎲 Rolled {amount}d{sides}: {breakdown} = **{sum(rolls)}**"
+
 
     if command == "rng":
         try:
