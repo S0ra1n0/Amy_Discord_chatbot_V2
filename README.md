@@ -238,6 +238,7 @@ FFMPEG_PATH=
 ```
 
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
+- `OLLAMA_THINK` controls whether the model's reasoning phase is enabled. **Off by default.** Reasoning models like `qwen3.5` can spend their entire token budget thinking and return an empty answer; disabling it fixes that and cut replies from ~33s to ~4s in testing.
 - `GUILD_ID` is your server's ID. Slash commands register to that guild and appear **instantly**; leave it blank to register globally, which can take up to an hour to propagate. Enable Developer Mode in Discord, then right-click your server → Copy Server ID.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
@@ -344,6 +345,17 @@ and a docs audit that fails if a command is missing from the help text or this R
 Offline suites need no network and no Discord token. See [tests/README.md](tests/README.md).
 
 ## Troubleshooting
+
+**Amy replies "I ran out of room before I could finish that answer":**
+
+The model hit its token ceiling before writing anything. This happens with reasoning models
+that over-think a question. Make sure `OLLAMA_THINK=false` in `.env` (the default), or raise
+the limit with a larger model. Rephrasing the question usually won't help.
+
+**Amy takes 30+ seconds to reply:**
+
+Almost always the reasoning phase. Set `OLLAMA_THINK=false` in `.env`. In testing this took a
+question from 33s down to 4s and turned an empty answer into a complete one.
 
 **Bot doesn't respond to chat:**
 

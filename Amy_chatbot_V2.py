@@ -9,7 +9,7 @@ import random
 import httpx
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 import ollama
@@ -114,6 +114,11 @@ discord_token = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE_NAME: str = os.getenv("ADMIN_ROLE_NAME", "Admin")
 DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
 # Guild-scoped command sync is instant; global sync can take an hour to appear.
+# Reasoning models (qwen3.x) can burn the entire generation budget "thinking" and emit
+# no answer at all - measured 3,904 tokens of reasoning and 0 characters of content, with
+# done_reason="length". Disabling it is both a correctness fix and ~7x faster.
+OLLAMA_THINK: bool = os.getenv("OLLAMA_THINK", "false").strip().lower() in ("1", "true", "yes")
+
 _raw_guild = os.getenv("GUILD_ID", "").strip()
 GUILD_ID: Optional[int] = int(_raw_guild) if _raw_guild.isdigit() else None
 
@@ -334,7 +339,7 @@ async def chat_streaming(
     """
     loop = asyncio.get_running_loop()
     chunk_queue: asyncio.Queue = asyncio.Queue()
-    error_flag: Dict[str, bool] = {"occurred": False}
+    error_flag: Dict[str, Any] = {"occurred": False, "done_reason": None}
 
     db.store_message(server_id, channel_id, "user", user_message)
     history = db.get_messages(server_id, channel_id)
@@ -349,9 +354,14 @@ async def chat_streaming(
 
     def stream_worker() -> None:
         try:
-            stream = ollama.chat(model=model, messages=messages, stream=True)
+            stream = ollama.chat(model=model, messages=messages, stream=True,
+                                 think=OLLAMA_THINK)
             for chunk in stream:
                 content = chunk['message']['content']
+                # Remember why generation stopped, so an empty answer can be explained
+                reason = chunk.get('done_reason')
+                if reason:
+                    error_flag["done_reason"] = reason
                 loop.call_soon_threadsafe(chunk_queue.put_nowait, content)
         except httpx.ConnectError as e:
             safe_print(f"[WARNING] Ollama unavailable during stream: {e}")
@@ -416,7 +426,19 @@ async def chat_streaming(
 
     final_response = strip_think_tags(accumulated)
     if not final_response:
-        final_response = "I apologize, but I'm having difficulty formulating a response at the moment. Could you please rephrase your question?"
+        # Empty output almost always means the model hit its token ceiling rather than
+        # having nothing to say, so don't tell the user to rephrase - it won't help.
+        if error_flag.get("done_reason") == "length":
+            safe_print("[WARNING] Model hit its token limit before producing an answer")
+            final_response = (
+                "I ran out of room before I could finish that answer. "
+                "Try asking for something shorter, or ask an admin to raise my limit."
+            )
+        else:
+            final_response = (
+                "I apologize, but I couldn't produce an answer for that one. "
+                "Could you try asking a different way?"
+            )
 
     db.store_message(server_id, channel_id, "assistant", final_response)
 
