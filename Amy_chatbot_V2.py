@@ -1733,6 +1733,15 @@ async def on_ready() -> None:
             tree.copy_global_to(guild=scope)
             synced = await tree.sync(guild=scope)
             safe_print(f"[INFO] Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
+
+            # Discord merges the global and guild scopes, so anything left registered
+            # globally (e.g. from a run before GUILD_ID was set) makes every command
+            # appear twice. Clear the global scope whenever a guild scope is in use.
+            stale = await tree.fetch_commands()
+            if stale:
+                tree.clear_commands(guild=None)
+                await tree.sync()
+                safe_print(f"[INFO] Removed {len(stale)} duplicate global command(s)")
         else:
             synced = await tree.sync()
             safe_print(f"[INFO] Synced {len(synced)} slash command(s) globally "

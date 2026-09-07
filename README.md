@@ -95,6 +95,11 @@ channel.
 Commands register to the server named by `GUILD_ID` in `.env`, which makes them appear
 instantly. Without it they register globally and can take up to an hour to show up.
 
+Discord merges the global and per-server command lists, so anything left registered globally
+from an earlier run shows up **alongside** the guild copy and every command appears twice in
+the autocomplete. Amy clears the stale global scope automatically on startup whenever
+`GUILD_ID` is set, and logs how many duplicates she removed.
+
 > Typing a command as an ordinary message (`/play something`) no longer works — use the
 > real slash command. Talking to Amy normally is unchanged.
 
