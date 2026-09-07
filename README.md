@@ -9,6 +9,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 **Key Features:**
 
 - Conversational AI powered by Ollama with **real-time streaming responses**
+- **Web search** — Amy searches on her own when a question needs current information, then answers in her own words with sources
 - **Voice channel support** — summon Amy into your voice channel, or have her create one
 - **Music playback** — queue tracks from YouTube (search, URL, or whole playlists), direct audio URLs, or local files
 - **Queue management** — paginated listing, remove, shuffle, skip-to, and clear
@@ -42,6 +43,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/forget`                | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
 | `/dice [sides] [amount]` | Roll dice — defaults to one 6-sided; shows each roll when rolling several | Everyone   |
 | `/rng [min] [max]`       | Generate a random number between min and max (e.g., `/rng 0 999`)         | Everyone   |
+| `/websearch [query]`     | Search the web and show the results                                       | Everyone   |
 | `/join`                  | Bring Amy into the voice channel you're currently in                      | Everyone   |
 | `/leave`                 | Make Amy leave her voice channel                                          | In-channel or admin |
 | `/create [name]`         | Create a new voice channel and have Amy join it (e.g., `/create Music Room`) | Admin only |
@@ -58,6 +60,27 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/nowplaying`            | Show the current track                                                    | Everyone   |
 | `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
+
+### Web search
+
+Amy's model has no built-in knowledge of current events. She now decides for herself when a
+question needs looking up — ask about news, recent results or anything time-sensitive and
+she searches, then answers in her own words citing what she found. Ordinary questions
+(maths, greetings, writing) are answered directly with no search.
+
+`/websearch <query>` does the same search manually and shows the raw results, which is
+useful when you want the sources themselves, or when she judges a question doesn't need
+looking up.
+
+> **How reliable is the automatic part?** The model decides, so it's a judgement call rather
+> than a rule. In testing it searched all four time-sensitive questions and correctly skipped
+> maths, a greeting and a haiku — but borderline questions (a historical fact phrased like a
+> current one) can go either way. `/websearch` is the deterministic fallback.
+
+Search uses **DuckDuckGo with no API key**. It parses their HTML page rather than an API, so
+like `yt-dlp` it can break when they change their markup — set `WEB_SEARCH=false` in `.env`
+to turn the feature off if that happens. Failures degrade to "I couldn't find anything"
+rather than breaking the conversation.
 
 ### How commands work
 
@@ -238,6 +261,7 @@ FFMPEG_PATH=
 ```
 
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
+- `WEB_SEARCH` enables Amy's web search. On by default; set `false` to disable it entirely.
 - `OLLAMA_THINK` controls whether the model's reasoning phase is enabled. **Off by default.** Reasoning models like `qwen3.5` can spend their entire token budget thinking and return an empty answer; disabling it fixes that and cut replies from ~33s to ~4s in testing.
 - `GUILD_ID` is your server's ID. Slash commands register to that guild and appear **instantly**; leave it blank to register globally, which can take up to an hour to propagate. Enable Developer Mode in Discord, then right-click your server → Copy Server ID.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.

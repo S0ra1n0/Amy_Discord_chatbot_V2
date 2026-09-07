@@ -32,9 +32,11 @@ OFFLINE = [
     "test_security.py",
     "test_commands_audit.py",
     "test_slash.py",
+    "test_websearch.py",
     "test_docs_audit.py",
 ]
 NETWORK = [
+    "test_websearch_live.py",
     "test_resolve.py",       # yt-dlp against YouTube
     "test_search.py",        # yt-dlp search
     "test_audio_path.py",    # yt-dlp + FFmpeg decoding

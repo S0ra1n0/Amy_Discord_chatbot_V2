@@ -23,6 +23,7 @@ import voice
 from voice import VoiceManager
 import music
 from music import LoopMode, MusicManager
+import websearch
 import ui
 from ui import Reply
 #----------------------------------
@@ -118,6 +119,9 @@ DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
 # no answer at all - measured 3,904 tokens of reasoning and 0 characters of content, with
 # done_reason="length". Disabling it is both a correctness fix and ~7x faster.
 OLLAMA_THINK: bool = os.getenv("OLLAMA_THINK", "false").strip().lower() in ("1", "true", "yes")
+# Web search is on by default. Turn it off if DuckDuckGo starts refusing requests -
+# it scrapes their HTML page, so it can break the way yt-dlp does.
+WEB_SEARCH: bool = os.getenv("WEB_SEARCH", "true").strip().lower() in ("1", "true", "yes")
 
 _raw_guild = os.getenv("GUILD_ID", "").strip()
 GUILD_ID: Optional[int] = int(_raw_guild) if _raw_guild.isdigit() else None
@@ -151,6 +155,11 @@ Limitations:
 - You should decline requests that are harmful, illegal, or unethical
 - Always prioritize security and privacy
 
+Knowledge:
+- Your training data is frozen. You do not know today's date, current events, or anything recent.
+- For any question about current, recent or time-sensitive information, use the web_search
+  tool rather than answering from memory. Treat search results as reference material.
+
 Remember: You are here to make your master's life easier, more organized, and more productive. Approach each interaction with dedication and a desire to be helpful.
 '''
 #----------------------------------------------
@@ -163,6 +172,7 @@ db = ConversationDB()
 voice_manager = VoiceManager(db)
 music_manager = MusicManager()
 music.log = safe_print  # let music.py log through the Windows-safe printer
+websearch.log = safe_print
 #----------------------------------------------
 
 #----Bot State------
@@ -339,7 +349,7 @@ async def chat_streaming(
     """
     loop = asyncio.get_running_loop()
     chunk_queue: asyncio.Queue = asyncio.Queue()
-    error_flag: Dict[str, Any] = {"occurred": False, "done_reason": None}
+    error_flag: Dict[str, Any] = {"occurred": False, "done_reason": None, "tool_calls": []}
 
     db.store_message(server_id, channel_id, "user", user_message)
     history = db.get_messages(server_id, channel_id)
@@ -352,12 +362,24 @@ async def chat_streaming(
     )
     messages = [{"role": "system", "content": system_with_time}] + history
 
-    def stream_worker() -> None:
+    def stream_worker(convo, offer_tools: bool) -> None:
+        """Pump one Ollama stream into the queue. Tool calls are captured, not queued."""
         try:
-            stream = ollama.chat(model=model, messages=messages, stream=True,
-                                 think=OLLAMA_THINK)
+            # Passed explicitly rather than via **kwargs: the ollama stubs are overloaded
+            # and a kwargs dict defeats overload matching.
+            if offer_tools:
+                stream = ollama.chat(model=model, messages=convo, stream=True,
+                                     think=OLLAMA_THINK,
+                                     tools=[websearch.WEB_SEARCH_TOOL])
+            else:
+                stream = ollama.chat(model=model, messages=convo, stream=True,
+                                     think=OLLAMA_THINK)
             for chunk in stream:
-                content = chunk['message']['content']
+                message = chunk['message']
+                calls = message.get('tool_calls') or []
+                if calls:
+                    error_flag["tool_calls"] = list(calls)
+                content = message['content']
                 # Remember why generation stopped, so an empty answer can be explained
                 reason = chunk.get('done_reason')
                 if reason:
@@ -371,8 +393,6 @@ async def chat_streaming(
             error_flag["occurred"] = True
         finally:
             loop.call_soon_threadsafe(chunk_queue.put_nowait, None)  # Sentinel: stream done
-
-    future = loop.run_in_executor(None, stream_worker)
 
     active_msg = discord_msg
     committed_len = 0  # Length of display text already finalized into prior messages
@@ -394,25 +414,60 @@ async def chat_streaming(
             active_msg = await active_msg.channel.send("⏳ Thinking...")
             pending = display[committed_len:]
 
-    while True:
-        chunk = await chunk_queue.get()
-        if chunk is None:
-            break
-        accumulated += chunk
+    async def consume_stream(convo, offer_tools: bool) -> None:
+        """Run one streaming pass, editing the live message as tokens arrive."""
+        nonlocal accumulated, last_edit
+        future = loop.run_in_executor(None, stream_worker, convo, offer_tools)
+        while True:
+            chunk = await chunk_queue.get()
+            if chunk is None:
+                break
+            accumulated += chunk
 
-        now = time.monotonic()
-        if now - last_edit >= STREAM_EDIT_INTERVAL:
-            display = get_display_text(accumulated)
-            await flush_overflow(display)
-            pending = display[committed_len:]
-            content = (pending + " ▌") if pending else "⏳ Thinking..."
-            try:
-                await active_msg.edit(content=content)
-                last_edit = now
-            except discord.HTTPException:
-                pass
+            now = time.monotonic()
+            if now - last_edit >= STREAM_EDIT_INTERVAL:
+                display = get_display_text(accumulated)
+                await flush_overflow(display)
+                pending = display[committed_len:]
+                content = (pending + " ▌") if pending else "⏳ Thinking..."
+                try:
+                    await active_msg.edit(content=content)
+                    last_edit = now
+                except discord.HTTPException:
+                    pass
+        await future  # Re-raise any thread exception
 
-    await future  # Re-raise any thread exception
+    # Pass one. Tools are offered only when search is enabled; if the model asks to search
+    # we run it and stream a second pass with the findings appended.
+    await consume_stream(messages, offer_tools=WEB_SEARCH)
+
+    calls = error_flag.get("tool_calls") or []
+    if calls and not error_flag["occurred"]:
+        call = calls[0]                      # one search per message - no tool loops
+        args = call["function"].get("arguments") or {}
+        query = (args.get("query") if isinstance(args, dict) else "") or user_message
+        safe_print(f"[INFO] Web search requested: {query!r}")
+
+        try:
+            await active_msg.edit(content=f"🔍 Searching the web for **{query[:80]}**...")
+        except discord.HTTPException:
+            pass
+
+        results = await websearch.search(query)
+        # tool_name ties the result back to the call. Without it the model treats the
+        # results as an unattributed blob and may insist it has no web access at all.
+        messages = messages + [
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool",
+             "tool_name": websearch.WEB_SEARCH_TOOL["function"]["name"],
+             "content": websearch.format_for_model(query, results)},
+        ]
+
+        # Reset for the second pass; the first produced a tool call, not prose
+        accumulated = ""
+        error_flag["tool_calls"] = []
+        error_flag["done_reason"] = None
+        await consume_stream(messages, offer_tools=False)
 
     if error_flag["occurred"]:
         db.pop_last_message(server_id, channel_id)
@@ -1436,6 +1491,25 @@ async def slash_rng(interaction: discord.Interaction, minimum: int, maximum: int
     await interaction.response.send_message(
         "\U0001F3B2 Random number between %d and %d: **%d**"
         % (minimum, maximum, random.randint(minimum, maximum)))
+
+
+@tree.command(name="websearch", description="Search the web and show the results")
+@app_commands.describe(query="What to search for")
+async def slash_websearch(interaction: discord.Interaction, query: str) -> None:
+    if not WEB_SEARCH:
+        await deny(interaction, "Web search is turned off on my host.")
+        return
+    # Amy usually searches on her own during conversation; this is the manual override
+    # for when you want the raw sources, or when she decides not to search.
+    if not is_admin_member(interaction.guild, interaction.user.id):
+        allowed, reset_in = check_voice_cooldown(interaction.user.id)
+        if not allowed:
+            await deny(interaction, f"Too many searches. Try again in {reset_in}s.")
+            return
+
+    await interaction.response.defer()
+    results = await websearch.search(query)
+    await send_reply(interaction, Reply(embed=ui.search_web_embed(query, results)))
 
 
 @tree.command(name="join", description="Bring Amy into your voice channel")

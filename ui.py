@@ -149,6 +149,25 @@ def search_results_embed(query: str, tracks) -> discord.Embed:
     return embed
 
 
+def search_web_embed(query: str, results) -> discord.Embed:
+    """Raw web results for /websearch, with clickable titles."""
+    if not results:
+        embed = discord.Embed(
+            description="Nothing came back for that search.", colour=COLOUR_WARN)
+        embed.set_author(name="Web search")
+        return embed
+
+    lines = []
+    for i, r in enumerate(results, start=1):
+        lines.append("`%d.` [%s](%s)" % (i, _clip(r.title, 120), r.url))
+        if r.snippet:
+            lines.append("_%s_" % _clip(r.snippet, 200))
+    embed = discord.Embed(
+        description=_clip(chr(10).join(lines), MAX_EMBED_DESC), colour=COLOUR_INFO)
+    embed.set_author(name="Web search: %s" % _clip(query, 200))
+    return embed
+
+
 def voice_embed(description: str, colour: int = COLOUR_OK, heading: str = "Voice") -> discord.Embed:
     """Generic card for join/leave/create replies."""
     embed = discord.Embed(description=_clip(description, MAX_EMBED_DESC), colour=colour)

@@ -7,6 +7,8 @@ HELP_EVERYONE = """**Commands — Everyone:**
   • Usage: `/dice`, `/dice 20`, or `/dice 6 3`
 `/rng [min] [max]` - Generate a random number between min and max
   • Usage: `/rng 0 999`
+`/websearch [query]` - Search the web and show the results
+  • I also search on my own when a question needs current info
 `/join` - Bring me into the voice channel you're in
 `/leave` - Make me leave the voice channel (must be in it with me, or an admin)
 
