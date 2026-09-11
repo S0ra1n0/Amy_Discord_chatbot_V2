@@ -36,8 +36,10 @@ Individual suites can also be run directly: `python tests/test_music.py`.
 
 **Network** — needs internet; slower and can fail if YouTube changes.
 
-`test_resolve.py`, `test_search.py`, `test_audio_path.py`, and the `--network` section of
-`test_websearch.py` (live DuckDuckGo: recency filtering, region pinning, page fetching)
+`test_resolve.py`, `test_search.py`, `test_audio_path.py`, and `test_websearch_live.py` —
+a thin shim that re-runs `test_websearch.py` with `--network` so the runner picks up its live
+DuckDuckGo section (recency filtering, region pinning, page fetching). The runner invokes each
+suite with no arguments, which is why that shim exists rather than a flag.
 
 **Live** — needs a valid `DISCORD_TOKEN`; briefly brings the bot online.
 
