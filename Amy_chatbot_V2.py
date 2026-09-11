@@ -18,7 +18,7 @@ from discord.ext import tasks
 from discord import app_commands
 
 from commands_help import HELP_EVERYONE, HELP_ADMIN
-from database import ConversationDB
+from database import MAX_MEMORY_MESSAGES, ConversationDB
 import voice
 from voice import VoiceManager
 import music
@@ -106,6 +106,18 @@ OLLAMA_THINK: bool = os.getenv("OLLAMA_THINK", "false").strip().lower() in ("1",
 # Web search is on by default. Turn it off if DuckDuckGo starts refusing requests -
 # it scrapes their HTML page, so it can break the way yt-dlp does.
 WEB_SEARCH: bool = os.getenv("WEB_SEARCH", "true").strip().lower() in ("1", "true", "yes")
+# Ollama unloads an idle model after ~5 minutes, and reloading it costs 4.3 seconds before
+# the first character appears - measured cold 4.31s vs warm 0.03s. For a bot that is used in
+# bursts that penalty lands on almost every conversation, so ask Ollama to keep the model
+# resident. The cost is real: the model holds its weights in memory (2.4 GB for qwen3.5:2b)
+# for this long after the last message. Set "0" to restore the old unload-immediately
+# behaviour, or a longer window like "2h" on a dedicated machine.
+OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "30m").strip() or "30m"
+# How far back Amy remembers, and how much is replayed to the model each reply. The cap
+# itself lives in database.py because storage enforces it too; this is the single source of
+# truth for both. It is a speed knob as well as a memory one - every stored message is sent
+# on every reply, and prompt processing grew from 0.15s at 10 messages to 0.95s at 200.
+HISTORY_LIMIT: int = MAX_MEMORY_MESSAGES
 
 _raw_guild = os.getenv("GUILD_ID", "").strip()
 GUILD_ID: Optional[int] = int(_raw_guild) if _raw_guild.isdigit() else None
@@ -353,7 +365,8 @@ async def chat_streaming(
     error_flag: Dict[str, Any] = {"occurred": False, "done_reason": None, "tool_calls": []}
 
     db.store_message(server_id, channel_id, "user", user_message)
-    history = db.get_messages(server_id, channel_id)
+    # Only the most recent turns are replayed; the full conversation stays in the database.
+    history = db.get_messages(server_id, channel_id, limit=HISTORY_LIMIT)
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     current_day = datetime.now().strftime("%A")
@@ -371,10 +384,12 @@ async def chat_streaming(
             if offer_tools:
                 stream = ollama.chat(model=model, messages=convo, stream=True,
                                      think=OLLAMA_THINK,
+                                     keep_alive=OLLAMA_KEEP_ALIVE,
                                      tools=[websearch.WEB_SEARCH_TOOL])
             else:
                 stream = ollama.chat(model=model, messages=convo, stream=True,
-                                     think=OLLAMA_THINK)
+                                     think=OLLAMA_THINK,
+                                     keep_alive=OLLAMA_KEEP_ALIVE)
             for chunk in stream:
                 message = chunk['message']
                 calls = message.get('tool_calls') or []

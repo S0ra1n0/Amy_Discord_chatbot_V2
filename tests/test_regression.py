@@ -49,5 +49,43 @@ assert amy.strip_think_tags("<think>hmm</think>Answer") == "Answer"
 assert amy.get_display_text("<think>still going") == ""
 print("earlier helpers (split/model-names/think-tags): OK")
 
+# Conversation history is bounded in two places and both matter. Storage trims each
+# channel to MAX_MEMORY_MESSAGES, and get_messages(limit=) bounds what is replayed to the
+# model on top of that. The trim must keep the NEWEST messages but hand them back
+# oldest-first, which is the easy thing to get backwards - reversed history would make Amy
+# answer the wrong turn.
+import tempfile
+from database import MAX_MEMORY_MESSAGES, ConversationDB
+
+_tmp = tempfile.mktemp(suffix=".db")
+_db = ConversationDB(_tmp)
+for i in range(MAX_MEMORY_MESSAGES + 20):
+    _db.store_message(1, 99, "user" if i % 2 == 0 else "assistant", "msg-%03d" % i)
+
+full = _db.get_messages(1, 99)
+assert len(full) == MAX_MEMORY_MESSAGES,     "storage must trim to the cap: kept %d of %d" % (len(full), MAX_MEMORY_MESSAGES)
+last = MAX_MEMORY_MESSAGES + 20 - 1
+assert full[-1]["content"] == "msg-%03d" % last, "newest message lost: %s" % full[-1]
+assert [m["content"] for m in full] == sorted(m["content"] for m in full),     "history must be chronological, not reversed"
+
+win = _db.get_messages(1, 99, limit=4)
+assert len(win) == 4, "limit not applied: %d" % len(win)
+assert win == full[-4:], "limit must take the newest, in order: %s" % win
+assert win[-1]["content"] == "msg-%03d" % last
+
+assert _db.get_messages(1, 99, limit=999) == full, "limit larger than history"
+assert _db.get_messages(1, 99, limit=0) == full, "limit=0 means no limit, not empty"
+assert len(_db.get_messages(1, 99, limit=1)) == 1
+assert _db.get_messages(1, 77, limit=4) == [], "unknown channel"
+assert _db.get_stats()["total_messages"] >= MAX_MEMORY_MESSAGES
+_db.conn.close(); os.remove(_tmp)
+print("history window: OK (cap=%d, newest kept, chronological)" % MAX_MEMORY_MESSAGES)
+
+assert amy.HISTORY_LIMIT == MAX_MEMORY_MESSAGES,     "one knob only - the bot and the database must not disagree about history depth"
+assert amy.HISTORY_LIMIT >= 2, "a window below 2 cannot hold one exchange"
+assert isinstance(amy.OLLAMA_KEEP_ALIVE, str) and amy.OLLAMA_KEEP_ALIVE,     "keep_alive must be a non-empty string for the ollama client"
+print("speed settings: history=%d, keep_alive=%r"
+      % (amy.HISTORY_LIMIT, amy.OLLAMA_KEEP_ALIVE))
+
 print()
 print("ALL REGRESSION TESTS PASSED")
