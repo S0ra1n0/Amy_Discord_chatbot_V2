@@ -182,9 +182,16 @@ If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tra
 `/search <song>` instead lists the **top 5** matches and gives you a dropdown to pick from.
 
 Only the person who ran the search can choose from their own results, and the menu expires
-after **60 seconds** — it then greys out rather than acting on a stale search. Picking a
-track behaves exactly like `/play`: Amy joins your channel if she isn't already, and either
-starts playing or adds it to the queue.
+after **3 minutes** rather than acting on a stale search. When it expires the dropdown greys
+out and the footer changes to say so — Discord gives no error for a disabled menu, it just
+shows a "not allowed" cursor, so the message has to explain itself.
+
+Picking a track behaves exactly like `/play`: Amy joins your channel if she isn't already,
+and either starts playing or adds it to the queue.
+
+> If the dropdown won't let you click it, the search has expired — run `/search` again.
+> The window was **60 seconds** in earlier versions, which could run out while you were
+> still reading the results.
 
 ### Player controls
 

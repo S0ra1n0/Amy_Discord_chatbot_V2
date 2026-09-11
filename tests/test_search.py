@@ -35,8 +35,12 @@ spec.loader.exec_module(amy)
 
 class FakeGuild:
     id = 500
-v = amy.SearchResults(tracks, requester_id=42, guild=FakeGuild())
-check("has a finite timeout (not persistent)", v.timeout == 60.0, v.timeout)
+v = amy.SearchResults(tracks, requester_id=42, guild=FakeGuild(), query="rick astley")
+check("has a finite timeout (not persistent)", v.timeout == 180.0, v.timeout)
+# 60s ran out while people were still reading the five titles. A disabled select raises no
+# error - Discord greys it out and shows a "not allowed" cursor - so an expiry that is too
+# short is indistinguishable from a broken bot.
+check("timeout is long enough to read five results", v.timeout >= 120.0, v.timeout)
 check("one select component", len(v.children) == 1 and isinstance(v.children[0], discord.ui.Select))
 opts = v.children[0].options
 check("one option per result", len(opts) == 5, len(opts))
@@ -45,6 +49,32 @@ check("values are the indexes", [o.value for o in opts] == ["0", "1", "2", "3", 
 check("labels within Discord's 100-char limit", all(len(o.label) <= 100 for o in opts))
 check("descriptions carry the duration", opts[0].description == "1:01", opts[0].description)
 check("requester recorded", v.requester_id == 42)
+
+print()
+print("=== an expired search says so instead of silently greying out ===")
+class FakeMsg:
+    def __init__(self): self.embed = None; self.view = None
+    async def edit(self, embed=None, view=None, **kw):
+        self.embed, self.view = embed, view
+
+vt = amy.SearchResults(tracks, requester_id=42, guild=FakeGuild(), query="rick astley")
+msg = FakeMsg()
+vt.message = msg
+asyncio.run(vt.on_timeout())
+check("the picker is disabled", vt.children[0].disabled is True)
+check("the message was edited", msg.embed is not None)
+foot = (msg.embed.footer.text or "") if msg.embed else ""
+check("footer explains the expiry", "expired" in foot.lower(), foot)
+check("footer no longer tells you to pick", "Pick one" not in foot, foot)
+check("the results are still listed", "Song 1" in (msg.embed.description or ""))
+
+# Without a message reference there is nothing to edit; it must not raise.
+vt2 = amy.SearchResults(tracks, requester_id=1, guild=FakeGuild(), query="q")
+try:
+    asyncio.run(vt2.on_timeout())
+    check("timing out with no message is harmless", vt2.children[0].disabled is True)
+except Exception as e:
+    check("timing out with no message is harmless", False, "raised %s" % type(e).__name__)
 
 print()
 print("=== overlong titles are clipped for the menu ===")

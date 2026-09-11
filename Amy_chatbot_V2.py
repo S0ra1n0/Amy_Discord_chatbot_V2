@@ -787,17 +787,23 @@ class SearchResults(discord.ui.View):
     Dropdown of /search hits.
 
     Unlike PlayerControls this holds per-message state (the specific results), so it
-    cannot be a persistent view. It expires after SEARCH_TIMEOUT and disables itself,
-    which is fine: a stale search is not worth acting on.
+    cannot be a persistent view. It expires after SEARCH_TIMEOUT and disables itself.
+
+    The timeout used to be 60s, which ran out while people were still reading five titles.
+    A disabled select menu gives no error - Discord just greys it out and shows a
+    "not allowed" cursor - so it read as the bot being broken rather than as an expiry.
+    Hence the longer window and the footer that says what happened.
     """
 
-    SEARCH_TIMEOUT: float = 60.0
+    SEARCH_TIMEOUT: float = 180.0
 
-    def __init__(self, tracks, requester_id: int, guild: discord.Guild) -> None:
+    def __init__(self, tracks, requester_id: int, guild: discord.Guild,
+                 query: str = "") -> None:
         super().__init__(timeout=self.SEARCH_TIMEOUT)
         self.tracks = tracks
         self.requester_id = requester_id
         self.guild = guild
+        self.query = query
         self.message: Optional[discord.Message] = None
 
         options = []
@@ -821,11 +827,16 @@ class SearchResults(discord.ui.View):
 
     async def on_timeout(self) -> None:
         self.picker.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
+        if self.message is None:
+            return
+        # Replace the "Pick one from the menu below" footer as well. Leaving it in place
+        # tells the user to do something the greyed-out menu no longer allows.
+        embed = ui.search_results_embed(self.query, self.tracks)
+        embed.set_footer(text="This search expired — run /search again to pick a track.")
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException:
+            pass
 
     @discord.ui.select(placeholder="Choose a track...", min_values=1, max_values=1)
     async def picker(self, interaction: discord.Interaction,
@@ -1048,7 +1059,7 @@ async def execute_music_command(
                 "Nothing found for `" + shown + "`."))
             return ""
 
-        view = SearchResults(results, interaction.user.id, guild)
+        view = SearchResults(results, interaction.user.id, guild, query=query)
         await status_msg.edit(content=None,
                               embed=ui.search_results_embed(query, results), view=view)
         view.message = status_msg   # so on_timeout can grey out the menu
