@@ -109,6 +109,26 @@ in dropped its correct search decisions from **12/12 to 7/12** on the same quest
 *whether* to search matters far more than the window, so the tool stays single-parameter and
 `tests/test_websearch.py` pins that shape.
 
+Cues are matched on whole words, and explicitly historical questions ("history of", "of all
+time", "in 1998") are never date-filtered. An unnecessary filter is not harmless: it throws
+away the best sources rather than adding noise, so anything ambiguous stays unfiltered.
+
+#### Fetching pages safely
+
+Reading result pages means making requests to arbitrary URLs, so two limits apply:
+
+- **Only publicly routable addresses.** Every hop is resolved and checked, and redirects are
+  followed by hand so a public URL cannot bounce the fetch onto the local network. Amy runs
+  beside Ollama on `:11434` and your router's admin page; without this a result redirecting
+  to `127.0.0.1` would pull internal responses into her context and out into Discord.
+- **At most 2MB per page**, streamed and abandoned past that. `httpx` timeouts are
+  per-operation rather than total elapsed, so a server that dribbles bytes can otherwise
+  outlast the 5-second budget — a 40MB page measured 5.7s and 120MB of memory before this cap.
+
+Page text is still untrusted input. Amy was tested against three injection styles planted in
+page bodies — a direct "ignore all previous instructions", a fake `[SYSTEM]` directive, and a
+persona swap — and ignored all three, answering the actual question instead.
+
 The end-to-end effect, asked of the running model: *"who won the most recent Ballon d'Or?"*
 answered **"Lionel Messi in 2024"** from snippets alone — confidently wrong — and
 **"Ousmane Dembélé in 2025"**, correctly, once the pages were read.

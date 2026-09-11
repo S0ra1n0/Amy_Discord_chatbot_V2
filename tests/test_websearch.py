@@ -247,6 +247,142 @@ check("every inferred window maps to a df code",
       all(websearch.recency_code(w) for w, _ in websearch._RECENCY_CUES))
 
 print()
+print("=== recency cues match whole words, not substrings ===")
+# Substring matching made "news" fire inside "Newsom" and "newspaper", filtering questions
+# that wanted the whole archive. Measured: both queries below returned ZERO of the results
+# an unfiltered search gave, losing the Wikipedia page each time.
+for q in ["Newsom biography",
+          "history of the newspaper industry",
+          "who is the news anchor on CNN in 1998",
+          "best news apps of all time",
+          "the 1990s music scene",
+          "origins of the printing press"]:
+    check("%-40r stays unfiltered" % q[:40], websearch.infer_recency(q) is None,
+          websearch.infer_recency(q))
+
+# ...while genuinely time-sensitive wording still filters.
+for q, want in [("hot news today", "day"), ("latest tech news", "week"),
+                ("who won the most recent ballon d'or", "year"),
+                ("breaking news vietnam", "day")]:
+    check("%-40r -> %s" % (q[:40], want), websearch.infer_recency(q) == want,
+          websearch.infer_recency(q))
+
+print()
+print("=== is_blocked_address refuses anything not publicly routable ===")
+for ip in ["127.0.0.1", "127.1.2.3", "10.0.0.5", "192.168.1.1", "172.16.4.9",
+           "169.254.169.254", "0.0.0.0", "::1", "fe80::1", "fc00::1",
+           "not-an-ip", ""]:
+    check("blocks %-16s" % ip, websearch.is_blocked_address(ip) is True)
+for ip in ["8.8.8.8", "1.1.1.1", "151.101.1.140", "2606:4700:4700::1111"]:
+    check("allows %-16s" % ip, websearch.is_blocked_address(ip) is False)
+
+print()
+print("=== host_of ===")
+for url, want in [("https://www.bbc.com/news", "www.bbc.com"),
+                  ("http://127.0.0.1:11434/api", "127.0.0.1"),
+                  ("https://EXAMPLE.COM/x", "example.com"),
+                  ("https://[::1]:8080/x", "::1"),
+                  ("not a url", ""),
+                  ("", "")]:
+    check("%-32r -> %r" % (url[:32], want), websearch.host_of(url) == want,
+          websearch.host_of(url))
+
+print()
+print("=== fetch limits are configured sanely ===")
+check("a page body is capped", 0 < websearch.MAX_PAGE_BYTES <= 8_000_000,
+      websearch.MAX_PAGE_BYTES)
+check("redirect chains are bounded", 0 < websearch.MAX_REDIRECTS <= 5,
+      websearch.MAX_REDIRECTS)
+
+print()
+print("=== fetch_page refuses the local network (offline, real sockets) ===")
+# Amy runs beside Ollama on :11434 and the router's admin page. A result that redirects to
+# 127.0.0.1 would pull internal responses into the model context and out into Discord.
+# Verified before the fix: both cases returned the planted marker.
+import http.server
+import socketserver
+import threading
+
+import httpx
+
+SECRET = "OLLAMA_INTERNAL_MODEL_REGISTRY private data. " * 30
+PROSE = "The Ballon d Or 2025 was won by Ousmane Dembele of Paris Saint Germain. " * 20
+BIG_CHUNK = b"A" * 1_000_000
+BIG_TOTAL = 20_000_000
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:%d/internal" % PORT)
+            self.end_headers()
+            return
+        if self.path == "/huge":
+            # Declared large but written lazily, so the test never holds 20MB itself.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(BIG_TOTAL))
+            self.end_headers()
+            try:
+                self.wfile.write(("<html><body><p>%s</p><p>" % PROSE).encode())
+                for _ in range(BIG_TOTAL // len(BIG_CHUNK)):
+                    self.wfile.write(BIG_CHUNK)
+            except Exception:
+                pass                      # the client hung up, which is the point
+            return
+        body = ("<html><body><p>%s</p></body></html>" % SECRET).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+_srv = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+PORT = _srv.server_address[1]
+threading.Thread(target=_srv.serve_forever, daemon=True).start()
+
+async def _fetch(url, allow_private=False):
+    real = websearch.host_is_public
+    if allow_private:
+        async def yes(host):
+            return True
+        websearch.host_is_public = yes
+    try:
+        async with httpx.AsyncClient(timeout=websearch.PAGE_TIMEOUT,
+                                     follow_redirects=False,
+                                     headers=websearch.BROWSER_HEADERS) as c:
+            return await websearch.fetch_page(c, url)
+    finally:
+        websearch.host_is_public = real
+
+base = "http://127.0.0.1:%d" % PORT
+direct = asyncio.run(_fetch(base + "/internal"))
+check("a loopback URL is refused", direct == "", len(direct))
+check("nothing internal leaks", "OLLAMA_INTERNAL" not in direct)
+
+hop = asyncio.run(_fetch(base + "/redirect"))
+check("a redirect into loopback is refused", hop == "", len(hop))
+check("nothing leaks via the redirect", "OLLAMA_INTERNAL" not in hop)
+
+# With the address guard stood down, the size cap must still bound the read. Unbounded,
+# a 40MB page took 5.7s despite a 5s timeout, because httpx timeouts are per-operation.
+import time as _time
+_t0 = _time.time()
+capped = asyncio.run(_fetch(base + "/huge", allow_private=True))
+_elapsed = _time.time() - _t0
+check("an oversized page is still parsed", "Ballon d Or" in capped, capped[:60])
+check("its text stays within the char cap",
+      len(capped) <= websearch.MAX_PAGE_CHARS, len(capped))
+check("reading a 20MB page stays fast", _elapsed < websearch.PAGE_TIMEOUT,
+      "%.1fs" % _elapsed)
+
+_srv.shutdown()
+_srv.server_close()
+
+print()
 if "--network" in sys.argv:
     print("=== live search (network) ===")
     live = asyncio.run(websearch.search("ballon d'or most wins"))

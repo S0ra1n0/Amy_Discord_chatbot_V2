@@ -25,7 +25,9 @@ offline.
 
 import asyncio
 import html
+import ipaddress
 import re
+import socket
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -72,6 +74,13 @@ ENRICH_COUNT: int = 4       # fetched concurrently, so this costs one slow page,
 PAGE_TIMEOUT: float = 5.0   # a slow page must not hold up the whole answer
 MIN_PAGE_CHARS: int = 400   # below this it's a cookie banner or a JS shell, not content
 MAX_PAGE_CHARS: int = 1200  # per page, to keep the tool message bounded for a small model
+
+# httpx timeouts are per-operation, not total elapsed, so a server that dribbles bytes out
+# slowly can hold a connection well past PAGE_TIMEOUT. A 40MB page was measured at 5.7s and
+# 120MB of peak memory with four of these running at once, so cap what we are willing to
+# read. 2MB is far more HTML than any article needs.
+MAX_PAGE_BYTES: int = 2_000_000
+MAX_REDIRECTS: int = 3      # enough for http->https and www canonicalisation, no chains
 
 # The description does the real work. A vague one ("search for current information") only
 # got the model to search 4 of 7 times in testing; this explicit wording scored 7/7,
@@ -169,6 +178,32 @@ def unwrap_url(href: str) -> str:
     return href
 
 
+def is_blocked_address(ip: str) -> bool:
+    """
+    True when an IP must not be fetched: loopback, private, link-local, or reserved.
+
+    Amy runs on a home machine next to Ollama and the router's admin page, so a result that
+    redirects to `127.0.0.1:11434` or `192.168.1.1` would pull internal responses into the
+    model's context and out into Discord. Anything unparseable is treated as blocked.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    # is_global is False for loopback, private, link-local, multicast and reserved ranges,
+    # across both IPv4 and IPv6, which is exactly the set we want to refuse.
+    return not addr.is_global
+
+
+def host_of(url: str) -> str:
+    """Hostname for an URL, without port or userinfo. Empty when it can't be parsed."""
+    try:
+        host = urllib.parse.urlparse(url).hostname
+    except ValueError:
+        return ""
+    return (host or "").strip("[]").lower()
+
+
 def domain_of(url: str) -> str:
     """Bare hostname, lowercased and without `www.`, for comparing two results."""
     try:
@@ -207,16 +242,40 @@ def recency_code(recency: Optional[str]) -> Optional[str]:
 
 
 # Query cues that imply a freshness window, most specific first - "most recent" has to be
-# tested before "recent", and "today" before the weaker "news".
+# tested before "recent".
+#
+# A bare "news" cue used to live in the week row and was removed: it fires on plenty of
+# questions that are about the past ("who was the news anchor in 1998"), and a query that
+# genuinely wants fresh news almost always carries "today", "latest" or "breaking" as well.
+# An unfiltered search for "vietnam news" still returns news sites; a date-filtered search
+# for a historical question returns the wrong decade.
 _RECENCY_CUES = [
     ("day", ("today", "tonight", "right now", "this morning", "this afternoon",
              "breaking", "at the moment", "currently", "just happened", "so far today")),
     ("year", ("most recent", "this year", "current champion", "current president",
               "reigning")),
     ("month", ("this month", "past month", "last month")),
-    ("week", ("this week", "past week", "last week", "latest", "recent", "news",
+    ("week", ("this week", "past week", "last week", "latest", "recent",
               "these days", "nowadays", "update on")),
 ]
+
+# Cues are matched on word boundaries. Plain substring matching made "news" fire inside
+# "Newsom" and "newspaper", which silently applied a seven-day filter to questions that
+# wanted the whole archive: "Newsom biography" and "history of the newspaper industry" each
+# came back with *zero* of the results an unfiltered search returned, losing the Wikipedia
+# page in both cases.
+_RECENCY_PATTERNS = [
+    (window, re.compile(r"\b(?:%s)\b" % "|".join(re.escape(c) for c in cues)))
+    for window, cues in _RECENCY_CUES
+]
+
+# Explicitly historical questions override any freshness cue, so "best news apps of all
+# time" and "who won in 2019" stay unfiltered even when they contain a cue word.
+_HISTORICAL_RE = re.compile(
+    r"\b(history|historical|historically|biography|origins? of|of all time|"
+    r"all-time|used to be|back then|meaning of|definition of|etymology|"
+    r"in (?:1[0-9]|20)\d{2}|"
+    r"(?:1[0-9]|20)\d{2}s)\b")
 
 
 def infer_recency(query: str) -> Optional[str]:
@@ -228,12 +287,14 @@ def infer_recency(query: str) -> Optional[str]:
     it here keeps the tool single-parameter and costs nothing at runtime.
 
     Returns None when nothing suggests a time window, which means an unfiltered search.
+    Getting this wrong is not neutral: an unnecessary filter throws away the best sources,
+    so anything ambiguous stays unfiltered.
     """
     q = (query or "").lower()
-    if not q:
+    if not q or _HISTORICAL_RE.search(q):
         return None
-    for window, cues in _RECENCY_CUES:
-        if any(cue in q for cue in cues):
+    for window, pattern in _RECENCY_PATTERNS:
+        if pattern.search(q):
             return window
     return None
 
@@ -341,21 +402,74 @@ def format_for_model(query: str, results: List[SearchResult],
 
 
 #----Network------
+async def host_is_public(host: str) -> bool:
+    """
+    Resolve `host` and return True only when every address it maps to is public.
+
+    A hostname can point anywhere, so checking the URL text alone proves nothing -
+    `localtest.me` resolves to 127.0.0.1. This resolves first and refuses if *any* answer is
+    internal. There is an unavoidable window between this check and the connection (DNS
+    rebinding); closing it fully would mean pinning the socket to a vetted address, which is
+    more machinery than a home Discord bot warrants.
+    """
+    if not host:
+        return False
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+    if not infos:
+        return False
+    # sockaddr is (host, port) for IPv4 and (host, port, flow, scope) for IPv6; element 0 is
+    # the address in both, but the tuple type is a union so pyright needs the str().
+    return not any(is_blocked_address(str(info[4][0])) for info in infos)
+
+
 async def fetch_page(client: httpx.AsyncClient, url: str) -> str:
     """
     Fetch one result page and return its body text, or "" if it can't be read.
+
+    Redirects are followed by hand rather than by httpx, so that every hop gets the same
+    address check - otherwise a public URL could bounce the fetch onto the local network.
+    The body is streamed and abandoned past MAX_PAGE_BYTES.
 
     Never raises: a blocked, slow or JavaScript-only page is an expected outcome, and the
     caller simply falls back to that result's snippet.
     """
     try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            return ""
-        if "html" not in resp.headers.get("content-type", "").lower():
-            return ""
-        text = extract_page_text(resp.text)
-        return text if len(text) >= MIN_PAGE_CHARS else ""
+        for _ in range(MAX_REDIRECTS + 1):
+            if not url.lower().startswith(("http://", "https://")):
+                return ""
+            if not await host_is_public(host_of(url)):
+                log(f"[WARNING] Refused to fetch a non-public address: {url[:80]}")
+                return ""
+
+            async with client.stream("GET", url) as resp:
+                if resp.is_redirect:
+                    nxt = resp.next_request
+                    if nxt is None:
+                        return ""
+                    url = str(nxt.url)
+                    continue
+                if resp.status_code != 200:
+                    return ""
+                if "html" not in resp.headers.get("content-type", "").lower():
+                    return ""
+
+                chunks: List[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= MAX_PAGE_BYTES:
+                        break
+                raw = b"".join(chunks)
+
+            body = raw.decode(resp.encoding or "utf-8", errors="replace")
+            text = extract_page_text(body)
+            return text if len(text) >= MIN_PAGE_CHARS else ""
+        return ""       # too many redirects
     except Exception:
         return ""
 
@@ -373,7 +487,9 @@ async def enrich(results: List[SearchResult], count: int = ENRICH_COUNT) -> List
         return results
 
     try:
-        async with httpx.AsyncClient(timeout=PAGE_TIMEOUT, follow_redirects=True,
+        # follow_redirects stays False on purpose: fetch_page walks the hops itself so each
+        # one is address-checked. Letting httpx follow them would skip that check.
+        async with httpx.AsyncClient(timeout=PAGE_TIMEOUT, follow_redirects=False,
                                      headers=BROWSER_HEADERS) as client:
             bodies = await asyncio.gather(*(fetch_page(client, r.url) for r in targets))
     except Exception as e:
