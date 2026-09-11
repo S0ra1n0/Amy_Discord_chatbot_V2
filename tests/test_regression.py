@@ -87,5 +87,32 @@ assert isinstance(amy.OLLAMA_KEEP_ALIVE, str) and amy.OLLAMA_KEEP_ALIVE,     "ke
 print("speed settings: history=%d, keep_alive=%r"
       % (amy.HISTORY_LIMIT, amy.OLLAMA_KEEP_ALIVE))
 
+# The startup warm-up must never be able to stop the bot from coming online. Ollama not
+# running is a normal state (it is a separate service), and the only cost of a failed
+# warm-up is that the first reply loads the model itself, the way it always did.
+import asyncio as _asyncio
+
+_real_chat = amy.ollama.chat
+_calls = []
+
+def _fake_chat(*a, **kw):
+    _calls.append(kw)
+    return {"done": True}
+
+amy.ollama.chat = _fake_chat
+try:
+    _asyncio.run(amy.warm_model())
+    assert len(_calls) == 1, "warm_model should issue exactly one request"
+    assert _calls[0].get("messages") == [],         "preload must send no messages, or it generates a throwaway reply"
+    assert _calls[0].get("keep_alive") == amy.OLLAMA_KEEP_ALIVE,         "the preload must carry keep_alive, else it unloads again in 5 minutes"
+
+    def _boom(*a, **kw):
+        raise ConnectionError("Ollama is not running")
+    amy.ollama.chat = _boom
+    _asyncio.run(amy.warm_model())          # must log and return, not raise
+    print("model warm-up: OK (empty preload, carries keep_alive, survives a dead Ollama)")
+finally:
+    amy.ollama.chat = _real_chat
+
 print()
 print("ALL REGRESSION TESTS PASSED")

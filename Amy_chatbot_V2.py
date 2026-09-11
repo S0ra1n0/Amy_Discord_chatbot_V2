@@ -1774,6 +1774,40 @@ async def slash_forget(interaction: discord.Interaction) -> None:
 #--------------------------------------
 
 #----Event Handlers for Discord Bot------
+def preload_model() -> None:
+    """
+    Load the model into memory without generating anything. Blocking - run in a thread.
+
+    An empty message list is Ollama's way of asking for a load and nothing else: it returns
+    done=True with zero characters generated, and leaves the model resident.
+    """
+    ollama.chat(model=model, messages=[], keep_alive=OLLAMA_KEEP_ALIVE)
+
+
+# Held so the warm-up task isn't garbage collected mid-flight
+_warmup_task: Optional[asyncio.Task] = None
+
+
+async def warm_model() -> None:
+    """
+    Take the model load off the first real message.
+
+    OLLAMA_KEEP_ALIVE keeps the model resident between conversations, but a restart always
+    starts cold, and that first reply pays ~4.3s before a single character appears. Doing it
+    here moves the wait to startup, where nobody is watching a "Thinking..." message.
+
+    Failures are logged and ignored: Ollama being slow or absent must not stop the bot, and
+    the first chat will simply load the model itself the way it always did.
+    """
+    started = time.monotonic()
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, preload_model)
+        safe_print(f"[INFO] Model '{model}' warmed in {time.monotonic() - started:.1f}s "
+                   f"(stays loaded for {OLLAMA_KEEP_ALIVE})")
+    except Exception as e:
+        safe_print(f"[WARNING] Could not warm the model, the first reply will be slower: {e}")
+
+
 @bot.event
 async def on_ready() -> None:
     safe_print(f'{bot.user} is online!')
@@ -1820,6 +1854,13 @@ async def on_ready() -> None:
             safe_print("[INFO] Opus encoder loaded")
         except Exception as e:
             safe_print(f"[WARNING] Could not preload opus: {e}")
+
+    # Warm the model in the background so the first real message doesn't pay the load cost.
+    # Backgrounded rather than awaited: it takes a few seconds, and nothing else here needs
+    # to wait for it.
+    global _warmup_task
+    if _warmup_task is None or _warmup_task.done():
+        _warmup_task = asyncio.create_task(warm_model())
 
     # Clean up voice channels Amy created before a restart
     try:
