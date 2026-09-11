@@ -575,6 +575,9 @@ class GuildPlayer:
         self.started_at: Optional[float] = None
         self.paused_at: Optional[float] = None
         self.seek_offset: float = 0.0
+        # One-shot, set when a saved queue is restored so the first track picks up where it
+        # left off. Consumed by the next advance, like skip_requested.
+        self.resume_position: float = 0.0
 
     def cancel_idle(self) -> None:
         if self.idle_task is not None and not self.idle_task.done():
@@ -625,6 +628,7 @@ class GuildPlayer:
         self.skip_requested = False
         self.now_playing_msg = None
         self.last_played = None
+        self.resume_position = 0.0
         self.mark_stopped()
 
 
@@ -646,6 +650,56 @@ class MusicManager:
 
 
 #----Playback Engine------
+def track_to_dict(track: Track) -> Dict[str, Any]:
+    """Flatten a Track for storage. Every field is already a plain scalar."""
+    return {
+        "title": track.title,
+        "query": track.query,
+        "duration": track.duration,
+        "requested_by": track.requested_by,
+        "is_local": track.is_local,
+        "thumbnail": track.thumbnail,
+    }
+
+
+def track_from_dict(data: Dict[str, Any]) -> Optional[Track]:
+    """
+    Rebuild a Track from a stored row, or None if the row can't make one.
+
+    Deliberately forgiving: a restored queue comes from a database that an older version
+    wrote, and one unreadable row should cost that one track, not the whole restore. Only
+    title and query are essential - a track with no query can never be played.
+    """
+    if not isinstance(data, dict):
+        return None
+    title = data.get("title")
+    query = data.get("query")
+    if not isinstance(title, str) or not isinstance(query, str) or not title or not query:
+        return None
+
+    duration = data.get("duration")
+    if not isinstance(duration, int) or duration < 0:
+        duration = None
+    requested_by = data.get("requested_by")
+    if not isinstance(requested_by, str) or not requested_by:
+        requested_by = "unknown"
+    thumbnail = data.get("thumbnail")
+    if not isinstance(thumbnail, str) or not thumbnail:
+        thumbnail = None
+
+    return Track(title=title, query=query, duration=duration,
+                 requested_by=requested_by, is_local=bool(data.get("is_local")),
+                 thumbnail=thumbnail)
+
+
+def loop_mode_from(value: Any) -> LoopMode:
+    """Read a stored loop mode, falling back to OFF for anything unrecognised."""
+    try:
+        return LoopMode(str(value).strip().lower())
+    except (ValueError, AttributeError):
+        return LoopMode.OFF
+
+
 def clamp_bitrate(bitrate: Optional[int]) -> Optional[int]:
     """
     Hold a probed bitrate inside the range libopus will accept.

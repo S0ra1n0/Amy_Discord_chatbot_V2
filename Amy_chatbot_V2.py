@@ -358,6 +358,103 @@ async def prune_old_messages_task() -> None:
     dropped = prune_rate_limit_stores()
     if dropped:
         safe_print(f"[INFO] Dropped {dropped} expired rate-limit entr(ies)")
+
+
+#----Queue Persistence------
+# The queue only ever lived in memory, so restarting Amy threw away whatever was lined up -
+# including a 50-track playlist someone had just added. A snapshot is taken periodically and
+# at every track change, and restored on startup.
+SNAPSHOT_INTERVAL: int = 20   # seconds; also the worst-case drift of the saved position
+
+
+def snapshot_player(guild_id: int) -> None:
+    """
+    Save one guild's queue and player state. Never raises - persistence is a convenience,
+    and a database problem must not interrupt playback.
+    """
+    try:
+        player = music_manager.player_for(guild_id)
+        guild = bot.get_guild(guild_id)
+        vc = voice.get_voice_client(guild) if guild else None
+        channel = voice.active_channel(vc)
+
+        # Slot 0 is the track playing right now, so a restore knows where to pick up.
+        tracks = []
+        if player.current is not None:
+            tracks.append(music.track_to_dict(player.current))
+        tracks.extend(music.track_to_dict(t) for t in player.queue)
+
+        if not tracks:
+            db.clear_player_state(guild_id)
+            return
+
+        db.save_player_state(
+            guild_id,
+            tracks,
+            loop_mode=player.loop_mode.value,
+            volume=player.volume,
+            voice_channel_id=channel.id if channel else None,
+            text_channel_id=player.text_channel_id,
+            # Only meaningful when there is a current track occupying slot 0
+            resume_position=player.position() if player.current is not None else 0.0,
+        )
+    except Exception as e:
+        safe_print(f"[WARNING] Could not save the queue for guild {guild_id}: {e}")
+
+
+@tasks.loop(seconds=SNAPSHOT_INTERVAL)
+async def snapshot_queues_task() -> None:
+    """Keep every active guild's snapshot fresh, including the playback position."""
+    for guild_id in list(music_manager.players.keys()):
+        snapshot_player(guild_id)
+
+
+async def restore_player(guild: discord.Guild) -> bool:
+    """
+    Put a saved queue back for one guild. Returns True if anything was restored.
+
+    Amy rejoins and resumes only when people are still sitting in the voice channel she was
+    in. Coming back from a restart to an empty channel and playing music to nobody would be
+    worse than waiting - so in that case the queue is restored silently and the next /play
+    or /join picks it up.
+    """
+    state = db.load_player_state(guild.id)
+    if not state:
+        return False
+
+    tracks = [t for t in (music.track_from_dict(d) for d in state["tracks"]) if t]
+    if not tracks:
+        db.clear_player_state(guild.id)
+        return False
+
+    player = music_manager.player_for(guild.id)
+    player.queue.clear()
+    player.queue.extend(tracks)                 # slot 0 replays from the front
+    player.loop_mode = music.loop_mode_from(state["loop_mode"])
+    player.volume = state["volume"]
+    player.text_channel_id = state["text_channel_id"]
+    db.clear_player_state(guild.id)             # consumed; the snapshot task rewrites it
+
+    safe_print(f"[INFO] Restored {len(tracks)} track(s) for guild {guild.id}")
+
+    channel = guild.get_channel(state["voice_channel_id"] or 0)
+    if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        return True
+    if voice.humans_in(channel) == 0:
+        safe_print(f"[INFO] {channel.name} is empty - queue restored but not resumed")
+        return True
+
+    try:
+        await voice.connect_to(channel)
+    except Exception as e:
+        safe_print(f"[WARNING] Could not rejoin {channel.name} to resume: {e}")
+        return True
+
+    # Pick up mid-track where it left off, within the snapshot interval
+    player.resume_position = max(0.0, float(state["resume_position"]))
+    await advance_playback(guild)
+    safe_print(f"[INFO] Resumed playback in {channel.name}")
+    return True
 #----------------------------------------------
 
 #----Streaming Chat------
@@ -989,6 +1086,7 @@ async def advance_playback(guild: discord.Guild) -> None:
                 player.last_played = player.current
             player.current = None
             player.mark_stopped()      # nothing playing, so the position clock resets
+            snapshot_player(guild.id)  # nothing left to restore; drops the saved snapshot
             await refresh_now_playing(guild, stopped=True)
             safe_print("[INFO] Queue empty - starting idle timer")
             player.cancel_idle()  # never stack timers; a stale one could disconnect later
@@ -997,10 +1095,14 @@ async def advance_playback(guild: discord.Guild) -> None:
 
         loop = asyncio.get_running_loop()
         after = music.make_after_callback(loop, lambda: advance_playback(guild))
+        # A restored queue starts mid-track; every other advance starts at zero.
+        start_at = player.resume_position
+        player.resume_position = 0.0
         try:
-            await music.play_track(vc, player, next_track, after)
+            await music.play_track(vc, player, next_track, after, start_at=start_at)
             player.last_played = next_track
             await refresh_now_playing(guild)
+            snapshot_player(guild.id)   # record the new track and a fresh position
         except Exception as e:
             safe_print(f"[ERROR] Could not play '{next_track.title}': {e}")
             # Skip the bad track rather than stalling the whole queue
@@ -1296,6 +1398,7 @@ async def execute_music_command(
         # shows the finished card and starts the idle timer - so Amy still leaves on her
         # own after 5 minutes. /leave is the command for disconnecting straight away.
         vc.stop()
+        snapshot_player(guild.id)   # a deliberate clear shouldn't come back on restart
         return Reply(embed=ui.info_embed(
             "Stopped and cleared the queue. I'll stay here — use `/leave` to send me away."))
 
@@ -2004,6 +2107,10 @@ async def on_ready() -> None:
         prune_old_messages_task.start()
         safe_print(f"[INFO] Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
 
+    if not snapshot_queues_task.is_running():
+        snapshot_queues_task.start()
+        safe_print(f"[INFO] Queue snapshots every {SNAPSHOT_INTERVAL}s")
+
     # Register the persistent player buttons so they keep working across restarts
     bot.add_view(PlayerControls())
     safe_print("[INFO] Player controls registered")
@@ -2030,6 +2137,18 @@ async def on_ready() -> None:
             safe_print(f"[INFO] Cleaned up {removed} orphaned voice channel(s) from a previous run")
     except Exception as e:
         safe_print(f"[WARNING] Orphan voice channel sweep failed: {e}")
+
+    # Put back any queue that was playing when Amy last stopped. Done after the orphan
+    # sweep so a channel she created and is about to delete isn't rejoined.
+    for saved_id in db.saved_guild_ids():
+        saved_guild = bot.get_guild(saved_id)
+        if saved_guild is None:
+            db.clear_player_state(saved_id)     # she is no longer in that server
+            continue
+        try:
+            await restore_player(saved_guild)
+        except Exception as e:
+            safe_print(f"[WARNING] Could not restore the queue for {saved_id}: {e}")
 
 @bot.event
 async def on_connect() -> None:

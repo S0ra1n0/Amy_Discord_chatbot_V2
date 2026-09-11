@@ -1,7 +1,7 @@
 # database.py
 import os
 import sqlite3
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # How many messages are kept per channel, and therefore how far back Amy can remember.
 # Every one of these is replayed to the model on each reply, so it is also a latency knob:
@@ -39,8 +39,107 @@ class ConversationDB:
                 value      TEXT NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            -- One row per queued track. slot 0 is whatever was playing, 1..n the queue in
+            -- order, so restoring is just "read in slot order".
+            CREATE TABLE IF NOT EXISTS saved_queue (
+                guild_id     INTEGER NOT NULL,
+                slot         INTEGER NOT NULL,
+                title        TEXT    NOT NULL,
+                query        TEXT    NOT NULL,
+                duration     INTEGER,
+                requested_by TEXT    NOT NULL DEFAULT 'unknown',
+                is_local     INTEGER NOT NULL DEFAULT 0,
+                thumbnail    TEXT,
+                PRIMARY KEY (guild_id, slot)
+            );
+
+            CREATE TABLE IF NOT EXISTS saved_player (
+                guild_id         INTEGER PRIMARY KEY,
+                loop_mode        TEXT    NOT NULL DEFAULT 'off',
+                volume           REAL    NOT NULL DEFAULT 1.0,
+                voice_channel_id INTEGER,
+                text_channel_id  INTEGER,
+                resume_position  REAL    NOT NULL DEFAULT 0,
+                saved_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.conn.commit()
+
+    #----Queue persistence------
+    # The queue lives in memory, so a restart used to lose it entirely - including a long
+    # playlist someone had just queued up. This snapshots it per guild.
+
+    def save_player_state(self, guild_id: int, tracks: List[Dict[str, Any]],
+                          loop_mode: str, volume: float,
+                          voice_channel_id: Optional[int],
+                          text_channel_id: Optional[int],
+                          resume_position: float = 0.0) -> None:
+        """
+        Replace the saved snapshot for one guild.
+
+        `tracks` is slot-ordered: index 0 is the track that was playing (if any), the rest
+        are the pending queue. Written as one transaction so a crash mid-save can't leave a
+        half-written queue that restores as nonsense.
+        """
+        with self.conn:
+            self.conn.execute("DELETE FROM saved_queue WHERE guild_id = ?", (guild_id,))
+            self.conn.executemany("""
+                INSERT INTO saved_queue
+                    (guild_id, slot, title, query, duration, requested_by, is_local, thumbnail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [(guild_id, i, t["title"], t["query"], t.get("duration"),
+                   t.get("requested_by", "unknown"), 1 if t.get("is_local") else 0,
+                   t.get("thumbnail"))
+                  for i, t in enumerate(tracks)])
+            self.conn.execute("""
+                INSERT INTO saved_player (guild_id, loop_mode, volume, voice_channel_id,
+                                          text_channel_id, resume_position, saved_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    loop_mode = excluded.loop_mode,
+                    volume = excluded.volume,
+                    voice_channel_id = excluded.voice_channel_id,
+                    text_channel_id = excluded.text_channel_id,
+                    resume_position = excluded.resume_position,
+                    saved_at = CURRENT_TIMESTAMP
+            """, (guild_id, loop_mode, volume, voice_channel_id, text_channel_id,
+                  resume_position))
+
+    def load_player_state(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """The saved snapshot for one guild, or None if nothing was saved."""
+        row = self.conn.execute("""
+            SELECT loop_mode, volume, voice_channel_id, text_channel_id, resume_position
+            FROM saved_player WHERE guild_id = ?
+        """, (guild_id,)).fetchone()
+        if row is None:
+            return None
+        tracks = [
+            {"title": r[0], "query": r[1], "duration": r[2], "requested_by": r[3],
+             "is_local": bool(r[4]), "thumbnail": r[5]}
+            for r in self.conn.execute("""
+                SELECT title, query, duration, requested_by, is_local, thumbnail
+                FROM saved_queue WHERE guild_id = ? ORDER BY slot ASC
+            """, (guild_id,))
+        ]
+        return {
+            "loop_mode": row[0],
+            "volume": row[1],
+            "voice_channel_id": row[2],
+            "text_channel_id": row[3],
+            "resume_position": row[4],
+            "tracks": tracks,
+        }
+
+    def saved_guild_ids(self) -> List[int]:
+        """Guilds with a saved snapshot, for restoring on startup."""
+        return [r[0] for r in self.conn.execute("SELECT guild_id FROM saved_player")]
+
+    def clear_player_state(self, guild_id: int) -> None:
+        """Forget a guild's snapshot - used once it has been restored or deliberately cleared."""
+        with self.conn:
+            self.conn.execute("DELETE FROM saved_queue WHERE guild_id = ?", (guild_id,))
+            self.conn.execute("DELETE FROM saved_player WHERE guild_id = ?", (guild_id,))
 
     #----Settings------
     # Runtime choices an admin makes with /toggle and /model. Without these they live only

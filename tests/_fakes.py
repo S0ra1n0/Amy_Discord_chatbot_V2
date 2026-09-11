@@ -114,6 +114,15 @@ class Guild:
     def get_member(self, uid):
         return self._member if self._member is not None and self._member.id == uid else None
 
+    def get_channel(self, cid):
+        """Channel lookup for restore paths. Returns None unless one was registered."""
+        return getattr(self, "_channels", {}).get(cid)
+
+    def add_channel(self, channel):
+        self._channels = getattr(self, "_channels", {})
+        self._channels[channel.id] = channel
+        return channel
+
 
 class SentMessage:
     """What followup.send returns - editable and deletable, like a WebhookMessage."""

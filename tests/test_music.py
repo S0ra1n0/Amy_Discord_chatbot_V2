@@ -218,5 +218,48 @@ assert music.clamp_bitrate(-5) == 1
 assert music.clamp_bitrate(None) is None, "unknown bitrate stays unknown"
 print("clamp_bitrate: OK (lossless sources no longer play as silence)")
 
+# ---- Track serialisation (queue persistence) ------------------------------------------
+_orig = [music.Track("Song %d" % i, "https://youtu.be/%d" % i, 100 + i, "user%d" % i,
+                     is_local=(i == 2), thumbnail=None if i == 1 else "https://t/%d.jpg" % i)
+         for i in range(4)]
+_round = [music.track_from_dict(music.track_to_dict(t)) for t in _orig]
+assert _round == _orig, "a track must survive a save/load round trip unchanged"
+assert _round[2].is_local is True and _round[0].is_local is False
+assert _round[1].thumbnail is None, "a missing thumbnail must stay missing"
+
+# A restored queue is read from a database an older build may have written, so one bad row
+# must cost that track alone - not the whole restore.
+assert music.track_from_dict({"title": "A", "query": "https://a/1"}) is not None
+for bad in [{}, {"title": "no query"}, {"query": "https://a/2"}, {"title": "", "query": "x"},
+            {"title": "t", "query": ""}, "not a dict", None, 42, []]:
+    assert music.track_from_dict(bad) is None, "%r should not make a Track" % (bad,)
+
+_odd = music.track_from_dict({"title": "Odd", "query": "https://a/3", "duration": "abc",
+                              "requested_by": None, "thumbnail": 5, "is_local": "yes"})
+assert _odd is not None
+assert _odd.duration is None, "a non-integer duration must not survive as one"
+assert _odd.requested_by == "unknown"
+assert _odd.thumbnail is None
+assert _odd.is_local is True, "truthy is_local should coerce to a bool"
+assert music.track_from_dict({"title": "t", "query": "q", "duration": -5}).duration is None
+print("track serialisation: OK (round trip exact, bad rows skipped)")
+
+for _v, _want in [("off", music.LoopMode.OFF), ("track", music.LoopMode.TRACK),
+                  ("queue", music.LoopMode.QUEUE), ("QUEUE", music.LoopMode.QUEUE),
+                  ("  track ", music.LoopMode.TRACK), ("nonsense", music.LoopMode.OFF),
+                  (None, music.LoopMode.OFF), ("", music.LoopMode.OFF),
+                  (5, music.LoopMode.OFF)]:
+    assert music.loop_mode_from(_v) is _want, "%r -> %s" % (_v, music.loop_mode_from(_v))
+print("loop_mode_from: OK (unknown values fall back to off)")
+
+# resume_position is one-shot: consumed by the first advance after a restore, so a later
+# track can't accidentally start partway through.
+_p = music.GuildPlayer(7)
+assert _p.resume_position == 0.0
+_p.resume_position = 61.5
+_p.reset()
+assert _p.resume_position == 0.0, "reset must clear a pending resume"
+print("resume_position: OK (defaults to 0, cleared by reset)")
+
 print()
 print("ALL MUSIC TESTS PASSED")

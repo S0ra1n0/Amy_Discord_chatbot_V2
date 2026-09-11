@@ -247,6 +247,31 @@ instead of decoding and discarding everything up to that point — instant rathe
 seconds on a long track. Seeking past the end is refused rather than silently ending the
 track, since that would be a confusing way to spell `/skip`.
 
+### The queue survives a restart
+
+Amy snapshots each server's queue to the database every 20 seconds and at every track
+change, then restores it when she starts up. Restarting no longer throws away a 50-track
+playlist someone just queued.
+
+What comes back: the pending queue in order, the track that was playing, the loop mode, the
+volume, and **how far into the current track she had got** — so she picks up mid-song rather
+than restarting it. Worst case you lose 20 seconds of position.
+
+Whether she *resumes* depends on who is still there:
+
+| Situation on startup | What happens |
+|---|---|
+| People still in the voice channel she was in | She rejoins and carries on from where she left off |
+| That channel is now empty | The queue is restored silently; she stays out until someone runs `/join` or `/play` |
+| The channel is gone, or she left the server | The snapshot is discarded |
+
+Playing music to an empty channel after a restart would be worse than waiting, which is why
+an empty channel restores the queue but doesn't resume it.
+
+`/stop` clears the snapshot immediately, so a deliberate clear doesn't come back later. A
+track whose saved row can't be read is skipped individually rather than failing the whole
+restore.
+
 ### Player controls
 
 The now-playing card carries three buttons — **Pause/Resume**, **Skip** and **Stop**.

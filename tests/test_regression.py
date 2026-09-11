@@ -198,5 +198,54 @@ _dead.response.send_message = _raise
 _asyncio.run(amy.on_app_command_error(_dead, _boom))
 print("slash error handler: OK (quiet on CheckFailure, replies once, survives a dead token)")
 
+# ---- Queue survives a restart ---------------------------------------------------------
+# The queue only ever lived in memory, so restarting threw away whatever was lined up.
+import music as _music
+
+_qtmp = tempfile.mktemp(suffix=".db")
+_qdb = ConversationDB(_qtmp)
+assert _qdb.load_player_state(1) is None, "nothing saved yet"
+assert _qdb.saved_guild_ids() == []
+
+_tracks = [_music.Track("T%d" % i, "https://youtu.be/%d" % i, 200 + i, "asker") for i in range(3)]
+_qdb.save_player_state(1, [_music.track_to_dict(t) for t in _tracks],
+                       loop_mode="queue", volume=0.4, voice_channel_id=555,
+                       text_channel_id=777, resume_position=42.5)
+
+_st = _qdb.load_player_state(1)
+assert _st is not None
+assert [_music.track_from_dict(x) for x in _st["tracks"]] == _tracks, "order or content changed"
+assert _st["loop_mode"] == "queue" and abs(_st["volume"] - 0.4) < 1e-9
+assert _st["voice_channel_id"] == 555 and _st["text_channel_id"] == 777
+assert abs(_st["resume_position"] - 42.5) < 1e-9, "mid-track position must survive"
+
+# Saving again replaces the snapshot; appending would grow the queue on every tick.
+_qdb.save_player_state(1, [_music.track_to_dict(_tracks[0])], "off", 1.0, None, None, 0.0)
+assert len(_qdb.load_player_state(1)["tracks"]) == 1, "second save must replace"
+assert _qdb.conn.execute(
+    "SELECT COUNT(*) FROM saved_queue WHERE guild_id=1").fetchone()[0] == 1, "stale rows left"
+
+# Guilds must not bleed into each other.
+_qdb.save_player_state(2, [_music.track_to_dict(_tracks[2])], "track", 0.9, 1, 2, 3.0)
+assert sorted(_qdb.saved_guild_ids()) == [1, 2]
+_qdb.clear_player_state(1)
+assert _qdb.saved_guild_ids() == [2], "clearing one guild must not touch another"
+assert _qdb.load_player_state(1) is None
+assert len(_qdb.load_player_state(2)["tracks"]) == 1
+
+# An empty queue clears rather than saving an empty snapshot to restore later.
+_qdb.save_player_state(2, [], "off", 1.0, None, None, 0.0)
+assert _qdb.load_player_state(2)["tracks"] == []
+_qdb.clear_player_state(2)
+assert _qdb.saved_guild_ids() == []
+
+_qdb.conn.close(); os.remove(_qtmp)
+print("queue persistence: OK (round trip, replace-not-append, per-guild isolation)")
+
+assert amy.SNAPSHOT_INTERVAL > 0, "snapshots need a positive interval"
+assert hasattr(amy, "snapshot_player") and hasattr(amy, "restore_player")
+assert amy.snapshot_queues_task.seconds == amy.SNAPSHOT_INTERVAL,     "the task interval and the documented constant must agree"
+print("snapshot task: OK (every %ds)" % amy.SNAPSHOT_INTERVAL)
+
 print()
 print("ALL REGRESSION TESTS PASSED")
