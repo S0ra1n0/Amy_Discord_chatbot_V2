@@ -33,8 +33,45 @@ class ConversationDB:
                 guild_id   INTEGER NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.conn.commit()
+
+    #----Settings------
+    # Runtime choices an admin makes with /toggle and /model. Without these they live only
+    # in module globals, so a restart silently reverts them - you switch to a bigger model,
+    # restart, and you are back on the default with nothing to say so.
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Stored value for `key`, or `default` when it was never set."""
+        row = self.conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Store `value` under `key`, replacing any previous value."""
+        self.conn.execute("""
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                           updated_at = CURRENT_TIMESTAMP
+        """, (key, value))
+        self.conn.commit()
+
+    def get_bool_setting(self, key: str, default: bool) -> bool:
+        """Boolean form of get_setting. Anything unrecognised falls back to `default`."""
+        raw = self.get_setting(key)
+        if raw is None:
+            return default
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+
+    def set_bool_setting(self, key: str, value: bool) -> None:
+        self.set_setting(key, "true" if value else "false")
 
     def store_message(self, server: Union[int, str], channel: int, role: str, content: str) -> None:
         self.conn.execute(

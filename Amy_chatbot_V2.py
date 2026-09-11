@@ -4,6 +4,7 @@
 import os
 import re
 import time
+import traceback
 import asyncio
 import random
 import httpx
@@ -134,7 +135,10 @@ intents.message_content = True
 intents.members = True
 bot = discord.Client(intents=intents)
 
-model = "qwen3.5:2b"
+# Fallback model. The value actually used is restored from saved settings below, and
+# falls back to this if nothing was saved or the saved one is no longer installed.
+DEFAULT_MODEL: str = "qwen3.5:2b"
+model = DEFAULT_MODEL
 system_prompt = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary.
 
 Personality Traits:
@@ -177,7 +181,16 @@ websearch.log = safe_print
 #----------------------------------------------
 
 #----Bot State------
-bot_enabled: bool = True
+# /toggle and /model are persisted. As plain globals they reset on every restart, so an
+# admin could switch to a bigger model, restart, and be silently back on the default - with
+# nothing but /status to reveal it. The saved model is verified against Ollama at startup
+# (see warm_model), because checking it needs a network call this module-level code can't make.
+model = db.get_setting("model") or DEFAULT_MODEL
+bot_enabled: bool = db.get_bool_setting("bot_enabled", True)
+if model != DEFAULT_MODEL:
+    safe_print(f"[INFO] Restored saved model: {model}")
+if not bot_enabled:
+    safe_print("[INFO] Restored saved state: responses are OFF (use /toggle to enable)")
 #----------------------------------------------
 
 #----Slash Command Tree------
@@ -1392,6 +1405,7 @@ async def switch_model(name: str) -> str:
         return f"\U0001F6AB Model `{name}` not found. Installed models: {names_list}"
 
     model = name
+    db.set_setting("model", model)                    # survives a restart
     safe_print(f"[INFO] Model switched to {model}")
     return f"\U0001F9E0 Model switched to `{model}`"
 #--------------------------------------
@@ -1738,6 +1752,7 @@ async def slash_volume(
 async def slash_toggle(interaction: discord.Interaction) -> None:
     global bot_enabled
     bot_enabled = not bot_enabled
+    db.set_bool_setting("bot_enabled", bot_enabled)   # survives a restart
     state = "enabled" if bot_enabled else "disabled"
     safe_print("[INFO] Bot is now " + state)
     await interaction.response.send_message("\U0001F916 Bot is now **%s**" % state)
@@ -1773,6 +1788,47 @@ async def slash_forget(interaction: discord.Interaction) -> None:
     view.message = await interaction.original_response()
 #--------------------------------------
 
+#----Slash Command Error Handling------
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction,
+                               error: app_commands.AppCommandError) -> None:
+    """
+    Catch anything a slash command didn't handle itself.
+
+    None of the 25 command callbacks wrap their own body, so without this an unexpected
+    exception - yt-dlp changing, Ollama dying mid-reply, Discord refusing an edit - reaches
+    discord.py's default handler, which logs to stderr and leaves the interaction unanswered.
+    The user sees "The application did not respond", or nothing at all if the command had
+    already deferred, with no way to connect that to anything in the console.
+
+    A silent failure is the expensive kind: it costs debugging time precisely because
+    nothing announces itself. So this says something to the user and logs the command,
+    the caller and the full traceback.
+    """
+    # A failed check has already explained itself - admin_only() and voice_gate() reply
+    # before returning False. Re-reporting it would double up on the user and fill the
+    # console with tracebacks for ordinary permission denials.
+    if isinstance(error, app_commands.CheckFailure):
+        return
+
+    # CommandInvokeError wraps the real exception; unwrap so the log names the actual cause.
+    original = getattr(error, "original", error)
+    command = interaction.command.name if interaction.command else "unknown"
+    where = interaction.guild.name if interaction.guild else "a DM"
+    safe_print(f"[ERROR] /{command} raised for {interaction.user} in {where}: "
+               f"{type(original).__name__}: {original}")
+    traceback.print_exception(type(original), original, original.__traceback__)
+
+    try:
+        await deny(interaction, "Something went wrong running that command. "
+                                "It's been logged - try again, and tell an admin if it "
+                                "keeps happening.")
+    except discord.HTTPException:
+        # The interaction may already be dead (past Discord's 15-minute token window, or
+        # the 3-second one if the command never deferred). Nothing more to do; it is logged.
+        pass
+#--------------------------------------
+
 #----Event Handlers for Discord Bot------
 def preload_model() -> None:
     """
@@ -1798,14 +1854,36 @@ async def warm_model() -> None:
 
     Failures are logged and ignored: Ollama being slow or absent must not stop the bot, and
     the first chat will simply load the model itself the way it always did.
+
+    This is also where a restored /model choice gets verified. A model saved in a previous
+    run can be uninstalled between runs, and without this Amy would fail on every single
+    message; instead she falls back to the default and says so.
     """
+    global model
     started = time.monotonic()
     try:
         await asyncio.get_running_loop().run_in_executor(None, preload_model)
         safe_print(f"[INFO] Model '{model}' warmed in {time.monotonic() - started:.1f}s "
                    f"(stays loaded for {OLLAMA_KEEP_ALIVE})")
+        return
     except Exception as e:
-        safe_print(f"[WARNING] Could not warm the model, the first reply will be slower: {e}")
+        first_error = e
+
+    if model == DEFAULT_MODEL:
+        safe_print(f"[WARNING] Could not warm the model, the first reply "
+                   f"will be slower: {first_error}")
+        return
+
+    # A saved model that no longer loads is worth recovering from, not just logging.
+    safe_print(f"[WARNING] Saved model '{model}' could not be loaded ({first_error}); "
+               f"falling back to '{DEFAULT_MODEL}'")
+    model = DEFAULT_MODEL
+    db.set_setting("model", model)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, preload_model)
+        safe_print(f"[INFO] Model '{model}' warmed (fallback)")
+    except Exception as e:
+        safe_print(f"[WARNING] Could not warm the fallback model either: {e}")
 
 
 @bot.event

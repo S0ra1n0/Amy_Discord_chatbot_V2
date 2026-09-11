@@ -154,6 +154,17 @@ the autocomplete. Amy clears the stale global scope automatically on startup whe
 > Typing a command as an ordinary message (`/play something`) no longer works — use the
 > real slash command. Talking to Amy normally is unchanged.
 
+### When a command goes wrong
+
+Every slash command is covered by a single error handler. If one fails unexpectedly — a
+YouTube change, Ollama going down mid-reply, a network blip — you get a private message
+saying so, and the full traceback goes to the console with the command name and who ran it.
+
+This matters because the alternative is silence: an unhandled error leaves Discord showing
+"The application did not respond", or nothing at all if the command had already started
+working, with no way to connect that to anything in the log. Permission refusals are not
+treated as errors — they already explain themselves, and no longer print a traceback.
+
 ### Admin Access
 
 A user is considered an admin if they meet **any** of the following:
@@ -252,9 +263,9 @@ If you just want Amy quieter, prefer Discord's own per-user volume slider (right
 5. Non-admin users are rate-limited to 5 chat messages per hour; excess messages receive a cooldown reply
 6. Chat responses stream token-by-token: Amy sends a "Thinking..." placeholder then edits it live as the model generates output
 7. Any reply or streamed response longer than Discord's 2000-character limit is automatically split across multiple messages, breaking at a word/line boundary where possible
-8. Use `/toggle` (Admin only) to enable/disable bot chat responses without shutting down the bot
+8. Use `/toggle` (Admin only) to enable/disable bot chat responses without shutting down the bot. The choice is **saved**, so it survives a restart — if Amy is quiet after a restart, check whether she was toggled off
 9. Use `/status` (Admin only) to check bot state, Ollama connectivity, memory stats, and how many users are currently throttled
-10. Use `/model` (Admin only) to view or switch the active Ollama model at runtime — the new model is validated against Ollama's installed model list before switching
+10. Use `/model` (Admin only) to view or switch the active Ollama model at runtime — the new model is validated against Ollama's installed model list before switching. The choice is **saved** and restored on the next start; if that model has since been uninstalled, Amy logs a warning and falls back to the default rather than failing every reply
 11. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
 12. Use `/join`, `/create` and `/leave` to control which voice channel Amy sits in; she auto-leaves 60s after the last person departs
 13. `/play` queues music and pulls Amy into your voice channel if she isn't already there; the queue advances automatically, and she disconnects 5 minutes after it runs dry
@@ -452,7 +463,7 @@ question from 33s down to 4s and turned an empty answer into a complete one.
 - Ensure Ollama is running (`ollama serve`)
 - Check that the model you want to use is installed (`ollama list`)
 - Verify your Discord token is correct in `.env`
-- Check if the bot was disabled with `/toggle`
+- Check if the bot was disabled with `/toggle` — this setting persists across restarts, and Amy logs `Restored saved state: responses are OFF` at startup when it does
 - Check if you have hit the rate limit (5 messages/hour for non-admins)
 - Use `/status` (Admin) to quickly diagnose connectivity and bot state
 

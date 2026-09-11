@@ -27,7 +27,7 @@ Individual suites can also be run directly: `python tests/test_music.py`.
 | `test_queue_mgmt.py` | playlist-URL detection, pagination, remove/shuffle/skipto helpers |
 | `test_queue_cmds.py` | queue commands end-to-end through mocked Discord objects |
 | `test_voice_cmds.py` | voice command permissions and cooldowns |
-| `test_regression.py` | rate limiters, message splitting, `<think>`-tag stripping |
+| `test_regression.py` | rate limiters, message splitting, `<think>`-tag stripping, history window, model warm-up, settings persistence, the slash error handler |
 | `test_security.py` | the `MUSIC_DIR` sandbox — path traversal must stay blocked |
 | `test_commands_audit.py` | `/dice` caps, removed commands, `/stop` staying connected |
 | `test_slash.py` | the slash-command tree: naming rules, descriptions, bounds, admin gating, 3s defers |

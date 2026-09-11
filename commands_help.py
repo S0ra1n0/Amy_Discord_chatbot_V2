@@ -31,11 +31,11 @@ HELP_EVERYONE = """**Commands — Everyone:**
 
 HELP_ADMIN = """
 **Commands — Admin only:**
-`/toggle` - Enable/disable bot responses
+`/toggle` - Enable/disable bot responses (remembered across restarts)
 `/forget` - Wipe conversation memory for this channel
 `/status` - Show bot state, Ollama connectivity, memory usage and rate limit info
 `/model` - Show the current Ollama model
-`/model [name]` - Switch to a different installed Ollama model
+`/model [name]` - Switch to a different installed Ollama model (remembered)
   • Usage: `/model qwen2.5:3b`
 `/create [name]` - Create a new voice channel and join it
   • Usage: `/create Music Room`

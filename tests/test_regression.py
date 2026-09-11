@@ -114,5 +114,89 @@ try:
 finally:
     amy.ollama.chat = _real_chat
 
+# ---- Settings persist across restarts -------------------------------------------------
+# /toggle and /model were plain globals, so a restart silently reverted an admin's choice.
+_stmp = tempfile.mktemp(suffix=".db")
+_sdb = ConversationDB(_stmp)
+assert _sdb.get_setting("model") is None, "unset key must be None"
+assert _sdb.get_setting("model", "fallback") == "fallback", "default not honoured"
+assert _sdb.get_bool_setting("bot_enabled", True) is True, "bool default not honoured"
+assert _sdb.get_bool_setting("bot_enabled", False) is False
+
+_sdb.set_setting("model", "qwen3.5:7b")
+assert _sdb.get_setting("model") == "qwen3.5:7b"
+_sdb.set_setting("model", "llama3:8b")
+assert _sdb.get_setting("model") == "llama3:8b", "second write must overwrite"
+assert _sdb.conn.execute("SELECT COUNT(*) FROM settings WHERE key='model'").fetchone()[0] == 1,     "upsert must not leave duplicate rows"
+
+for stored, expected in [("true", True), ("True", True), ("1", True), ("yes", True),
+                         ("on", True), ("false", False), ("0", False), ("", False),
+                         ("nonsense", False)]:
+    _sdb.set_setting("flag", stored)
+    assert _sdb.get_bool_setting("flag", True) is expected,         "%r should read back as %s" % (stored, expected)
+
+_sdb.set_bool_setting("bot_enabled", False)
+assert _sdb.get_bool_setting("bot_enabled", True) is False
+
+# Reopening is what a restart actually does.
+_sdb.conn.close()
+_sdb2 = ConversationDB(_stmp)
+assert _sdb2.get_setting("model") == "llama3:8b", "model lost across reopen"
+assert _sdb2.get_bool_setting("bot_enabled", True) is False, "toggle lost across reopen"
+_sdb2.conn.close(); os.remove(_stmp)
+print("settings persistence: OK (upsert, bool parsing, survives reopen)")
+
+assert amy.DEFAULT_MODEL, "a fallback model must exist for when a saved one is uninstalled"
+
+# ---- Slash command errors reach the user ----------------------------------------------
+# All 25 command callbacks are unguarded, so without tree.error an unexpected exception
+# leaves the interaction unanswered and the user sees "application did not respond".
+from discord import app_commands as _ac
+import discord as _dc
+
+class _Resp:
+    def __init__(self, done): self._d = done; self.sent = []
+    def is_done(self): return self._d
+    async def send_message(self, **kw): self._d = True; self.sent.append(("response", kw))
+class _Follow:
+    def __init__(self, sent): self.sent = sent
+    async def send(self, **kw): self.sent.append(("followup", kw))
+class _It:
+    def __init__(self, deferred=False):
+        self.response = _Resp(deferred)
+        self.followup = _Follow(self.response.sent)
+        self.command = type("C", (), {"name": "play"})()
+        self.user = "tester"
+        self.guild = type("G", (), {"name": "guild"})()
+
+# @tree.error replaces CommandTree.on_error with the plain function, so the registered
+# handler should be ours. Without it, unhandled errors are invisible to the user.
+assert amy.tree.on_error is amy.on_app_command_error,     "tree.error is not registered: %r" % amy.tree.on_error
+
+# A failed permission check already replied via deny(); re-reporting would double up.
+_quiet = _It()
+_asyncio.run(amy.on_app_command_error(_quiet, _ac.CheckFailure("denied")))
+assert _quiet.response.sent == [], "CheckFailure must stay quiet: %s" % _quiet.response.sent
+
+_boom = _ac.CommandInvokeError(amy.tree.get_command("play"), RuntimeError("kaboom"))
+
+_fresh = _It()
+_asyncio.run(amy.on_app_command_error(_fresh, _boom))
+assert len(_fresh.response.sent) == 1, "user must be told something went wrong"
+assert _fresh.response.sent[0][0] == "response", "should respond directly when not deferred"
+assert _fresh.response.sent[0][1].get("ephemeral") is True, "errors stay private"
+
+_deferred = _It(deferred=True)
+_asyncio.run(amy.on_app_command_error(_deferred, _boom))
+assert _deferred.response.sent[0][0] == "followup",     "after defer() it must follow up, not respond twice"
+
+# An expired interaction token is normal; the handler must swallow it, having logged.
+_dead = _It()
+async def _raise(**kw):
+    raise _dc.HTTPException(type("R", (), {"status": 404, "reason": "Not Found"})(), "gone")
+_dead.response.send_message = _raise
+_asyncio.run(amy.on_app_command_error(_dead, _boom))
+print("slash error handler: OK (quiet on CheckFailure, replies once, survives a dead token)")
+
 print()
 print("ALL REGRESSION TESTS PASSED")
