@@ -4,6 +4,7 @@
 import asyncio
 import os
 import random
+import time
 import shutil
 import urllib.parse
 from collections import deque
@@ -20,8 +21,12 @@ log: Callable[[str], None] = print
 # -nostdin stops FFmpeg competing for the console; the reconnect flags keep a stream
 # alive through transient network drops instead of ending the track. All verified
 # supported by FFmpeg 9.x.
-FFMPEG_BEFORE_OPTIONS: str = (
-    "-nostdin "
+FFMPEG_BEFORE_OPTIONS: str = "-nostdin"
+# The reconnect flags are options of FFmpeg's HTTP protocol, not general input options.
+# Passing them for a local file makes FFmpeg exit with "Option reconnect not found" before
+# it opens anything - the source still constructs, then yields silence, so /play a local
+# file failed with no error anywhere. They are only added for http(s) sources now.
+FFMPEG_RECONNECT_OPTIONS: str = (
     "-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 "
     "-reconnect_delay_max 5"
 )
@@ -42,6 +47,12 @@ LOOP_PREFIX: str = "🔁"        # repeat arrows
 DEFAULT_VOLUME: float = 1.0
 # At/above this, volume is effectively unchanged, so no PCM transform is needed
 OPUS_PASSTHROUGH_THRESHOLD: float = 0.99
+# Seeking to the very end just ends the track, which is a confusing way to spell /skip.
+SEEK_END_MARGIN: int = 2
+# libopus refuses anything above this (kbps). Lossless local files probe far higher - a WAV
+# reports 1536 - and handing that straight to the encoder makes it fail to open, so the
+# track plays as silence with the error buried in FFmpeg's stderr.
+MAX_OPUS_BITRATE: int = 512
 
 
 def get_music_dir() -> Optional[str]:
@@ -461,6 +472,88 @@ async def resolve_stream_url(track: Track) -> str:
 
 
 #----Per-guild State------
+#----Playback position (pure, unit tested)------
+# Nothing tracked where a track was up to, which is why /seek, a progress bar and /replay
+# were all impossible. Position is derived from wall-clock rather than read from FFmpeg:
+# discord.py exposes no playback cursor, but it plays in real time, so elapsed time since
+# the source started IS the position - as long as paused stretches are excluded and any
+# seek offset is added back.
+
+def elapsed_seconds(started_at: Optional[float], paused_at: Optional[float],
+                    seek_offset: float, now: float) -> float:
+    """
+    How far into the track we are, in seconds.
+
+    `started_at` is when the current source began, `paused_at` freezes the clock while
+    paused, and `seek_offset` is where in the track that source was told to start.
+    """
+    if started_at is None:
+        return 0.0
+    end = paused_at if paused_at is not None else now
+    return max(0.0, seek_offset + (end - started_at))
+
+
+def parse_timestamp(text: str) -> Optional[int]:
+    """
+    Read a position written as `90`, `1:30` or `1:02:03` into seconds.
+
+    Returns None for anything unparseable, so the command can say so rather than seeking
+    somewhere arbitrary. Minutes and seconds above 59 are rejected: "1:75" is a typo, and
+    silently treating it as 2:15 would be worse than refusing.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    parts = text.split(":")
+    if len(parts) > 3:
+        return None
+    try:
+        numbers = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if any(n < 0 for n in numbers):
+        return None
+    if len(numbers) > 1 and any(n > 59 for n in numbers[1:]):
+        return None
+
+    total = 0
+    for n in numbers:
+        total = total * 60 + n
+    return total
+
+
+def clamp_seek(target: float, duration: Optional[int]) -> float:
+    """
+    Keep a seek inside the track.
+
+    Seeking past the end would just end the track, which is a confusing way to spell /skip,
+    so stop a little short. Live streams have no duration and are left to FFmpeg.
+    """
+    target = max(0.0, target)
+    if duration and duration > 0:
+        return min(target, max(0.0, duration - SEEK_END_MARGIN))
+    return target
+
+
+def progress_bar(elapsed: float, duration: Optional[int], width: int = 18) -> str:
+    """
+    Render `1:03 ─────●──────── 4:20`.
+
+    Without a known duration (live streams) there is no meaningful bar, so it shows the
+    elapsed time alone rather than a misleading full one.
+    """
+    stamp = format_duration(int(elapsed))
+    if not duration or duration <= 0:
+        return f"{stamp} / live"
+
+    fraction = min(1.0, max(0.0, elapsed / duration))
+    filled = min(width - 1, int(fraction * width))
+    bar = ("─" * filled) + "●" + ("─" * (width - 1 - filled))
+    return f"{stamp} {bar} {format_duration(duration)}"
+#--------------------------------------
+
+
 class GuildPlayer:
     def __init__(self, guild_id: int) -> None:
         self.guild_id = guild_id
@@ -478,11 +571,51 @@ class GuildPlayer:
         self.text_channel_id: Optional[int] = None
         self.now_playing_msg: Optional[discord.Message] = None
         self.last_played: Optional[Track] = None   # for the "finished" card once current clears
+        # Playback position bookkeeping - see elapsed_seconds above
+        self.started_at: Optional[float] = None
+        self.paused_at: Optional[float] = None
+        self.seek_offset: float = 0.0
 
     def cancel_idle(self) -> None:
         if self.idle_task is not None and not self.idle_task.done():
             self.idle_task.cancel()
         self.idle_task = None
+
+    #----Position------
+    def mark_started(self, offset: float = 0.0, now: Optional[float] = None) -> None:
+        """A source just began playing, `offset` seconds into the track."""
+        self.started_at = time.monotonic() if now is None else now
+        self.paused_at = None
+        self.seek_offset = max(0.0, offset)
+
+    def mark_paused(self, now: Optional[float] = None) -> None:
+        """Freeze the clock. Ignored if already paused, so a double pause can't rewind."""
+        if self.started_at is not None and self.paused_at is None:
+            self.paused_at = time.monotonic() if now is None else now
+
+    def mark_resumed(self, now: Optional[float] = None) -> None:
+        """
+        Unfreeze, discounting the time spent paused.
+
+        Shifting `started_at` forward by the pause duration keeps the arithmetic in
+        elapsed_seconds simple - there is no separate "time paused" total to maintain.
+        """
+        if self.paused_at is None or self.started_at is None:
+            return
+        moment = time.monotonic() if now is None else now
+        self.started_at += moment - self.paused_at
+        self.paused_at = None
+
+    def mark_stopped(self) -> None:
+        """Nothing is playing; position goes back to zero."""
+        self.started_at = None
+        self.paused_at = None
+        self.seek_offset = 0.0
+
+    def position(self, now: Optional[float] = None) -> float:
+        """Seconds into the current track, excluding any time spent paused."""
+        return elapsed_seconds(self.started_at, self.paused_at, self.seek_offset,
+                               time.monotonic() if now is None else now)
 
     def reset(self) -> None:
         self.cancel_idle()
@@ -492,6 +625,7 @@ class GuildPlayer:
         self.skip_requested = False
         self.now_playing_msg = None
         self.last_played = None
+        self.mark_stopped()
 
 
 class MusicManager:
@@ -512,8 +646,40 @@ class MusicManager:
 
 
 #----Playback Engine------
+def clamp_bitrate(bitrate: Optional[int]) -> Optional[int]:
+    """
+    Hold a probed bitrate inside the range libopus will accept.
+
+    Lossless sources probe well above the encoder's ceiling, and the failure is silent:
+    FFmpeg cannot open the encoder, writes nothing, and the track plays as silence.
+    """
+    if bitrate is None:
+        return None
+    return max(1, min(int(bitrate), MAX_OPUS_BITRATE))
+
+
+def seek_before_options(start_at: float, source: str = "") -> str:
+    """
+    Build FFmpeg's input options for a source and an optional start offset.
+
+    `-ss` goes *before* the input so FFmpeg seeks by container index instead of decoding
+    and discarding everything up to that point - the difference between instant and
+    several seconds on a long track.
+
+    The reconnect flags are added only for http(s) sources. They belong to FFmpeg's HTTP
+    protocol, and handing them a local path makes it refuse the input outright.
+    """
+    parts = []
+    if start_at > 0:
+        parts.append(f"-ss {start_at:.3f}")
+    parts.append(FFMPEG_BEFORE_OPTIONS)
+    if source.lower().startswith(("http://", "https://")):
+        parts.append(FFMPEG_RECONNECT_OPTIONS)
+    return " ".join(parts)
+
+
 async def build_source(
-    stream_url: str, volume: float, ffmpeg: Optional[str]
+    stream_url: str, volume: float, ffmpeg: Optional[str], start_at: float = 0.0
 ) -> discord.AudioSource:
     """
     Build an audio source, picking the cheapest path that still honours `volume`.
@@ -525,16 +691,25 @@ async def build_source(
 
     Below full volume that isn't possible: PCMVolumeTransformer needs PCM samples to
     scale, so it falls back to decoding. Quieter playback therefore costs more CPU.
+
+    `start_at` begins playback that many seconds into the track, which is how /seek and
+    /replay work - there is no way to move an already-playing source, so they rebuild it.
     """
     executable = ffmpeg or "ffmpeg"
+    before = seek_before_options(start_at, stream_url)
 
     if volume >= OPUS_PASSTHROUGH_THRESHOLD:
         try:
-            return await discord.FFmpegOpusAudio.from_probe(
+            # This is what from_probe does internally, split open so the probed bitrate can
+            # be clamped before it reaches libopus - see clamp_bitrate.
+            codec, bitrate = await discord.FFmpegOpusAudio.probe(
+                stream_url, method="fallback", executable=executable)
+            return discord.FFmpegOpusAudio(
                 stream_url,
-                method="fallback",
+                codec=codec,
+                bitrate=clamp_bitrate(bitrate),
                 executable=executable,
-                before_options=FFMPEG_BEFORE_OPTIONS,
+                before_options=before,
                 options=FFMPEG_OPTIONS,
             )
         except Exception as e:
@@ -544,7 +719,7 @@ async def build_source(
     source = discord.FFmpegPCMAudio(
         stream_url,
         executable=executable,
-        before_options=FFMPEG_BEFORE_OPTIONS,
+        before_options=before,
         options=FFMPEG_OPTIONS,
     )
     return discord.PCMVolumeTransformer(source, volume=volume)
@@ -555,15 +730,37 @@ async def play_track(
     player: GuildPlayer,
     track: Track,
     on_finished: Callable[[Optional[Exception]], None],
+    start_at: float = 0.0,
 ) -> None:
-    """Resolve `track` and start playing it on `voice_client`."""
+    """Resolve `track` and start playing it on `voice_client`, `start_at` seconds in."""
     stream_url = await resolve_stream_url(track)
-    source = await build_source(stream_url, player.volume, find_ffmpeg())
+    source = await build_source(stream_url, player.volume, find_ffmpeg(), start_at)
 
     player.current = track
     player.cancel_idle()
     voice_client.play(source, after=on_finished)
-    log(f"[INFO] Now playing: {track.title}")
+    player.mark_started(start_at)
+    log(f"[INFO] Now playing: {track.title}"
+        + (f" (from {format_duration(int(start_at))})" if start_at else ""))
+
+
+async def restart_at(
+    voice_client: discord.VoiceClient,
+    player: GuildPlayer,
+    track: Track,
+    on_finished: Callable[[Optional[Exception]], None],
+    position: float,
+) -> None:
+    """
+    Restart `track` at `position`. Backs /seek and /replay.
+
+    An audio source has no seek of its own, so the only way to move is to stop and build a
+    new one with an input offset. Stopping fires the after-callback, which normally advances
+    the queue - the caller must hold the player lock across this call so that advance blocks
+    until the new source is playing and then bails on its own is_playing() guard.
+    """
+    voice_client.stop()
+    await play_track(voice_client, player, track, on_finished, start_at=position)
 
 
 def make_after_callback(

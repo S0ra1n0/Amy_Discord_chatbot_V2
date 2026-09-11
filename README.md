@@ -51,6 +51,8 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/search [song]`         | Show the top 5 matches and pick one from a menu                           | In-channel |
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
 | `/skip`                  | Skip the current track                                                    | In-channel |
+| `/seek [position]`       | Jump to a spot in the current track (`1:30`, `1:02:03` or `90`)           | In-channel |
+| `/replay`                | Restart the current track from the beginning                              | In-channel |
 | `/stop`                  | Stop playback and clear the queue (Amy stays in the channel)              | In-channel or admin |
 | `/queue [page]`          | Show what's playing and what's queued, 10 per page                        | Everyone   |
 | `/remove [position]`     | Remove a queued track (your own; admins can remove any)                   | In-channel |
@@ -201,6 +203,8 @@ If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tra
 
 **Playlists.** Pasting a playlist URL queues up to **50** tracks at once; Amy reports how many loaded and how many were skipped as unavailable or over the cap. Share links that name a single video (`watch?v=VIDEO&list=PLAYLIST` and `youtu.be/VIDEO?list=PLAYLIST`) queue **only that one video**, so an ordinary YouTube link can't dump hundreds of tracks into the queue. Unavailable entries (private, deleted, age-restricted) are skipped rather than failing the whole request.
 
+Local files play from `.mp3`, `.m4a`, `.opus`, `.wav` and `.flac`, and `/seek` works on them too.
+
 **Local files are off by default.** Set `MUSIC_DIR` in `.env` to a folder to enable them, and `/play` will only read files inside it — `..`, symlinks, and absolute paths pointing elsewhere are all rejected. Without this restriction, any server member could name any path on the host and confirm whether it exists.
 
 `/play` replies immediately with **🔍 Searching...**, then updates that same message as it resolves and starts playing, so you can see it's working during the few seconds YouTube lookup takes.
@@ -223,6 +227,25 @@ and either starts playing or adds it to the queue.
 > If the dropdown won't let you click it, the search has expired — run `/search` again.
 > The window was **60 seconds** in earlier versions, which could run out while you were
 > still reading the results.
+
+### Position, seeking and replay
+
+The player card shows a progress bar — `1:03 ─────●──────── 4:20` — and `/seek` jumps to
+any point in the track. `/seek 1:30`, `/seek 1:02:03` and `/seek 90` all work; `/replay`
+is the shortcut for going back to the start.
+
+Position is derived from the clock rather than read out of FFmpeg, which exposes no playback
+cursor: playback happens in real time, so the time since the source started *is* the
+position, once paused stretches are excluded and any seek offset is added back. That means
+the bar updates when the card is redrawn (on pause, resume, seek or a track change) rather
+than ticking live — a self-updating bar would mean editing the message every few seconds,
+which Discord rate-limits.
+
+Seeking rebuilds the audio source with an FFmpeg input offset, because a playing source
+cannot be moved. `-ss` is passed *before* the input so FFmpeg seeks by container index
+instead of decoding and discarding everything up to that point — instant rather than several
+seconds on a long track. Seeking past the end is refused rather than silently ending the
+track, since that would be a confusing way to spell `/skip`.
 
 ### Player controls
 
@@ -441,7 +464,7 @@ python tests/run_tests.py             # offline suites only (~8s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-14 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
+17 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network and no Discord token. See [tests/README.md](tests/README.md).
 

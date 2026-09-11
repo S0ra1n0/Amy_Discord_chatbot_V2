@@ -104,4 +104,30 @@ check("Skip and Stop present", labels[1] == "Skip" and labels[2] == "Stop", labe
 print()
 if fails:
     print("%d CHECK(S) FAILED" % len(fails)); sys.exit(1)
+# The progress bar replaces the Duration field only while something is actually playing.
+# On the finished card a position would be meaningless.
+_t = music.Track(title="Song", query="https://youtu.be/x", duration=260, requested_by="me")
+
+_live = ui.now_playing_embed(_t, elapsed=63)
+_names = [f.name for f in _live.fields]
+assert "Position" in _names, _names
+assert "Duration" not in _names, "Position replaces Duration while playing"
+_pos = [f for f in _live.fields if f.name == "Position"][0]
+assert "1:03" in _pos.value and "4:20" in _pos.value, _pos.value
+assert _pos.inline is False, "the bar needs full width to read as a scrubber"
+
+_plain = ui.now_playing_embed(_t)
+assert "Duration" in [f.name for f in _plain.fields], "no elapsed -> keep Duration"
+assert "Position" not in [f.name for f in _plain.fields]
+
+_done = ui.now_playing_embed(_t, stopped=True, elapsed=63)
+assert "Position" not in [f.name for f in _done.fields], "finished card shows no position"
+
+_live_stream = ui.now_playing_embed(
+    music.Track(title="Radio", query="https://x.test/s", duration=None, requested_by="me"),
+    elapsed=42)
+_lp = [f for f in _live_stream.fields if f.name == "Position"][0]
+assert "live" in _lp.value, _lp.value
+print("now_playing progress bar: OK (replaces Duration, hidden when finished)")
+
 print("ALL UI TESTS PASSED")

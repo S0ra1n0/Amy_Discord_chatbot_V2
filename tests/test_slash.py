@@ -90,7 +90,8 @@ print()
 print("=== slow commands defer (Discord's 3-second response limit) ===")
 # yt-dlp resolution and ollama.list() both take longer than 3s; without a defer the
 # interaction fails with "application did not respond".
-for name in ("play", "search", "status", "join", "leave", "create", "model"):
+for name in ("play", "search", "status", "join", "leave", "create", "model",
+             "seek", "replay"):     # both re-resolve the stream URL before restarting
     src = inspect.getsource(by_name[name].callback)
     check("/%-8s defers before slow work" % name, "response.defer(" in src)
 
@@ -98,7 +99,7 @@ print()
 print("=== guild-only where a guild is required ===")
 GUILD_ONLY = {"join", "leave", "create", "play", "search", "pause", "resume", "skip",
               "stop", "queue", "nowplaying", "remove", "skipto", "shuffle", "loop",
-              "clearqueue", "volume", "forget"}
+              "clearqueue", "volume", "forget", "seek", "replay"}
 for name in sorted(GUILD_ONLY):
     c = by_name[name]
     allowed = getattr(c, "allowed_contexts", None)

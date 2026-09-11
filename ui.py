@@ -54,8 +54,14 @@ def now_playing_embed(
     volume: float = 1.0,
     paused: bool = False,
     stopped: bool = False,
+    elapsed: Optional[float] = None,
 ) -> discord.Embed:
-    """The main player card. `stopped` renders the finished state after /stop or an empty queue."""
+    """
+    The main player card. `stopped` renders the finished state after /stop or an empty queue.
+
+    `elapsed` adds a progress bar. It is omitted on the finished card, where a position
+    would be meaningless, and for tracks of unknown length it degrades to the elapsed time.
+    """
     if stopped:
         heading, colour = "Playback finished", COLOUR_INFO
     elif paused:
@@ -70,7 +76,14 @@ def now_playing_embed(
         url=track.query if track.query.startswith("http") else None,
     )
     embed.set_author(name=heading)
-    embed.add_field(name="Duration", value=music.format_duration(track.duration), inline=True)
+    if elapsed is not None and not stopped:
+        # Full width, so it reads as a scrubber rather than another stat
+        embed.add_field(name="Position",
+                        value=music.progress_bar(elapsed, track.duration),
+                        inline=False)
+    else:
+        embed.add_field(name="Duration",
+                        value=music.format_duration(track.duration), inline=True)
     embed.add_field(name="Requested by", value=_clip(track.requested_by, MAX_FIELD_VALUE), inline=True)
     embed.add_field(name="Volume", value=f"{int(volume * 100)}%", inline=True)
 

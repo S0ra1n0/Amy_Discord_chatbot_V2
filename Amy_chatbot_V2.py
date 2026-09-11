@@ -751,9 +751,11 @@ class PlayerControls(discord.ui.View):
         player = music_manager.player_for(guild.id)
         if vc.is_paused():
             vc.resume()
+            player.mark_resumed()      # keep the position clock honest
             paused = False
         elif vc.is_playing():
             vc.pause()
+            player.mark_paused()
             paused = True
         else:
             await interaction.response.send_message(
@@ -765,7 +767,8 @@ class PlayerControls(discord.ui.View):
             return
         await interaction.response.edit_message(
             embed=ui.now_playing_embed(player.current, len(player.queue),
-                                       player.loop_mode, player.volume, paused=paused),
+                                       player.loop_mode, player.volume, paused=paused,
+                                       elapsed=player.position()),
             view=PlayerControls(paused=paused),
         )
 
@@ -938,7 +941,8 @@ async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
         view = None
     else:
         embed = ui.now_playing_embed(player.current, len(player.queue),
-                                     player.loop_mode, player.volume, paused=paused)
+                                     player.loop_mode, player.volume, paused=paused,
+                                     elapsed=player.position())
         view = PlayerControls(paused=paused)
 
     if player.now_playing_msg is not None:
@@ -984,6 +988,7 @@ async def advance_playback(guild: discord.Guild) -> None:
             if player.current is not None:
                 player.last_played = player.current
             player.current = None
+            player.mark_stopped()      # nothing playing, so the position clock resets
             await refresh_now_playing(guild, stopped=True)
             safe_print("[INFO] Queue empty - starting idle timer")
             player.cancel_idle()  # never stack timers; a stale one could disconnect later
@@ -1059,7 +1064,8 @@ async def execute_music_command(
         paused = bool(vc and vc.is_paused())
         return Reply(
             embed=ui.now_playing_embed(player.current, len(player.queue),
-                                       player.loop_mode, player.volume, paused=paused),
+                                       player.loop_mode, player.volume, paused=paused,
+                                       elapsed=player.position()),
             view=PlayerControls(paused=paused),
         )
 
@@ -1208,6 +1214,7 @@ async def execute_music_command(
         if not vc.is_playing():
             return Reply(embed=ui.error_embed("Nothing is playing."))
         vc.pause()
+        player.mark_paused()           # paused time must not count towards the position
         await refresh_now_playing(guild, paused=True)
         return Reply(embed=ui.info_embed("Paused."))
 
@@ -1217,6 +1224,7 @@ async def execute_music_command(
         if not vc.is_paused():
             return Reply(embed=ui.error_embed("Nothing is paused."))
         vc.resume()
+        player.mark_resumed()
         await refresh_now_playing(guild, paused=False)
         return Reply(embed=ui.info_embed("Resumed."))
 
@@ -1229,6 +1237,53 @@ async def execute_music_command(
         player.skip_requested = True
         vc.stop()  # triggers the after-callback, which advances the queue
         return Reply(embed=ui.info_embed(f"Skipped **{skipped}**."))
+
+    if command in ("seek", "replay"):
+        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
+            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
+        if not (vc.is_playing() or vc.is_paused()):
+            return Reply(embed=ui.error_embed("Nothing is playing."))
+        track = player.current
+        if track is None:
+            return Reply(embed=ui.error_embed("Nothing is playing."))
+        if track.is_local is False and not track.query.startswith("http"):
+            return Reply(embed=ui.error_embed("I can't seek in this track."))
+
+        if command == "replay":
+            target = 0.0
+        else:
+            raw = parts[1] if len(parts) > 1 else ""
+            seconds = music.parse_timestamp(raw)
+            if seconds is None:
+                return Reply(embed=ui.error_embed(
+                    "I couldn't read that position. Use `1:30`, `1:02:03` or a number of "
+                    "seconds."))
+            if track.duration and seconds >= track.duration:
+                return Reply(embed=ui.error_embed(
+                    f"That's past the end of the track ({music.format_duration(track.duration)}). "
+                    "Use `/skip` to move on."))
+            target = music.clamp_seek(float(seconds), track.duration)
+
+        loop = asyncio.get_running_loop()
+        after = music.make_after_callback(loop, lambda: advance_playback(guild))
+        try:
+            # The lock is what makes this safe: stopping the old source fires the
+            # after-callback, which calls advance_playback and would otherwise pull the
+            # next track off the queue. Holding the lock keeps that advance waiting until
+            # the new source is playing, at which point its is_playing() guard returns.
+            async with player.lock:
+                await music.restart_at(vc, player, track, after, target)
+        except Exception as e:
+            safe_print(f"[ERROR] Seek failed on '{track.title}': {e}")
+            return Reply(embed=ui.error_embed(
+                "I couldn't move to that position. The track may have expired - try "
+                "playing it again."))
+
+        await refresh_now_playing(guild)
+        if command == "replay":
+            return Reply(embed=ui.info_embed(f"Replaying **{track.title}** from the start."))
+        return Reply(embed=ui.info_embed(
+            f"Jumped to **{music.format_duration(int(target))}** in **{track.title}**."))
 
     if command == "stop":
         if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
@@ -1665,6 +1720,34 @@ async def slash_resume(interaction: discord.Interaction) -> None:
 @app_commands.guild_only()
 async def slash_skip(interaction: discord.Interaction) -> None:
     await simple_music(interaction, "skip")
+
+
+@tree.command(name="seek", description="Jump to a position in the current track")
+@app_commands.describe(position="Where to jump to: 1:30, 1:02:03, or seconds")
+@app_commands.guild_only()
+async def slash_seek(interaction: discord.Interaction, position: str) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    # Seeking re-resolves the stream URL, which is slow enough to blow Discord's 3s window
+    await interaction.response.defer()
+    await send_reply(interaction, await execute_music_command(
+        "seek", ["seek", position], interaction, guild))
+
+
+@tree.command(name="replay", description="Restart the current track from the beginning")
+@app_commands.guild_only()
+async def slash_replay(interaction: discord.Interaction) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()
+    await send_reply(interaction, await execute_music_command(
+        "replay", ["replay"], interaction, guild))
 
 
 @tree.command(name="stop", description="Stop playback and clear the queue (Amy stays)")
