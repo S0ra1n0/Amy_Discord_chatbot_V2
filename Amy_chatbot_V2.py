@@ -43,6 +43,55 @@ def safe_print(message: str) -> None:
         sys.stdout.buffer.write(b'\n')
         sys.stdout.buffer.flush()
 
+THINK_MODES = ("false", "true", "auto")
+
+# Openings a reasoning model uses when it narrates its own thinking instead of answering.
+# Measured on qwen3:4b with think=False: replies began "Okay, the user wants a brief
+# explanation..." and ran to 3,800 characters before reaching anything useful.
+_REASONING_OPENERS = (
+    "okay, the user", "okay, so the user", "okay, let's", "okay, let me",
+    "the user wants", "the user is asking", "the user just", "the user asked",
+    "let me recall", "let me think", "let me break", "first, i need to",
+    "i need to figure out", "we are to ", "alright, the user",
+)
+
+
+def looks_like_reasoning(text: str) -> bool:
+    """
+    True when a reply opens with the model narrating its own thought process.
+
+    Used to catch a model that ignores think=False and writes its reasoning into the
+    answer. Only the opening is examined - a reply that happens to say "let me think"
+    halfway through is just conversational.
+    """
+    head = (text or "").strip().lower()[:120]
+    return any(head.startswith(p) or p in head for p in _REASONING_OPENERS)
+
+
+def normalise_think_mode(value: Any, fallback: str = "false") -> str:
+    """Coerce a stored or configured think mode into one of THINK_MODES."""
+    text = str(value or "").strip().lower()
+    if text in ("1", "yes", "on"):
+        return "true"
+    if text in ("0", "no", "off"):
+        return "false"
+    return text if text in THINK_MODES else fallback
+
+
+def think_value(mode: str) -> Optional[bool]:
+    """
+    The value to pass as ollama.chat's `think` argument for a mode.
+
+    "auto" maps to None, which the client treats exactly as omitting the argument -
+    verified against qwen3:4b, where both routed reasoning to the separate `thinking`
+    field and left the content clean. That field never reaches Discord.
+    """
+    mode = normalise_think_mode(mode)
+    if mode == "auto":
+        return None
+    return mode == "true"
+
+
 def strip_think_tags(text: str) -> str:
     """Remove complete <think>...</think> blocks emitted by qwen3 models."""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
@@ -100,10 +149,22 @@ discord_token = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE_NAME: str = os.getenv("ADMIN_ROLE_NAME", "Admin")
 DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
 # Guild-scoped command sync is instant; global sync can take an hour to appear.
-# Reasoning models (qwen3.x) can burn the entire generation budget "thinking" and emit
-# no answer at all - measured 3,904 tokens of reasoning and 0 characters of content, with
-# done_reason="length". Disabling it is both a correctness fix and ~7x faster.
-OLLAMA_THINK: bool = os.getenv("OLLAMA_THINK", "false").strip().lower() in ("1", "true", "yes")
+# How the model's reasoning phase is handled. This is NOT one-size-fits-all - the right
+# answer differs per model, which is why it can be overridden per model at runtime:
+#   "false" - send think=False. Correct for qwen3.5:2b (2.3s and a clean answer).
+#   "auto"  - send nothing and let Ollama decide. Reasoning then arrives in a separate
+#             `thinking` field that never reaches Discord. Correct for qwen3:4b, where
+#             think=False makes it dump 3,800 characters of reasoning into the reply.
+#   "true"  - force reasoning on. Rarely wanted: on qwen3.5:2b it burned the whole budget
+#             thinking and returned 0 characters of content (done_reason="length").
+# The default suits the default model; /model detects and records the right mode for others.
+OLLAMA_THINK: str = (os.getenv("OLLAMA_THINK", "false").strip().lower() or "false")
+if OLLAMA_THINK in ("1", "yes", "on"):
+    OLLAMA_THINK = "true"
+elif OLLAMA_THINK in ("0", "no", "off"):
+    OLLAMA_THINK = "false"
+elif OLLAMA_THINK not in ("true", "false", "auto"):
+    OLLAMA_THINK = "false"
 # Web search is on by default. Turn it off if DuckDuckGo starts refusing requests -
 # it scrapes their HTML page, so it can break the way yt-dlp does.
 WEB_SEARCH: bool = os.getenv("WEB_SEARCH", "true").strip().lower() in ("1", "true", "yes")
@@ -114,6 +175,14 @@ WEB_SEARCH: bool = os.getenv("WEB_SEARCH", "true").strip().lower() in ("1", "tru
 # for this long after the last message. Set "0" to restore the old unload-immediately
 # behaviour, or a longer window like "2h" on a dedicated machine.
 OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "30m").strip() or "30m"
+# Bounds on the /model reasoning probe. Switching models forces Ollama to load the new one,
+# so an unbounded probe can take minutes - one measured run sat at 337s. A leaking model
+# gives itself away in its first few words, so a short generation is enough.
+PROBE_MAX_TOKENS: int = 256
+PROBE_TIMEOUT: float = 60.0
+# Long enough that the second probe attempt reuses the loaded model, short enough that a
+# rejected candidate does not sit in VRAM.
+PROBE_KEEP_ALIVE: str = "2m"
 # How far back Amy remembers, and how much is replayed to the model each reply. The cap
 # itself lives in database.py because storage enforces it too; this is the single source of
 # truth for both. It is a speed knob as well as a memory one - every stored message is sent
@@ -135,11 +204,12 @@ intents.message_content = True
 intents.members = True
 bot = discord.Client(intents=intents)
 
-# Fallback model. The value actually used is restored from saved settings below, and
-# falls back to this if nothing was saved or the saved one is no longer installed.
-DEFAULT_MODEL: str = "qwen3.5:2b"
+# The model Amy talks with. Set OLLAMA_MODEL in .env to change it without editing source.
+# This is the fallback: the value actually used is restored from saved settings below, and
+# comes back to this if nothing was saved or the saved model is no longer installed.
+DEFAULT_MODEL: str = os.getenv("OLLAMA_MODEL", "").strip() or "qwen3.5:2b"
 model = DEFAULT_MODEL
-system_prompt = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary.
+BASE_SYSTEM_PROMPT = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary.
 
 Personality Traits:
 - Poised and professional, yet warm and approachable
@@ -155,6 +225,15 @@ Limitations:
 - You should decline requests that are harmful, illegal, or unethical
 - Always prioritize security and privacy
 
+Remember: You are here to make your master's life easier, more organized, and more productive. Approach each interaction with dedication and a desire to be helpful.
+'''
+
+# The knowledge section has to match what Amy can actually do. The search tool is only
+# offered when WEB_SEARCH is on, so telling her unconditionally that she "has a working
+# web_search tool" is a lie in the other configuration - and a lie she acts on: with search
+# off she answered current-events questions from memory in 9 of 9 runs without once saying
+# she couldn't check.
+KNOWLEDGE_WITH_SEARCH = """
 Knowledge:
 - Your training data is frozen, but you CAN look things up: you have a working web_search
   tool. Never tell the user you have no internet access or cannot see current information.
@@ -163,10 +242,25 @@ Knowledge:
 - When search results are present in the conversation, answer from them. Do not preface the
   answer by saying you cannot access real-time data - you just searched, so you can.
 - If the results genuinely do not answer the question, say that plainly instead of filling
-  the gap from memory.
+  the gap from memory."""
 
-Remember: You are here to make your master's life easier, more organized, and more productive. Approach each interaction with dedication and a desire to be helpful.
-'''
+KNOWLEDGE_WITHOUT_SEARCH = """
+Knowledge:
+- Your training data is frozen and you have no way to look anything up right now.
+- For questions about news, current events, live scores, weather or anything else that
+  changes, say plainly that you cannot check rather than answering from memory.
+- Never claim to have searched, looked something up, or checked a source. You cannot."""
+
+
+def build_system_prompt(base: str, search_enabled: bool) -> str:
+    """Assemble the system prompt so its claims match the tools actually on offer."""
+    knowledge = KNOWLEDGE_WITH_SEARCH if search_enabled else KNOWLEDGE_WITHOUT_SEARCH
+    marker = "\nRemember: You are here"
+    head, sep, tail = base.partition(marker)
+    return head + knowledge + "\n" + sep + tail
+
+
+system_prompt = build_system_prompt(BASE_SYSTEM_PROMPT, WEB_SEARCH)
 #----------------------------------------------
 
 #----Database------
@@ -490,15 +584,17 @@ async def chat_streaming(
         """Pump one Ollama stream into the queue. Tool calls are captured, not queued."""
         try:
             # Passed explicitly rather than via **kwargs: the ollama stubs are overloaded
-            # and a kwargs dict defeats overload matching.
+            # and a kwargs dict defeats overload matching. The mode is looked up per model,
+            # because think=False is right for one model and ruinous for another.
+            thinking = think_value(think_mode_for(model))
             if offer_tools:
                 stream = ollama.chat(model=model, messages=convo, stream=True,
-                                     think=OLLAMA_THINK,
+                                     think=thinking,
                                      keep_alive=OLLAMA_KEEP_ALIVE,
                                      tools=[websearch.WEB_SEARCH_TOOL])
             else:
                 stream = ollama.chat(model=model, messages=convo, stream=True,
-                                     think=OLLAMA_THINK,
+                                     think=thinking,
                                      keep_alive=OLLAMA_KEEP_ALIVE)
             for chunk in stream:
                 message = chunk['message']
@@ -1545,11 +1641,79 @@ async def build_status(interaction: discord.Interaction) -> str:
     )
 
 
+def think_mode_for(model_name: str) -> str:
+    """
+    The reasoning mode to use with `model_name`.
+
+    Per-model, because the correct setting is not the same for every model: think=False
+    suits qwen3.5:2b but makes qwen3:4b write its reasoning into the reply. /model records
+    what it found for each one; anything unrecorded falls back to the configured default.
+    """
+    return normalise_think_mode(
+        db.get_setting(f"think_mode:{model_name}"), fallback=OLLAMA_THINK)
+
+
+async def probe_think_mode(model_name: str) -> Optional[str]:
+    """
+    Work out which reasoning mode keeps `model_name`'s replies clean.
+
+    Tries the configured default first, then "auto". Returns the winning mode, or None if
+    neither worked or Ollama could not be reached - the caller then leaves the per-model
+    setting alone rather than recording a guess.
+    """
+    probe = [{"role": "user", "content": "What is 2 + 2? Answer in one short sentence."}]
+
+    def ask(mode: str) -> Tuple[str, str]:
+        # num_predict keeps this cheap: only the opening words are needed to tell an answer
+        # from a model narrating its own reasoning, and a leaking model would otherwise run
+        # to thousands of tokens. Switching models also forces a load, so the whole thing is
+        # bounded by PROBE_TIMEOUT below - /model used to be instant and must stay quick.
+        # A short keep_alive, not OLLAMA_KEEP_ALIVE: long enough that the second attempt
+        # doesn't reload the model, short enough that a rejected candidate isn't squatting
+        # in VRAM for half an hour. On an 8GB GPU holding two models leaves ~300MB free and
+        # everything crawls - one measured switch took 337s that way.
+        reply = ollama.chat(model=model_name, messages=probe,
+                            think=think_value(mode), keep_alive=PROBE_KEEP_ALIVE,
+                            options={"num_predict": PROBE_MAX_TOKENS})
+        message = reply["message"]
+        return ((message.get("content") or "").strip(),
+                (message.get("thinking") or "").strip())
+
+    loop = asyncio.get_running_loop()
+    for mode in (OLLAMA_THINK, "auto"):
+        try:
+            content, thinking = await asyncio.wait_for(
+                loop.run_in_executor(None, ask, mode), timeout=PROBE_TIMEOUT)
+        except asyncio.TimeoutError:
+            safe_print(f"[WARNING] Probing {model_name} in '{mode}' mode timed out "
+                       f"after {PROBE_TIMEOUT}s")
+            return None
+        except Exception as e:
+            safe_print(f"[WARNING] Could not probe {model_name} in '{mode}' mode: {e}")
+            return None
+
+        if content and looks_like_reasoning(content):
+            safe_print(f"[INFO] {model_name} writes its reasoning into the reply "
+                       f"in '{mode}' mode")
+            continue
+        if content:
+            return mode
+        # No content but a populated thinking field means the model kept its reasoning
+        # separate and simply ran out of budget before answering - which is exactly the
+        # behaviour "auto" exists to get. Reasoning never reaches Discord either way.
+        if thinking:
+            safe_print(f"[INFO] {model_name} keeps reasoning separate in '{mode}' mode")
+            return mode
+        safe_print(f"[INFO] {model_name} returned nothing in '{mode}' mode")
+    return None
+
+
 async def switch_model(name: str) -> str:
     """Show the active Ollama model, or switch to another installed one."""
-    global model
+    global model, _warmup_task
     if not name:
-        return f"\U0001F9E0 Current model: `{model}`\nPass a name to switch."
+        return (f"\U0001F9E0 Current model: `{model}` (reasoning: {think_mode_for(model)})"
+                f"\nPass a name to switch.")
 
     loop = asyncio.get_running_loop()
     try:
@@ -1562,10 +1726,42 @@ async def switch_model(name: str) -> str:
         names_list = ", ".join(f"`{n}`" for n in model_names) or "none installed"
         return f"\U0001F6AB Model `{name}` not found. Installed models: {names_list}"
 
+    # Release the outgoing model FIRST. OLLAMA_KEEP_ALIVE would otherwise hold it for half
+    # an hour after nothing can use it, and the replacement then has to load alongside it -
+    # on an 8GB GPU that leaves ~300MB free, and the probe below timed out at 45s purely
+    # from the contention. Freeing first makes the load fast.
+    previous = model
+    if previous and previous != name:
+        try:
+            await loop.run_in_executor(
+                None, lambda: ollama.chat(model=previous, messages=[], keep_alive=0))
+            safe_print(f"[INFO] Released {previous} from memory")
+        except Exception as e:
+            safe_print(f"[WARNING] Could not release {previous}: {e}")
+
+    # Establish how this model handles reasoning before committing to it. Without this,
+    # switching to a model that ignores think=False silently fills Discord with the model's
+    # internal monologue, several times slower, and nothing says why.
+    working = await probe_think_mode(name)
+
     model = name
     db.set_setting("model", model)                    # survives a restart
-    safe_print(f"[INFO] Model switched to {model}")
-    return f"\U0001F9E0 Model switched to `{model}`"
+    if working:
+        db.set_setting(f"think_mode:{model}", working)
+    safe_print(f"[INFO] Model switched to {model} (reasoning: {working or 'unverified'})")
+
+    # Load the new one properly now, so the first real message doesn't pay for it. Held in
+    # the same global as the startup warm-up so the task isn't garbage collected mid-flight.
+    _warmup_task = asyncio.create_task(warm_model())
+
+    note = ""
+    if working is None:
+        note = ("\n⚠️ I couldn't confirm how it handles reasoning. If replies come out "
+                "rambling or very slow, switch back.")
+    elif working != OLLAMA_THINK:
+        note = (f"\nℹ️ This one needs `{working}` reasoning mode rather than the usual "
+                f"`{OLLAMA_THINK}`, so I've set that for it.")
+    return f"\U0001F9E0 Model switched to `{model}`{note}"
 #--------------------------------------
 
 #----Forget Confirmation------

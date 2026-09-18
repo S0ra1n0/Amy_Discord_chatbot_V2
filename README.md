@@ -39,7 +39,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/toggle`                | Enable/disable bot responses to chat (commands still work)                | Admin only |
 | `/status`                | Show bot state, Ollama connectivity, memory stats and rate limit info     | Admin only |
 | `/model`                 | Show the current Ollama model                                             | Admin only |
-| `/model [name]`          | Switch to a different installed Ollama model (e.g., `/model qwen2.5:3b`)  | Admin only |
+| `/model [name]`          | Switch to a different installed model (e.g., `/model qwen3.5:2b`)         | Admin only |
 | `/forget`                | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
 | `/dice [sides] [amount]` | Roll dice — defaults to one 6-sided; shows each roll when rolling several | Everyone   |
 | `/rng [min] [max]`       | Generate a random number between min and max (e.g., `/rng 0 999`)         | Everyone   |
@@ -155,6 +155,32 @@ the autocomplete. Amy clears the stale global scope automatically on startup whe
 
 > Typing a command as an ordinary message (`/play something`) no longer works — use the
 > real slash command. Talking to Amy normally is unchanged.
+
+### Reasoning modes
+
+Models like `qwen3` and `qwen3.5` have a reasoning phase, and **the right way to handle it
+differs per model** — the same setting that's correct for one is ruinous for another:
+
+| Model | `think=false` | `think` auto |
+|---|---|---|
+| `qwen3.5:2b` (default) | **2.3s, clean answer** | slower, no benefit |
+| `qwen3:4b` | 27.8s, and **3,800 characters of the model's own reasoning pasted into the reply** | 16.4s, clean |
+
+So `/model` doesn't just switch — it **probes the new model first** and records the mode that
+keeps its replies clean:
+
+```
+/model qwen3:4b
+🧠 Model switched to `qwen3:4b`
+ℹ️ This one needs `auto` reasoning mode rather than the usual `false`, so I've set that for it.
+```
+
+Under `auto`, Ollama puts the reasoning in a separate field that never reaches Discord.
+
+Switching also **releases the previous model** from memory before loading the new one. Both
+resident at once fills an 8GB GPU — one measured switch took **337 seconds** that way, against
+**14 seconds** once the old model is freed first. If Amy can't work out how a model behaves
+she says so rather than silently using a setting that may garble every reply.
 
 ### When a command goes wrong
 
@@ -384,7 +410,8 @@ FFMPEG_PATH=
 
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
 - `WEB_SEARCH` enables Amy's web search. On by default; set `false` to disable it entirely.
-- `OLLAMA_THINK` controls whether the model's reasoning phase is enabled. **Off by default.** Reasoning models like `qwen3.5` can spend their entire token budget thinking and return an empty answer; disabling it fixes that and cut replies from ~33s to ~4s in testing.
+- `OLLAMA_MODEL` is the model Amy talks with. Defaults to **`qwen3.5:2b`**. Whatever an admin last chose with `/model` overrides this, and is remembered across restarts.
+- `OLLAMA_THINK` sets the **default** handling of a model's reasoning phase: `false` (the default), `true`, or `auto`. This is not one-size-fits-all — see [Reasoning modes](#reasoning-modes). On `qwen3.5:2b`, `false` answers in 2.3s; `true` made it spend its whole token budget thinking and return an empty answer.
 - `GUILD_ID` is your server's ID. Slash commands register to that guild and appear **instantly**; leave it blank to register globally, which can take up to an hour to propagate. Enable Developer Mode in Discord, then right-click your server → Copy Server ID.
 - `OLLAMA_KEEP_ALIVE` is how long Ollama keeps the model loaded after the last message. Defaults to `30m`. Ollama unloads an idle model after about 5 minutes, and reloading it costs roughly **4.3 seconds** before the first character appears — measured 4.31s cold against 0.03s warm. Because the bot is used in bursts, that penalty otherwise lands on nearly every conversation. The trade-off is memory: the model stays resident for this long (2.4 GB for `qwen3.5:2b`). Use `0` to unload immediately, or `2h` on a machine dedicated to Amy. Amy also warms the model at startup, in the background, so the first message after a restart doesn't pay the load cost either — if Ollama isn't running she logs a warning and carries on.
 - `HISTORY_LIMIT` is how many messages Amy remembers per channel. Defaults to `10`. This is a speed setting as well as a memory one, because every remembered message is replayed to the model on each reply: prompt processing measured 0.15s at 10 messages and 0.95s at 200. Raise it for a longer memory at the cost of slower replies; around `30` is the practical ceiling before the 4096-token context window starts squeezing the reply itself.
@@ -434,13 +461,15 @@ Make sure Ollama is running and the model is available:
 ollama pull qwen3.5:2b  # Change if you use a different model
 ```
 
-Change the default model name in `Amy_chatbot_V2.py` if you are not using `qwen3.5:2b`:
+The default is **`qwen3.5:2b`**. To use a different one, set `OLLAMA_MODEL` in `.env` — no
+code change needed:
 
-```python
-model = "qwen3.5:2b"  # Ollama model name (replace with your model name)
+```
+OLLAMA_MODEL=qwen3.5:2b
 ```
 
-> This sets the model used at startup. Admins can switch to any other installed model at runtime with `/model [name]` without restarting the bot.
+> This is the model used at startup. Admins can switch to any other installed model at
+> runtime with `/model [name]` without restarting, and that choice is remembered.
 
 ### Step 8: Run the Bot
 

@@ -247,5 +247,68 @@ assert hasattr(amy, "snapshot_player") and hasattr(amy, "restore_player")
 assert amy.snapshot_queues_task.seconds == amy.SNAPSHOT_INTERVAL,     "the task interval and the documented constant must agree"
 print("snapshot task: OK (every %ds)" % amy.SNAPSHOT_INTERVAL)
 
+# ---- Per-model reasoning mode ---------------------------------------------------------
+# The right `think` setting is NOT the same for every model. qwen3.5:2b needs think=False
+# (2.3s, clean); the identical setting makes qwen3:4b write 3,800 characters of its own
+# reasoning into the reply. /model probes and records the right mode per model.
+assert amy.think_value("false") is False
+assert amy.think_value("true") is True
+assert amy.think_value("auto") is None, "auto must omit the argument, which ollama spells None"
+for junk in ("banana", "", None, 5, "  AUTO  "):
+    got = amy.think_value(junk)
+    assert got in (False, True, None), "%r -> %r" % (junk, got)
+assert amy.think_value("  AUTO  ") is None, "whitespace and case must not matter"
+
+assert amy.normalise_think_mode("1") == "true"
+assert amy.normalise_think_mode("off") == "false"
+assert amy.normalise_think_mode("nonsense") == "false", "unknown falls back"
+assert amy.normalise_think_mode("nonsense", fallback="auto") == "auto"
+assert amy.normalise_think_mode("auto") == "auto"
+assert amy.OLLAMA_THINK in amy.THINK_MODES, "the configured default must be a valid mode"
+print("think modes: OK (false/true/auto, junk falls back)")
+
+# The detector decides whether /model switches a model's mode, so both directions matter.
+LEAKS = [
+    'Hmm, the user is asking "What is 2 + 2?" and wants the answer in one short sentence.',
+    "Okay, the user wants a brief explanation of the difference between lists and tuples.",
+    "Okay, let's see. I need to figure out what 17 times 23 is.",
+    "The user wants a two-line birthday message for their friend Minh.",
+]
+ANSWERS = [
+    "In Python, **lists** and **tuples** are both ordered collections.",
+    "2 plus 2 equals 4.",
+    "We are comparing two data structures in Python: lists and tuples.",
+    "Happy Birthday, Minh! Wishing you a day filled with laughter.",
+    "Hello there! It is my pleasure to assist you with your programming endeavors.",
+    "Let me know if you'd like me to explain any part in more detail.",
+    "",
+]
+for t in LEAKS:
+    assert amy.looks_like_reasoning(t), "missed a real leak: %r" % t[:60]
+for t in ANSWERS:
+    assert not amy.looks_like_reasoning(t), "false positive on a real answer: %r" % t[:60]
+print("looks_like_reasoning: OK (%d leaks caught, %d answers cleared)" % (len(LEAKS), len(ANSWERS)))
+
+assert 0 < amy.PROBE_MAX_TOKENS <= 1024, "the probe must stay cheap"
+assert 0 < amy.PROBE_TIMEOUT <= 120, "the probe must stay bounded - /model used to be instant"
+print("probe bounds: OK (<=%d tokens, <=%.0fs)" % (amy.PROBE_MAX_TOKENS, amy.PROBE_TIMEOUT))
+
+# ---- The prompt must not promise tools that aren't offered -----------------------------
+# With search off, the old prompt still said she had a working search tool - and she acted
+# on it, answering current-events questions from memory in 9 of 9 runs without once saying
+# she couldn't check.
+assert "Knowledge:" not in amy.BASE_SYSTEM_PROMPT, "the base must not carry a knowledge block"
+_on = amy.build_system_prompt(amy.BASE_SYSTEM_PROMPT, True)
+_off = amy.build_system_prompt(amy.BASE_SYSTEM_PROMPT, False)
+assert "working web_search" in _on
+assert "working web_search" not in _off, "must not promise a tool that isn't offered"
+assert "Never claim to have searched" in _off
+assert _on.count("Knowledge:") == 1 and _off.count("Knowledge:") == 1
+for _p in (_on, _off):
+    assert "Remember: You are here" in _p, "the persona must survive assembly"
+    assert _p.startswith("You are Amy"), "the opening must stay put"
+assert amy.system_prompt == (_on if amy.WEB_SEARCH else _off),     "the live prompt must match the running configuration"
+print("system prompt: OK (claims match the tools actually offered)")
+
 print()
 print("ALL REGRESSION TESTS PASSED")

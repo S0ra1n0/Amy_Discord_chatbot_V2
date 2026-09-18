@@ -35,6 +35,7 @@ HELP_ADMIN = """
 `/status` - Show bot state, Ollama connectivity, memory usage and rate limit info
 `/model` - Show the current Ollama model
 `/model [name]` - Switch to another installed model (remembered)
+  • I check how it handles reasoning before switching
 `/create [name]` - Create a new voice channel and join it
 `/volume [0-100]` - Show or set playback volume
 `/clearqueue` - Empty the queue (current track keeps playing)"""
