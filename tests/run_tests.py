@@ -37,6 +37,7 @@ OFFLINE = [
 ]
 NETWORK = [
     "test_websearch_live.py",
+    "test_model_live.py",    # needs Ollama, not Discord
     "test_resolve.py",       # yt-dlp against YouTube
     "test_search.py",        # yt-dlp search
     "test_audio_path.py",    # yt-dlp + FFmpeg decoding

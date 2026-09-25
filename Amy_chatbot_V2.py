@@ -517,7 +517,19 @@ async def restore_player(guild: discord.Guild) -> bool:
         return False
 
     tracks = [t for t in (music.track_from_dict(d) for d in state["tracks"]) if t]
-    if not tracks:
+    channel = guild.get_channel(state["voice_channel_id"] or 0)
+    if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        channel = None
+
+    # The decision itself lives in voice.py, free of Discord objects, so every branch can
+    # be covered offline - this one only runs at startup and is otherwise awkward to reach.
+    action = voice.decide_restore_action(
+        restorable_tracks=len(tracks),
+        channel_found=channel is not None,
+        channel_has_humans=bool(channel is not None and voice.humans_in(channel)),
+    )
+
+    if action is voice.RestoreAction.NOTHING:
         db.clear_player_state(guild.id)
         return False
 
@@ -528,16 +540,14 @@ async def restore_player(guild: discord.Guild) -> bool:
     player.volume = state["volume"]
     player.text_channel_id = state["text_channel_id"]
     db.clear_player_state(guild.id)             # consumed; the snapshot task rewrites it
-
     safe_print(f"[INFO] Restored {len(tracks)} track(s) for guild {guild.id}")
 
-    channel = guild.get_channel(state["voice_channel_id"] or 0)
-    if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-        return True
-    if voice.humans_in(channel) == 0:
-        safe_print(f"[INFO] {channel.name} is empty - queue restored but not resumed")
+    if action is voice.RestoreAction.QUEUE_ONLY:
+        where = f"{channel.name} is empty" if channel else "the channel is gone"
+        safe_print(f"[INFO] {where} - queue restored but not resumed")
         return True
 
+    assert channel is not None                  # RESUME implies a channel with people in it
     try:
         await voice.connect_to(channel)
     except Exception as e:

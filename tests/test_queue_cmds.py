@@ -8,7 +8,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _fakes import (Guild, Interaction, Member, VoiceChannel, VoiceClient,
+from _fakes import (Guild, Interaction, Member, RealVoiceChannel, VoiceChannel, VoiceClient,
                     load_bot, run_music, seed_queue)
 
 amy = load_bot()
@@ -138,6 +138,90 @@ try:
     check("empty player saves nothing", _snap_db.load_player_state(4242) is None)
     check("nothing to restore returns False",
           asyncio.run(amy.restore_player(Guild(owner_id=1, member=None, guild_id=4242))) is False)
+
+    # --- the resume path, which used to be reachable only by restarting the bot ---
+    # restore_player narrows with isinstance(channel, discord.VoiceChannel), so a duck-typed
+    # fake was invisible to it and this branch had no test. RealVoiceChannel subclasses the
+    # real class, so the narrowing passes and the whole path can run offline.
+    joined = []
+    advanced = []
+    real_connect, real_advance = amy.voice.connect_to, amy.advance_playback
+
+    async def fake_connect(channel):
+        joined.append(channel.name)
+        return None
+
+    async def fake_advance(g):
+        advanced.append(g.id)
+
+    amy.voice.connect_to = fake_connect
+    amy.advance_playback = fake_advance
+    try:
+        listener = Member(7, "listener")
+        listener.bot = False
+
+        # People still in the channel -> rejoin and pick up mid-track
+        p3 = seed_queue(amy, 4343, ["a", "b"], current="mid track")
+        p3.mark_started(0.0)
+        amy.snapshot_player(4343)
+        _snap_db.save_player_state(
+            4343, [{"title": t, "query": "https://youtu.be/%s" % t} for t in
+                   ("mid track", "a", "b")],
+            "off", 1.0, voice_channel_id=77, text_channel_id=88, resume_position=42.0)
+
+        amy.music_manager.cleanup(4343)
+        g_busy = Guild(owner_id=1, member=None, guild_id=4343)
+        g_busy.add_channel(RealVoiceChannel(77, "Lounge", [listener]))
+        ok = asyncio.run(amy.restore_player(g_busy))
+        p4 = amy.music_manager.player_for(4343)
+        check("restored with people present", ok is True)
+        check("rejoined the voice channel", joined == ["Lounge"], joined)
+        check("started playing again", advanced == [4343], advanced)
+        check("picked up mid-track", abs(p4.resume_position - 42.0) < 1e-9, p4.resume_position)
+        check("queue is intact", [t.title for t in p4.queue] == ["mid track", "a", "b"],
+              [t.title for t in p4.queue])
+
+        # Empty channel -> restore the queue but stay out
+        joined.clear(); advanced.clear()
+        _snap_db.save_player_state(
+            4344, [{"title": "x", "query": "https://youtu.be/x"}],
+            "off", 1.0, voice_channel_id=78, text_channel_id=88, resume_position=9.0)
+        g_empty = Guild(owner_id=1, member=None, guild_id=4344)
+        g_empty.add_channel(RealVoiceChannel(78, "Empty", []))
+        ok = asyncio.run(amy.restore_player(g_empty))
+        p5 = amy.music_manager.player_for(4344)
+        check("restored with nobody present", ok is True)
+        check("did not rejoin an empty channel", joined == [], joined)
+        check("did not start playing", advanced == [], advanced)
+        check("queue still restored", [t.title for t in p5.queue] == ["x"],
+              [t.title for t in p5.queue])
+        check("no mid-track resume queued", p5.resume_position == 0.0, p5.resume_position)
+
+        # Only bots left counts as empty
+        joined.clear(); advanced.clear()
+        robot = Member(8, "robot"); robot.bot = True
+        _snap_db.save_player_state(
+            4345, [{"title": "y", "query": "https://youtu.be/y"}],
+            "off", 1.0, voice_channel_id=79, text_channel_id=88, resume_position=0.0)
+        g_bots = Guild(owner_id=1, member=None, guild_id=4345)
+        g_bots.add_channel(RealVoiceChannel(79, "Bots", [robot]))
+        asyncio.run(amy.restore_player(g_bots))
+        check("a channel of bots is not an audience", joined == [], joined)
+
+        # Channel deleted while Amy was down
+        joined.clear(); advanced.clear()
+        _snap_db.save_player_state(
+            4346, [{"title": "z", "query": "https://youtu.be/z"}],
+            "off", 1.0, voice_channel_id=999, text_channel_id=88, resume_position=0.0)
+        g_gone = Guild(owner_id=1, member=None, guild_id=4346)
+        ok = asyncio.run(amy.restore_player(g_gone))
+        check("missing channel still restores the queue", ok is True)
+        check("missing channel does not rejoin", joined == [], joined)
+        check("queue survived the missing channel",
+              [t.title for t in amy.music_manager.player_for(4346).queue] == ["z"])
+    finally:
+        amy.voice.connect_to = real_connect
+        amy.advance_playback = real_advance
 
     # A snapshot of tracks that can't be rebuilt must not leave a phantom entry behind.
     _snap_db.save_player_state(4242, [{"title": "", "query": ""}], "off", 1.0, None, None, 0.0)

@@ -5,7 +5,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJ); os.chdir(PROJ)
 import voice
-from voice import JoinAction, decide_join_action, sanitize_channel_name, VoiceManager
+from voice import (JoinAction, RestoreAction, decide_join_action,
+                   decide_restore_action, sanitize_channel_name, VoiceManager)
 
 assert sanitize_channel_name("") == "Amy's Room"
 assert sanitize_channel_name("   ") == "Amy's Room"
@@ -24,6 +25,33 @@ assert decide_join_action(99, False, 10, True) is JoinAction.MOVE
 assert decide_join_action(99, True, 10, False) is JoinAction.BLOCKED_OCCUPIED
 assert decide_join_action(99, True, 10, True) is JoinAction.MOVE
 print("decide_join_action: OK (9 cases, full truth table)")
+
+# decide_restore_action - what startup does with a saved queue. Every branch of this used to
+# be reachable only by restarting the bot with a real voice channel, which meant the most
+# important behaviour in queue persistence had no regression test at all.
+#                     tracks, channel_found, has_humans
+CASES = [
+    (0, False, False, RestoreAction.NOTHING),
+    (0, True,  False, RestoreAction.NOTHING),
+    (0, True,  True,  RestoreAction.NOTHING),   # nothing rebuildable beats a full channel
+    (3, False, False, RestoreAction.QUEUE_ONLY),
+    (3, False, True,  RestoreAction.QUEUE_ONLY),  # no channel, so "humans" is meaningless
+    (3, True,  False, RestoreAction.QUEUE_ONLY),  # empty room - restore, don't play to nobody
+    (3, True,  True,  RestoreAction.RESUME),
+    (1, True,  True,  RestoreAction.RESUME),
+]
+for tracks, found, humans, want in CASES:
+    got = decide_restore_action(tracks, found, humans)
+    assert got is want, "tracks=%d found=%s humans=%s -> %s, wanted %s" % (
+        tracks, found, humans, got, want)
+assert decide_restore_action(-1, True, True) is RestoreAction.NOTHING, "negative count"
+print("decide_restore_action: OK (%d cases, full truth table)" % (len(CASES) + 1))
+
+# The only case that plays audio is the one where somebody is there to hear it.
+resuming = [c for c in CASES if c[3] is RestoreAction.RESUME]
+assert all(found and humans for _, found, humans, _ in resuming),     "Amy must never resume into an empty or missing channel"
+assert all(tracks > 0 for tracks, _, _, _ in resuming)
+print("resume only with an audience: OK")
 
 from database import ConversationDB
 tmp = tempfile.mktemp(suffix=".db")

@@ -11,6 +11,8 @@ import os
 import sys
 from collections import deque
 
+import discord
+
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -51,6 +53,30 @@ class VoiceChannel:
         self.name = name
         self.members = list(members)
         self._perms = perms or Perms()
+
+    def permissions_for(self, _who):
+        return self._perms
+
+
+class RealVoiceChannel(discord.VoiceChannel):
+    """
+    A voice channel that satisfies isinstance(x, discord.VoiceChannel) offline.
+
+    Some code paths narrow types with isinstance before acting - restore_player is one -
+    so a plain duck-typed fake is invisible to them and those branches went untested. This
+    subclasses the real class and skips its __init__ (which needs a gateway connection),
+    overriding only the read-only `members` property.
+    """
+
+    def __init__(self, id_, name, members=(), perms=None):
+        self.id = id_
+        self.name = name
+        self._fake_members = list(members)
+        self._perms = perms or Perms()
+
+    @property
+    def members(self):
+        return self._fake_members
 
     def permissions_for(self, _who):
         return self._perms

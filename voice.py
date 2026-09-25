@@ -20,6 +20,13 @@ class JoinAction(Enum):
     BLOCKED_OCCUPIED = "blocked_occupied"
 
 
+class RestoreAction(Enum):
+    """What startup should do with a saved queue."""
+    NOTHING = "nothing"          # no snapshot, or nothing in it could be rebuilt
+    QUEUE_ONLY = "queue_only"    # put the queue back but stay out of voice
+    RESUME = "resume"            # rejoin and carry on playing
+
+
 #----Pure Helpers (no Discord objects, unit testable)------
 def sanitize_channel_name(raw: str) -> str:
     """Collapse whitespace, fall back to a default, and clamp to Discord's name limit."""
@@ -48,6 +55,27 @@ def decide_join_action(
     if current_channel_has_humans and not requester_is_admin:
         return JoinAction.BLOCKED_OCCUPIED
     return JoinAction.MOVE
+
+
+def decide_restore_action(
+    restorable_tracks: int,
+    channel_found: bool,
+    channel_has_humans: bool,
+) -> RestoreAction:
+    """
+    Decide what to do with a saved queue at startup. Free of Discord objects, like
+    decide_join_action, so the whole truth table can be tested without a connection.
+
+    Amy rejoins and resumes only when people are still sitting in the channel she was in.
+    Coming back from a restart to an empty room and playing music to nobody is worse than
+    waiting, so the queue is restored quietly instead and the next /play or /join picks it
+    up. A snapshot whose tracks can't be rebuilt is worth nothing and is simply dropped.
+    """
+    if restorable_tracks <= 0:
+        return RestoreAction.NOTHING
+    if not channel_found or not channel_has_humans:
+        return RestoreAction.QUEUE_ONLY
+    return RestoreAction.RESUME
 #--------------------------------------
 
 

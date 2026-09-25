@@ -518,7 +518,7 @@ python tests/run_tests.py             # offline suites only (~8s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-17 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
+18 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network and no Discord token. See [tests/README.md](tests/README.md).
 
