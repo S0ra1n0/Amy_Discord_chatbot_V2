@@ -1789,6 +1789,24 @@ def think_mode_for(model_name: str) -> str:
         db.get_setting(f"think_mode:{model_name}"), fallback=OLLAMA_THINK)
 
 
+def judge_probe_reply(content: str, thinking: str) -> bool:
+    """
+    Whether one probe reply shows a reasoning mode that keeps Discord replies clean.
+
+    - The model narrating its own reasoning in the reply: no, whatever else came back.
+    - A real answer: yes.
+    - No answer, but reasoning in the separate `thinking` field: yes. The probe's small
+      token budget ran out before the answer, but reasoning stays out of the chat, which
+      is exactly what "auto" mode exists to achieve.
+    - Nothing at all: no.
+
+    Kept pure so it can be tested without a live model.
+    """
+    if content:
+        return not looks_like_reasoning(content)
+    return bool(thinking)
+
+
 async def probe_think_mode(model_name: str) -> Optional[str]:
     """
     Work out which reasoning mode keeps `model_name`'s replies clean.
@@ -1816,7 +1834,9 @@ async def probe_think_mode(model_name: str) -> Optional[str]:
                 (message.get("thinking") or "").strip())
 
     loop = asyncio.get_running_loop()
-    for mode in (OLLAMA_THINK, "auto"):
+    # Each mode once: with OLLAMA_THINK already "auto" this used to probe "auto" twice,
+    # spending up to a second full timeout on a model that had just failed it.
+    for mode in dict.fromkeys((OLLAMA_THINK, "auto")):
         try:
             content, thinking = await asyncio.wait_for(
                 loop.run_in_executor(None, ask, mode), timeout=PROBE_TIMEOUT)
@@ -1828,19 +1848,9 @@ async def probe_think_mode(model_name: str) -> Optional[str]:
             safe_print(f"[WARNING] Could not probe {model_name} in '{mode}' mode: {e}")
             return None
 
-        if content and looks_like_reasoning(content):
-            safe_print(f"[INFO] {model_name} writes its reasoning into the reply "
-                       f"in '{mode}' mode")
-            continue
-        if content:
+        if judge_probe_reply(content, thinking):
             return mode
-        # No content but a populated thinking field means the model kept its reasoning
-        # separate and simply ran out of budget before answering - which is exactly the
-        # behaviour "auto" exists to get. Reasoning never reaches Discord either way.
-        if thinking:
-            safe_print(f"[INFO] {model_name} keeps reasoning separate in '{mode}' mode")
-            return mode
-        safe_print(f"[INFO] {model_name} returned nothing in '{mode}' mode")
+        safe_print(f"[INFO] {model_name} gave no usable reply in '{mode}' mode")
     return None
 
 

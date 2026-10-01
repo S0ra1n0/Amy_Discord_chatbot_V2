@@ -15,6 +15,8 @@ python tests/run_tests.py --all       # everything
 The runner finds `.venv` automatically and falls back to the current interpreter.
 Individual suites can also be run directly: `python tests/test_music.py`. Run directly or through the runner, no suite touches your real database: each one uses a throwaway `AMY_DB_PATH`.
 
+A suite that can't run here exits with code **77** and the runner reports it as `SKIP`, listed by name in the summary (`16 suite(s) passed, 1 SKIPPED (not tested): ...`). It never counts as a pass: `test_model_live.py` used to exit 0 when Ollama was missing and showed up as PASS having tested nothing.
+
 ## Tiers
 
 **Offline** — pure logic, no network, no Discord. These are the ones to run constantly.
@@ -55,6 +57,9 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
 - `test_ui.py` — a long track title exceeded Discord's limit and rejected the whole message
+- `test_websearch.py` — the SSRF redirect check. The old test redirected from a URL that was itself loopback, so it was refused on the first hop and the redirect was never read; with the per-hop check deleted, it still passed. It now uses `httpx.MockTransport` so a genuinely public page redirects to `192.168.1.1`, with a public-to-public redirect as a control so a broken redirect loop can't pass by accident.
+- `test_queue_cmds.py` — `/seek` and `/replay` end to end, including the lock: the test fires the old track's after-callback mid-seek, exactly as discord.py does, and without the lock the next song is popped and played instead.
+- `test_regression.py` — the `/model` probe offline, via a scripted fake Ollama: which replies count as usable, falling back to `auto`, releasing the old model before probing, and recording the result.
 - `test_security.py` / `test_websearch.py` — mass pings. discord.py sends no mention restriction unless the client sets one, so any `@everyone` in a model reply, a YouTube title or a planted web page would have pinged the whole server. The tests check the client policy, the exact payload discord.py puts on the wire, that slash-command follow-ups inherit it, and that web text is defused before the model sees it.
 - `test_music.py` / `test_queue_cmds.py` — seeking and stopping. A seek used to stop the old source before building the new one, so a failed seek dropped the track; seeking while paused unpaused it; a `/stop` during the seconds a track or seek position was loading got undone when it finished; and the 20-second snapshot could save the moment between two tracks, losing the next one on a crash. Every fix was mutation-checked.
 - **Every suite that imports the bot** — used to run against the real `amy_memory.db`. The bot reads `/model` and `/toggle` from its database at import time, and one warm-up test could overwrite a saved `/model` choice; the live smoke test ran real startup, which restores saved queues and rejoins voice. Now `run_tests.py` gives each suite a throwaway `AMY_DB_PATH`, every loader calls `_fakes.isolate_db()` before importing, and `assert_isolated_db()` fails the suite if it ever points at the real file.

@@ -192,7 +192,7 @@ Under `auto`, Ollama puts the reasoning in a separate field that never reaches D
 Switching also **releases the previous model** from memory before loading the new one. Both
 resident at once fills an 8GB GPU — one measured switch took **337 seconds** that way, against
 **14 seconds** once the old model is freed first. If Amy can't work out how a model behaves
-she says so rather than silently using a setting that may garble every reply.
+she says so rather than silently using a setting that may garble every reply. Each mode is tried once, so a model that fails cannot cost two full timeouts.
 
 ### When a command goes wrong
 
@@ -557,7 +557,7 @@ python tests/run_tests.py --all       # + network and live-Discord checks
 
 18 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
 and a docs audit that fails if a command is missing from the help text or this README.
-Offline suites need no network and no Discord token. See [tests/README.md](tests/README.md).
+Offline suites need no network and no Discord token. A suite whose dependency is missing — Ollama not running, say — is reported as **SKIPPED**, never as passed. See [tests/README.md](tests/README.md).
 
 ## Troubleshooting
 

@@ -399,5 +399,97 @@ finally:
     amy.ollama.chat, amy.ollama.list = _real_chat, _real_list
     amy.model = _real_model
 
+# ---- Review M8: the /model probe's decisions, offline -----------------------------------
+# These used to be reachable only through a live Ollama, in a network-tier suite that
+# reported success when Ollama was missing. A scripted fake Ollama makes them deterministic.
+LEAK = "Okay, the user wants to know what 2 + 2 is. Let me think about that."
+judge = amy.judge_probe_reply
+assert judge("2 + 2 = 4.", "") is True, "a clean answer is usable"
+assert judge(LEAK, "") is False, "reasoning pasted into the reply is not"
+assert judge("", "the model reasoned here") is True, \
+    "empty content with separate reasoning: the budget ran out, but reasoning stays out of chat"
+assert judge("", "") is False, "nothing at all is not usable"
+assert judge(LEAK, "and some separate thinking") is False, "a leak is a leak either way"
+print("judge_probe_reply: OK")
+
+_m8_saved = (amy.ollama.chat, amy.ollama.list, amy.OLLAMA_THINK, amy.model)
+
+
+def _scripted(replies, calls):
+    """A fake ollama.chat answering per `think` value; a raise-able Exception is raised."""
+    def chat(model=None, messages=None, think="unset", keep_alive=None, options=None, **kw):
+        calls.append({"model": model, "messages": messages, "think": think,
+                      "keep_alive": keep_alive})
+        reply = replies.get(think, ("", ""))
+        if isinstance(reply, Exception):
+            raise reply
+        content, thinking = reply
+        return {"message": {"content": content, "thinking": thinking}}
+    return chat
+
+
+try:
+    amy.OLLAMA_THINK = "false"
+    for replies, want, want_calls, label in [
+        ({False: ("2 + 2 = 4.", "")}, "false", [False], "clean under the default"),
+        ({False: (LEAK, ""), None: ("4", "")}, "auto", [False, None], "leaks, then clean"),
+        ({False: (LEAK, ""), None: ("", "reasoning")}, "auto", [False, None],
+         "leaks, then keeps reasoning separate"),
+        ({False: (LEAK, ""), None: (LEAK, "")}, None, [False, None], "leaks either way"),
+        ({False: ConnectionError("down")}, None, [False], "Ollama unreachable"),
+    ]:
+        calls = []
+        amy.ollama.chat = _scripted(replies, calls)
+        got = _asyncio.run(amy.probe_think_mode("m:1"))
+        assert got == want, "%s: probe returned %r, wanted %r" % (label, got, want)
+        assert [c["think"] for c in calls] == want_calls, \
+            "%s: tried %r" % (label, [c["think"] for c in calls])
+        assert all(c["keep_alive"] == amy.PROBE_KEEP_ALIVE for c in calls), \
+            "the probe must not hold a rejected candidate for the long keep-alive"
+
+    # With OLLAMA_THINK already "auto", the probe used to try "auto" twice - wasting up to a
+    # full timeout on a model that fails it.
+    amy.OLLAMA_THINK = "auto"
+    calls = []
+    amy.ollama.chat = _scripted({None: (LEAK, "")}, calls)
+    assert _asyncio.run(amy.probe_think_mode("m:1")) is None
+    assert len(calls) == 1, "each mode is tried once, not %d times" % len(calls)
+    print("probe_think_mode: OK (accepts, falls back, gives up, never repeats a mode)")
+
+    # switch_model: release the outgoing model FIRST, then probe, then record the result.
+    amy.OLLAMA_THINK = "false"
+    amy.model = amy.DEFAULT_MODEL
+    calls = []
+    amy.ollama.chat = _scripted({False: (LEAK, ""), None: ("4", "")}, calls)
+    amy.ollama.list = lambda: {"models": [{"model": amy.DEFAULT_MODEL}, {"model": "big:4b"}]}
+
+    async def _switch():
+        out = await amy.switch_model("big:4b")
+        if amy._warmup_task is not None:
+            await amy._warmup_task           # let the post-switch warm-up finish here
+        return out
+
+    out = _asyncio.run(_switch())
+    first = calls[0]
+    assert first["model"] == amy.DEFAULT_MODEL and first["messages"] == [] \
+        and first["keep_alive"] == 0, \
+        "the old model must be released before anything else loads: %r" % first
+    probes = [c for c in calls[1:] if c["messages"]]
+    assert probes and all(c["model"] == "big:4b" for c in probes), probes
+    assert amy.model == "big:4b"
+    assert amy.db.get_setting("model") == "big:4b", "the switch must persist"
+    assert amy.db.get_setting("think_mode:big:4b") == "auto", "the probed mode must persist"
+    assert amy.think_mode_for("big:4b") == "auto"
+    assert "auto" in out, "the admin is told this model needs a different mode: %r" % out
+
+    calls.clear()
+    out = _asyncio.run(amy.switch_model("not:installed"))
+    assert "not found" in out and calls == [], \
+        "an unknown model is refused before anything is loaded or released"
+    assert amy.model == "big:4b", "a refused switch changes nothing"
+    print("switch_model: OK (releases first, probes, persists, refuses unknown models)")
+finally:
+    amy.ollama.chat, amy.ollama.list, amy.OLLAMA_THINK, amy.model = _m8_saved
+
 print()
 print("ALL REGRESSION TESTS PASSED")

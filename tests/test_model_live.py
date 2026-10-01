@@ -41,6 +41,19 @@ def check(label, ok, got=""):
         print("        got:", str(got)[:150])
 
 
+async def _switch_and_settle(name):
+    """
+    Switch models and wait for the post-switch warm-up to finish.
+
+    asyncio.run() cancels tasks still pending when it returns, so without waiting the
+    warm-up was cancelled and "one model resident" passed with nothing loaded at all.
+    """
+    out = await amy.switch_model(name)
+    if amy._warmup_task is not None:
+        await amy._warmup_task
+    return out
+
+
 def loaded_models():
     """Model names Ollama currently holds in memory."""
     out = subprocess.run(["ollama", "ps"], capture_output=True, text=True).stdout
@@ -52,8 +65,10 @@ print("=== Ollama is reachable ===")
 try:
     installed = amy.extract_model_names(amy.ollama.list())
 except Exception as e:
-    print("  SKIP - could not reach Ollama: %s: %s" % (type(e).__name__, e))
-    sys.exit(0)
+    # Exit 77 ("skipped"), not 0: the runner used to report this suite as PASS when
+    # Ollama wasn't running, although it had tested nothing.
+    print("NOT_RUN - could not reach Ollama: %s: %s" % (type(e).__name__, e))
+    sys.exit(77)
 check("at least one model installed", len(installed) >= 1, installed)
 print("        installed:", installed)
 
@@ -111,7 +126,7 @@ else:
     print()
     print("=== switching releases the outgoing model (guards the 337s regression) ===")
     t0 = time.time()
-    out = asyncio.run(amy.switch_model(other))
+    out = asyncio.run(_switch_and_settle(other))
     elapsed = time.time() - t0
     print("        /model %s took %.1fs" % (other, elapsed))
     print("        %s" % out.splitlines()[0])
@@ -122,21 +137,21 @@ else:
     resident = loaded_models()
     print("        loaded now:", resident)
     check("the old model was released", default not in resident, resident)
-    check("only one model is resident", len(resident) <= 1, resident)
+    check("exactly the new model is resident", resident == [other], resident)
 
     stored = amy.db.get_setting("think_mode:%s" % other)
-    check("a mode was recorded for it", stored in amy.THINK_MODES or stored is None, stored)
+    check("a mode was recorded for it", stored in amy.THINK_MODES, stored)
     if stored:
         check("the recorded mode is what think_mode_for returns",
               amy.think_mode_for(other) == stored, amy.think_mode_for(other))
 
     print()
     print("=== switching back leaves the default in place ===")
-    asyncio.run(amy.switch_model(default))
+    asyncio.run(_switch_and_settle(default))
     check("back on the default", amy.model == default, amy.model)
     time.sleep(3)
     resident = loaded_models()
-    check("still only one model resident", len(resident) <= 1, resident)
+    check("exactly the default is resident again", resident == [default], resident)
 
 print()
 print("=== an unknown model is refused before any probing ===")

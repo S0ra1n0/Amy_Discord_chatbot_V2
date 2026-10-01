@@ -401,9 +401,77 @@ direct = asyncio.run(_fetch(base + "/internal"))
 check("a loopback URL is refused", direct == "", len(direct))
 check("nothing internal leaks", "OLLAMA_INTERNAL" not in direct)
 
+# Note: this URL is itself loopback, so it is refused on the FIRST hop and its redirect is
+# never read. It is not a test of redirect handling - see the MockTransport block below.
 hop = asyncio.run(_fetch(base + "/redirect"))
-check("a redirect into loopback is refused", hop == "", len(hop))
-check("nothing leaks via the redirect", "OLLAMA_INTERNAL" not in hop)
+check("a loopback URL is refused before its redirect is read", hop == "", len(hop))
+check("nothing leaks from a loopback URL", "OLLAMA_INTERNAL" not in hop)
+
+print()
+print("=== a public page redirecting into the LAN is refused at that hop (review M9) ===")
+# The defence is that every redirect hop is re-checked. The old test could not tell that
+# apart from checking only the first URL: with the per-hop check deleted it still passed.
+# Here the first hop is genuinely "public", and the real address check judges the rest.
+_seen = []
+_SECRET = "<html><body><p>" + "ROUTER ADMIN PAGE secret settings. " * 20 + "</p></body></html>"
+_PUBLIC = "<html><body><p>" + "An ordinary public article about football. " * 20 + "</p></body></html>"
+
+
+def _handler(request):
+    _seen.append(str(request.url))
+    host, path = request.url.host, request.url.path
+    if host == "public.test" and path == "/to-lan":
+        return httpx.Response(302, headers={"Location": "http://192.168.1.1/admin"})
+    if host == "public.test" and path == "/to-public":
+        return httpx.Response(302, headers={"Location": "http://other-public.test/page"})
+    if host == "public.test" and path.startswith("/loop"):
+        n = int(path[len("/loop"):] or 0)
+        return httpx.Response(302, headers={"Location": "http://public.test/loop%d" % (n + 1)})
+    if host == "192.168.1.1":
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=_SECRET)
+    if host == "other-public.test":
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=_PUBLIC)
+    return httpx.Response(404)
+
+
+_real_is_public = websearch.host_is_public
+
+
+async def _public_test_hosts(host):
+    if host in ("public.test", "other-public.test"):
+        return True
+    return await _real_is_public(host)            # the real check for everything else
+
+
+async def _mock_fetch(url):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler),
+                                 follow_redirects=False) as c:
+        return await websearch.fetch_page(c, url)
+
+
+websearch.host_is_public = _public_test_hosts
+try:
+    # Positive control first: if redirects were broken outright, "refused" below would pass
+    # for the wrong reason.
+    _seen.clear()
+    ok_text = asyncio.run(_mock_fetch("http://public.test/to-public"))
+    check("control: a public-to-public redirect is followed and read",
+          "ordinary public article" in ok_text, ok_text[:80])
+
+    _seen.clear()
+    lan = asyncio.run(_mock_fetch("http://public.test/to-lan"))
+    check("a public page redirecting to 192.168.1.1 is refused", lan == "", lan[:80])
+    check("the LAN address is never even requested",
+          not any("192.168.1.1" in u for u in _seen), _seen)
+    check("nothing from the LAN page leaks", "ROUTER ADMIN" not in lan)
+
+    _seen.clear()
+    loop = asyncio.run(_mock_fetch("http://public.test/loop0"))
+    check("an endless redirect chain gives up", loop == "", loop[:80])
+    check("after at most MAX_REDIRECTS hops",
+          len(_seen) == websearch.MAX_REDIRECTS + 1, (len(_seen), websearch.MAX_REDIRECTS))
+finally:
+    websearch.host_is_public = _real_is_public
 
 # With the address guard stood down, the size cap must still bound the read. Unbounded,
 # a 40MB page took 5.7s despite a 5s timeout, because httpx timeouts are per-operation.

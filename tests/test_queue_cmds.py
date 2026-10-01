@@ -512,6 +512,109 @@ finally:
     _pw_db.conn.close()
     amy.music_manager.cleanup(GUILD)
 
+# ---- /seek and /replay command paths (review M7) ---------------------------------------
+_m7_saved = (amy.music.restart_at, amy.music.play_track, amy.refresh_now_playing)
+_targets = []
+
+
+async def _record_restart(vc, player, track, after, position):
+    _targets.append(position)
+    return True
+
+
+async def _quiet_refresh(guild, stopped=False, paused=False):
+    return None
+
+
+def _seekable(title="Long song", duration=600):
+    return amy.music.Track(title=title, query="https://youtu.be/x", duration=duration,
+                           requested_by="userA")
+
+
+amy.music.restart_at = _record_restart
+amy.refresh_now_playing = _quiet_refresh
+try:
+    for args, want_pos, label in [(["1:30"], 90.0, "m:ss"), (["90"], 90.0, "bare seconds"),
+                                  (["1:02:03"], 3723.0, "h:mm:ss")]:
+        p, it = setup(USER, "userA", [])
+        p.current = _seekable(duration=7200)
+        _targets.clear()
+        out = run_music(amy, "seek", args, interaction=it)
+        check("M7: /seek %s jumps to %ss" % (label, want_pos), _targets == [want_pos], _targets)
+        check("M7: /seek %s confirms where it went" % label, "Jumped to" in out, out)
+
+    p, it = setup(USER, "userA", [])
+    p.current = _seekable()
+    _targets.clear()
+    out = run_music(amy, "replay", interaction=it)
+    check("M7: /replay restarts from 0", _targets == [0.0], _targets)
+    check("M7: /replay says so", "from the start" in out, out)
+
+    for bad in ["abc", "1:75", "-5", ""]:
+        p, it = setup(USER, "userA", [])
+        p.current = _seekable()
+        _targets.clear()
+        out = run_music(amy, "seek", [bad] if bad else [], interaction=it)
+        check("M7: /seek %r is refused without seeking" % bad,
+              _targets == [] and "couldn't read" in out, (out, _targets))
+
+    p, it = setup(USER, "userA", [])
+    p.current = _seekable(duration=200)
+    _targets.clear()
+    out = run_music(amy, "seek", ["3:20"], interaction=it)
+    check("M7: seeking to the very end is refused (that's /skip)",
+          _targets == [] and "past the end" in out, (out, _targets))
+
+    p, it = setup(USER, "userA", [])
+    p.current = amy.music.Track(title="Odd", query="not-a-url", duration=200, requested_by="a")
+    _targets.clear()
+    out = run_music(amy, "seek", ["1:00"], interaction=it)
+    check("M7: a track with no seekable source is refused",
+          _targets == [] and "can't seek" in out, (out, _targets))
+
+    p, it = setup(USER, "userA", [])
+    p.current = None
+    it.guild.voice_client.stopped = True
+    _targets.clear()
+    out = run_music(amy, "seek", ["1:00"], interaction=it)
+    check("M7: /seek with nothing playing is refused",
+          _targets == [] and "Nothing is playing" in out, (out, _targets))
+
+    # The lock. Swapping sources stops the old one, and its after-callback calls
+    # advance_playback - which, unblocked, would pop the next song off the queue and play
+    # it instead. Simulate exactly that ordering: stop, fire the callback, take a while to
+    # build the new source, then start it.
+    _popped = []
+
+    async def _would_play(vc, player, track, after, start_at=0.0):
+        _popped.append(track.title)
+        return True
+
+    async def _racy_restart(vc, player, track, after, position):
+        vc.stopped = True                                   # old source stopped...
+        asyncio.get_running_loop().create_task(amy.advance_playback(it.guild))  # ...callback
+        await asyncio.sleep(0.02)                           # the seconds-long resolve
+        vc.stopped = False                                  # new source playing
+        return True
+
+    amy.music.restart_at = _racy_restart
+    amy.music.play_track = _would_play
+    p, it = setup(USER, "userA", ["next song", "after that"])
+    p.current = _seekable()
+
+    async def _drive():
+        await amy.execute_music_command("seek", ["seek", "1:30"], it, it.guild)
+        await asyncio.sleep(0.05)                           # let the callback finish
+    asyncio.run(_drive())
+    check("M7: a seek never lets the old track's callback skip ahead",
+          _popped == [] and [t.title for t in p.queue] == ["next song", "after that"],
+          (_popped, [t.title for t in p.queue]))
+    check("M7: and the seeked track is still the current one",
+          p.current is not None and p.current.title == "Long song", p.current)
+finally:
+    amy.music.restart_at, amy.music.play_track, amy.refresh_now_playing = _m7_saved
+    amy.music_manager.cleanup(GUILD)
+
 # One gate, at the very end. It used to sit above the snapshot/restore section, so ~30
 # checks there could print FAIL while the script still exited 0 and reported success -
 # the restore path looked covered and wasn't.

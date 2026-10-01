@@ -58,6 +58,10 @@ def interpreter() -> str:
     return sys.executable
 
 
+SKIPPED = 77                    # exit code a suite uses to say "could not run here"
+RESULTS: dict = {}
+
+
 def run(name: str, py: str) -> bool:
     t0 = time.time()
     # A fresh database per suite. The bot reads settings and restores saved queues from its
@@ -75,13 +79,18 @@ def run(name: str, py: str) -> bool:
                 os.remove(leftover)
             except OSError:
                 pass
-    ok = proc.returncode == 0
+    # Exit code 77 is the conventional "skipped" code: a suite whose dependency is missing
+    # (Ollama not running, say) uses it instead of exiting 0, which the runner used to
+    # report as a pass even though nothing had been tested.
+    status = "PASS" if proc.returncode == 0 else ("SKIP" if proc.returncode == SKIPPED else "FAIL")
+    ok = status != "FAIL"
     dt = time.time() - t0
     # Show the suite's own last line - each one ends with its summary
     tail = [l for l in (proc.stdout or "").strip().splitlines() if l.strip()]
     summary = tail[-1].strip() if tail else "(no output)"
-    print("  %s %-26s %6.1fs  %s" % ("PASS" if ok else "FAIL", name, dt, summary[:70]))
-    if not ok:
+    print("  %s %-26s %6.1fs  %s" % (status, name, dt, summary[:70]))
+    RESULTS[name] = status
+    if status == "FAIL":
         for line in (proc.stdout or "").splitlines()[-15:]:
             print("        " + line)
         for line in (proc.stderr or "").splitlines()[-15:]:
@@ -105,10 +114,17 @@ def main() -> int:
     results = [(n, run(n, py)) for n in selected]
     failed = [n for n, ok in results if not ok]
 
+    skipped = [n for n, s in RESULTS.items() if s == "SKIP"]
+    passed = len(results) - len(failed) - len(skipped)
+
     print()
     if failed:
         print("%d of %d FAILED: %s" % (len(failed), len(results), ", ".join(failed)))
         return 1
+    if skipped:
+        print("%d suite(s) passed, %d SKIPPED (not tested): %s"
+              % (passed, len(skipped), ", ".join(skipped)))
+        return 0
     print("all %d suite(s) passed" % len(results))
     return 0
 
