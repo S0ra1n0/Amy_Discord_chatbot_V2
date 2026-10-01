@@ -536,6 +536,7 @@ Amy_chatbot_V2/
 ├── music.py                # Track resolution, queues, and playback engine
 ├── ui.py                   # Embed builders and the reply wrapper
 ├── websearch.py            # DuckDuckGo search and the web_search tool
+├── llm.py                  # Reasoning modes, model choice, system prompt (pure helpers)
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
@@ -555,7 +556,7 @@ python tests/run_tests.py             # offline suites only (~8s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-18 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
+19 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network and no Discord token. A suite whose dependency is missing — Ollama not running, say — is reported as **SKIPPED**, never as passed. See [tests/README.md](tests/README.md).
 

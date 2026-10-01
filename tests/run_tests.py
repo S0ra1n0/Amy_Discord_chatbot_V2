@@ -34,6 +34,7 @@ OFFLINE = [
     "test_commands_audit.py",
     "test_slash.py",
     "test_websearch.py",
+    "test_llm.py",
     "test_docs_audit.py",
 ]
 NETWORK = [

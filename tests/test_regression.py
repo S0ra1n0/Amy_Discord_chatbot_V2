@@ -257,46 +257,10 @@ assert amy.snapshot_queues_task.seconds == amy.SNAPSHOT_INTERVAL,     "the task 
 print("snapshot task: OK (every %ds)" % amy.SNAPSHOT_INTERVAL)
 
 # ---- Per-model reasoning mode ---------------------------------------------------------
-# The right `think` setting is NOT the same for every model. qwen3.5:2b needs think=False
-# (2.3s, clean); the identical setting makes qwen3:4b write 3,800 characters of its own
-# reasoning into the reply. /model probes and records the right mode per model.
-assert amy.think_value("false") is False
-assert amy.think_value("true") is True
-assert amy.think_value("auto") is None, "auto must omit the argument, which ollama spells None"
-for junk in ("banana", "", None, 5, "  AUTO  "):
-    got = amy.think_value(junk)
-    assert got in (False, True, None), "%r -> %r" % (junk, got)
-assert amy.think_value("  AUTO  ") is None, "whitespace and case must not matter"
-
-assert amy.normalise_think_mode("1") == "true"
-assert amy.normalise_think_mode("off") == "false"
-assert amy.normalise_think_mode("nonsense") == "false", "unknown falls back"
-assert amy.normalise_think_mode("nonsense", fallback="auto") == "auto"
-assert amy.normalise_think_mode("auto") == "auto"
+# The pure helpers (think modes, reasoning detection) are tested in test_llm.py, which
+# imports llm.py on its own. Only the bot's own configuration is checked here.
 assert amy.OLLAMA_THINK in amy.THINK_MODES, "the configured default must be a valid mode"
-print("think modes: OK (false/true/auto, junk falls back)")
-
-# The detector decides whether /model switches a model's mode, so both directions matter.
-LEAKS = [
-    'Hmm, the user is asking "What is 2 + 2?" and wants the answer in one short sentence.',
-    "Okay, the user wants a brief explanation of the difference between lists and tuples.",
-    "Okay, let's see. I need to figure out what 17 times 23 is.",
-    "The user wants a two-line birthday message for their friend Minh.",
-]
-ANSWERS = [
-    "In Python, **lists** and **tuples** are both ordered collections.",
-    "2 plus 2 equals 4.",
-    "We are comparing two data structures in Python: lists and tuples.",
-    "Happy Birthday, Minh! Wishing you a day filled with laughter.",
-    "Hello there! It is my pleasure to assist you with your programming endeavors.",
-    "Let me know if you'd like me to explain any part in more detail.",
-    "",
-]
-for t in LEAKS:
-    assert amy.looks_like_reasoning(t), "missed a real leak: %r" % t[:60]
-for t in ANSWERS:
-    assert not amy.looks_like_reasoning(t), "false positive on a real answer: %r" % t[:60]
-print("looks_like_reasoning: OK (%d leaks caught, %d answers cleared)" % (len(LEAKS), len(ANSWERS)))
+print("configured think mode is valid: OK (%s)" % amy.OLLAMA_THINK)
 
 assert 0 < amy.PROBE_MAX_TOKENS <= 1024, "the probe must stay cheap"
 assert 0 < amy.PROBE_TIMEOUT <= 120, "the probe must stay bounded - /model used to be instant"
@@ -323,18 +287,8 @@ print("system prompt: OK (claims match the tools actually offered)")
 # warm_model used to treat ANY preload failure as "the saved model was uninstalled", switch
 # to the default, and persist that. Ollama simply not being up yet at login was enough to
 # erase the choice - and a slow warm-up that failed after an admin's /model reverted it.
-pick = amy.startup_model_choice
+# startup_model_choice itself is tested in test_llm.py; this checks the bot acts on it.
 D = amy.DEFAULT_MODEL
-assert pick(D, D, loaded=False, installed=None) == D, "the default is always fine"
-assert pick("big:7b", D, loaded=True, installed=None) == "big:7b", "it loaded - keep it"
-assert pick("big:7b", D, loaded=False, installed=None) == "big:7b", \
-    "Ollama unreachable proves nothing about the model - keep the choice"
-assert pick("big:7b", D, loaded=False, installed=["big:7b", D]) == "big:7b", \
-    "installed but failed to load (VRAM, timeout) is transient - keep the choice"
-assert pick("big:7b", D, loaded=False, installed=[D]) == D, \
-    "only a model Ollama confirms is gone falls back"
-assert pick("big:7b", D, loaded=False, installed=[]) == D
-print("startup_model_choice: OK (falls back only when the model is confirmed gone)")
 
 _real_chat, _real_list = amy.ollama.chat, amy.ollama.list
 _real_model = amy.model
@@ -403,14 +357,7 @@ finally:
 # These used to be reachable only through a live Ollama, in a network-tier suite that
 # reported success when Ollama was missing. A scripted fake Ollama makes them deterministic.
 LEAK = "Okay, the user wants to know what 2 + 2 is. Let me think about that."
-judge = amy.judge_probe_reply
-assert judge("2 + 2 = 4.", "") is True, "a clean answer is usable"
-assert judge(LEAK, "") is False, "reasoning pasted into the reply is not"
-assert judge("", "the model reasoned here") is True, \
-    "empty content with separate reasoning: the budget ran out, but reasoning stays out of chat"
-assert judge("", "") is False, "nothing at all is not usable"
-assert judge(LEAK, "and some separate thinking") is False, "a leak is a leak either way"
-print("judge_probe_reply: OK")
+# judge_probe_reply itself is tested in test_llm.py; this drives the probe end to end.
 
 _m8_saved = (amy.ollama.chat, amy.ollama.list, amy.OLLAMA_THINK, amy.model)
 

@@ -34,6 +34,7 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | `test_commands_audit.py` | `/dice` caps, removed commands, `/stop` staying connected |
 | `test_slash.py` | the slash-command tree: naming rules, descriptions, bounds, admin gating, 3s defers |
 | `test_websearch.py` | result parsing, page-text extraction, domain dedup, recency inference, the tool contract |
+| `test_llm.py` | `llm.py` on its own, with no bot, client or database: reasoning modes, leak detection, probe judging, startup model choice, system prompt assembly. Fails if importing `llm` pulls in Discord or Ollama |
 | `test_docs_audit.py` | every command appears in both the help text and the README |
 
 **Network** — needs internet; slower and can fail if YouTube changes.
