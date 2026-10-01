@@ -83,9 +83,13 @@ check("description clipped to 4096", len(qe2.description) <= ui.MAX_EMBED_DESC, 
 
 print()
 print("=== PlayerControls is a legal persistent view ===")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fakes import assert_isolated_db, isolate_db
+isolate_db()            # before importing: the bot reads its DB at import time
 spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
 amy = importlib.util.module_from_spec(spec); sys.modules["amy"] = amy
 spec.loader.exec_module(amy)
+assert_isolated_db(amy)
 v = amy.PlayerControls()
 check("timeout is None (required for add_view)", v.timeout is None, v.timeout)
 items = list(v.children)

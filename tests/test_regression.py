@@ -3,8 +3,17 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 # Resolve the project root from this file, so the suite runs from any checkout
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJ); os.chdir(PROJ)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fakes import assert_isolated_db, isolate_db
+isolate_db()            # before the import: the bot reads settings from its DB at import time
 spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
 amy = importlib.util.module_from_spec(spec); spec.loader.exec_module(amy)
+
+# Review M5: this suite used to run against the operator's real amy_memory.db. Its warm-up
+# test then took the fallback branch whenever a non-default /model was saved, and wrote the
+# default over the user's choice.
+assert_isolated_db(amy)
+print("test database isolated: OK (%s)" % os.path.basename(amy.db.path))
 
 UID = 1234
 amy.rate_limit_store.clear()
@@ -309,6 +318,86 @@ for _p in (_on, _off):
     assert _p.startswith("You are Amy"), "the opening must stay put"
 assert amy.system_prompt == (_on if amy.WEB_SEARCH else _off),     "the live prompt must match the running configuration"
 print("system prompt: OK (claims match the tools actually offered)")
+
+# ---- Review M4: a failed warm-up must not lose the admin's saved /model choice ---------
+# warm_model used to treat ANY preload failure as "the saved model was uninstalled", switch
+# to the default, and persist that. Ollama simply not being up yet at login was enough to
+# erase the choice - and a slow warm-up that failed after an admin's /model reverted it.
+pick = amy.startup_model_choice
+D = amy.DEFAULT_MODEL
+assert pick(D, D, loaded=False, installed=None) == D, "the default is always fine"
+assert pick("big:7b", D, loaded=True, installed=None) == "big:7b", "it loaded - keep it"
+assert pick("big:7b", D, loaded=False, installed=None) == "big:7b", \
+    "Ollama unreachable proves nothing about the model - keep the choice"
+assert pick("big:7b", D, loaded=False, installed=["big:7b", D]) == "big:7b", \
+    "installed but failed to load (VRAM, timeout) is transient - keep the choice"
+assert pick("big:7b", D, loaded=False, installed=[D]) == D, \
+    "only a model Ollama confirms is gone falls back"
+assert pick("big:7b", D, loaded=False, installed=[]) == D
+print("startup_model_choice: OK (falls back only when the model is confirmed gone)")
+
+_real_chat, _real_list = amy.ollama.chat, amy.ollama.list
+_real_model = amy.model
+
+
+def _dead_chat(*a, **kw):
+    raise ConnectionError("Ollama is not running")
+
+
+def _scenario(installed, label):
+    """Run startup verification for a saved non-default model; return (active, stored)."""
+    amy.db.set_setting("model", "big:7b")
+    amy.model = "big:7b"
+    amy.ollama.chat = _dead_chat
+
+    def _list(*a, **kw):
+        if installed is None:
+            raise ConnectionError("Ollama is not running")
+        return {"models": [{"model": m} for m in installed]}
+
+    amy.ollama.list = _list
+    _asyncio.run(amy.verify_restored_model())
+    return amy.model, amy.db.get_setting("model")
+
+
+try:
+    active, stored = _scenario(None, "Ollama down")
+    assert active == "big:7b", "Ollama down at startup must not switch models: %s" % active
+    assert stored == "big:7b", "Ollama down at startup must not rewrite the setting: %s" % stored
+
+    active, stored = _scenario(["big:7b", D], "installed, failed to load")
+    assert active == "big:7b", "a transient load failure must not switch models: %s" % active
+    assert stored == "big:7b"
+
+    active, stored = _scenario([D], "really uninstalled")
+    assert active == D, "a model Ollama confirms is gone falls back for this run: %s" % active
+    assert stored == "big:7b", \
+        "the fallback is in memory only - reinstalling the model must bring the choice back"
+
+    # warm_model is a plain preload now: whatever happens, it never changes the active model.
+    amy.model = "chosen:1"
+    amy.ollama.chat = _dead_chat
+    ok = _asyncio.run(amy.warm_model("chosen:1"))
+    assert ok is False, "a failed preload reports failure"
+    assert amy.model == "chosen:1", "warm_model must never switch models: %s" % amy.model
+
+    # An admin who switches while startup verification is still running must win. Simulate
+    # it by switching from inside the (slow) Ollama listing call.
+    amy.db.set_setting("model", "big:7b")
+    amy.model = "big:7b"
+
+    def _list_while_admin_switches(*a, **kw):
+        amy.model = "admins:pick"
+        return {"models": [{"model": D}]}
+
+    amy.ollama.list = _list_while_admin_switches
+    _asyncio.run(amy.verify_restored_model())
+    assert amy.model == "admins:pick", \
+        "startup fallback must not overwrite a /model made meanwhile: %s" % amy.model
+    print("verify_restored_model: OK (keeps the choice unless Ollama confirms it is gone)")
+finally:
+    amy.ollama.chat, amy.ollama.list = _real_chat, _real_list
+    amy.model = _real_model
 
 print()
 print("ALL REGRESSION TESTS PASSED")

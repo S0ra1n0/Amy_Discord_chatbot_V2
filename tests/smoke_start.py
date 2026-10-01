@@ -7,7 +7,14 @@ PY = os.path.join(PROJ, ".venv", "Scripts", "python.exe")
 if not os.path.isfile(PY):
     PY = sys.executable   # fall back to whatever interpreter is running us
 
-proc = subprocess.Popen([PY, "-u", "Amy_chatbot_V2.py"], cwd=PROJ,
+# Starts the real bot, so on_ready really runs - including restoring saved queues, which
+# rejoins voice and plays music if one is saved. Point it at a throwaway database (unless
+# the runner already did) so a smoke test can never act on the operator's real state.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fakes import isolate_db
+env = dict(os.environ, AMY_DB_PATH=isolate_db())
+
+proc = subprocess.Popen([PY, "-u", "Amy_chatbot_V2.py"], cwd=PROJ, env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace", bufsize=1)
 TIMEOUT, online, lines = 45, False, []

@@ -7,9 +7,13 @@ PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(PROJ)
 sys.path.insert(0, PROJ)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fakes import assert_isolated_db, isolate_db
+isolate_db()            # before importing: the bot reads its DB at import time
 spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
 amy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(amy)
+assert_isolated_db(amy)
 
 readme = open("README.md", encoding="utf-8").read()
 helptxt = open("commands_help.py", encoding="utf-8").read()

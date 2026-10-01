@@ -14,6 +14,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -59,9 +60,21 @@ def interpreter() -> str:
 
 def run(name: str, py: str) -> bool:
     t0 = time.time()
-    proc = subprocess.run([py, os.path.join(TESTS, name)], cwd=PROJ,
-                          capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+    # A fresh database per suite. The bot reads settings and restores saved queues from its
+    # database, so a suite sharing the operator's amy_memory.db could rewrite their /model
+    # choice - and the live smoke test could restore a real saved queue and rejoin voice.
+    db_path = tempfile.mktemp(prefix="amy_test_%s_" % name.replace(".py", ""), suffix=".db")
+    env = dict(os.environ, AMY_DB_PATH=db_path)
+    try:
+        proc = subprocess.run([py, os.path.join(TESTS, name)], cwd=PROJ,
+                              capture_output=True, text=True, env=env,
+                              encoding="utf-8", errors="replace")
+    finally:
+        for leftover in (db_path, db_path + "-journal", db_path + "-wal", db_path + "-shm"):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
     ok = proc.returncode == 0
     dt = time.time() - t0
     # Show the suite's own last line - each one ends with its summary

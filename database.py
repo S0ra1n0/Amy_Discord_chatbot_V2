@@ -13,6 +13,7 @@ MAX_MEMORY_MESSAGES: int = max(2, int(os.getenv("HISTORY_LIMIT", "10")))
 
 class ConversationDB:
     def __init__(self, db_path: str = "amy_memory.db") -> None:
+        self.path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._create_tables()
 

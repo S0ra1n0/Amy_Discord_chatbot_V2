@@ -13,7 +13,7 @@ python tests/run_tests.py --all       # everything
 ```
 
 The runner finds `.venv` automatically and falls back to the current interpreter.
-Individual suites can also be run directly: `python tests/test_music.py`.
+Individual suites can also be run directly: `python tests/test_music.py`. Run directly or through the runner, no suite touches your real database: each one uses a throwaway `AMY_DB_PATH`.
 
 ## Tiers
 
@@ -55,6 +55,8 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
 - `test_ui.py` — a long track title exceeded Discord's limit and rejected the whole message
+- **Every suite that imports the bot** — used to run against the real `amy_memory.db`. The bot reads `/model` and `/toggle` from its database at import time, and one warm-up test could overwrite a saved `/model` choice; the live smoke test ran real startup, which restores saved queues and rejoins voice. Now `run_tests.py` gives each suite a throwaway `AMY_DB_PATH`, every loader calls `_fakes.isolate_db()` before importing, and `assert_isolated_db()` fails the suite if it ever points at the real file.
+- `test_regression.py` — a failed model warm-up used to be read as "the saved model was uninstalled": Amy switched to the default and saved that, so Ollama merely not being up at login erased the admin's choice. Now she falls back only when Ollama confirms the model is gone, only in memory, and never over a `/model` made meanwhile.
 - `test_queue_cmds.py` — **its own exit gate.** The only `if fails: sys.exit(1)` used to sit
   above the snapshot/restore section, so ~30 checks there could print FAIL while the script
   exited 0 and reported success. Found by review, not by a failing run. Each of the restore

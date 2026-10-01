@@ -264,7 +264,12 @@ system_prompt = build_system_prompt(BASE_SYSTEM_PROMPT, WEB_SEARCH)
 #----------------------------------------------
 
 #----Database------
-db = ConversationDB()
+# Where conversation memory, settings and the saved queue live. Overridable so a second
+# instance - or the test suite - can use its own file. The tests set this before importing
+# the bot: settings are read from the database at import time, so swapping `db` afterwards
+# is too late, and the suite used to run against the operator's real file.
+DB_PATH: str = os.getenv("AMY_DB_PATH", "").strip() or "amy_memory.db"
+db = ConversationDB(DB_PATH)
 #----------------------------------------------
 
 #----Voice & Music------
@@ -1859,7 +1864,7 @@ async def switch_model(name: str) -> str:
 
     # Load the new one properly now, so the first real message doesn't pay for it. Held in
     # the same global as the startup warm-up so the task isn't garbage collected mid-flight.
-    _warmup_task = asyncio.create_task(warm_model())
+    _warmup_task = asyncio.create_task(warm_model(model))
 
     note = ""
     if working is None:
@@ -2319,60 +2324,96 @@ async def on_app_command_error(interaction: discord.Interaction,
 #--------------------------------------
 
 #----Event Handlers for Discord Bot------
-def preload_model() -> None:
+def preload_model(name: str) -> None:
     """
-    Load the model into memory without generating anything. Blocking - run in a thread.
+    Load `name` into memory without generating anything. Blocking - run in a thread.
 
     An empty message list is Ollama's way of asking for a load and nothing else: it returns
     done=True with zero characters generated, and leaves the model resident.
     """
-    ollama.chat(model=model, messages=[], keep_alive=OLLAMA_KEEP_ALIVE)
+    ollama.chat(model=name, messages=[], keep_alive=OLLAMA_KEEP_ALIVE)
+
+
+def startup_model_choice(saved: str, default: str, loaded: bool,
+                         installed: Optional[List[str]]) -> str:
+    """
+    Which model to run with after trying to load the one restored from settings.
+
+    Fall back ONLY when Ollama confirms the saved model is no longer installed. A failed
+    load on its own proves nothing - at login Ollama often isn't up yet, and a large model
+    can fail to load for lack of VRAM - and the old behaviour of treating any failure as
+    "uninstalled" silently erased the admin's /model choice.
+
+    `installed` is None when Ollama couldn't be asked at all.
+    """
+    if saved == default or loaded or installed is None:
+        return saved
+    return saved if saved in installed else default
 
 
 # Held so the warm-up task isn't garbage collected mid-flight
 _warmup_task: Optional[asyncio.Task] = None
 
 
-async def warm_model() -> None:
+async def warm_model(name: Optional[str] = None) -> bool:
     """
-    Take the model load off the first real message.
+    Take the model load off the first real message. Returns whether it loaded.
 
     OLLAMA_KEEP_ALIVE keeps the model resident between conversations, but a restart always
     starts cold, and that first reply pays ~4.3s before a single character appears. Doing it
     here moves the wait to startup, where nobody is watching a "Thinking..." message.
 
-    Failures are logged and ignored: Ollama being slow or absent must not stop the bot, and
-    the first chat will simply load the model itself the way it always did.
-
-    This is also where a restored /model choice gets verified. A model saved in a previous
-    run can be uninstalled between runs, and without this Amy would fail on every single
-    message; instead she falls back to the default and says so.
+    A plain preload: it never changes which model is active. It used to double as the
+    startup check below, so /model - which re-runs it - could have a fresh choice reverted
+    by a load that merely failed. Failures are logged and swallowed: Ollama being slow or
+    absent must not stop the bot, and the first chat loads the model itself if need be.
     """
-    global model
+    target = name or model
     started = time.monotonic()
     try:
-        await asyncio.get_running_loop().run_in_executor(None, preload_model)
-        safe_print(f"[INFO] Model '{model}' warmed in {time.monotonic() - started:.1f}s "
-                   f"(stays loaded for {OLLAMA_KEEP_ALIVE})")
-        return
+        await asyncio.get_running_loop().run_in_executor(None, preload_model, target)
     except Exception as e:
-        first_error = e
+        safe_print(f"[WARNING] Could not warm '{target}', the first reply will be slower: {e}")
+        return False
+    safe_print(f"[INFO] Model '{target}' warmed in {time.monotonic() - started:.1f}s "
+               f"(stays loaded for {OLLAMA_KEEP_ALIVE})")
+    return True
 
-    if model == DEFAULT_MODEL:
-        safe_print(f"[WARNING] Could not warm the model, the first reply "
-                   f"will be slower: {first_error}")
+
+async def verify_restored_model() -> None:
+    """
+    Startup only: warm the model restored from settings, and fall back if it's really gone.
+
+    A model saved by /model can be uninstalled between runs, and every reply would then fail.
+    But the fallback is deliberately narrow (see startup_model_choice) and lives in memory
+    only - the saved setting is left alone, so reinstalling the model, or simply starting
+    once Ollama is up, brings the admin's choice back.
+    """
+    global model
+    saved = model
+    loaded = await warm_model(saved)
+    if loaded or saved == DEFAULT_MODEL:
         return
 
-    # A saved model that no longer loads is worth recovering from, not just logging.
-    safe_print(f"[WARNING] Saved model '{model}' could not be loaded ({first_error}); "
-               f"falling back to '{DEFAULT_MODEL}'")
-    model = DEFAULT_MODEL
-    db.set_setting("model", model)
     try:
-        await asyncio.get_running_loop().run_in_executor(None, preload_model)
-        safe_print(f"[INFO] Model '{model}' warmed (fallback)")
-    except Exception as e:
-        safe_print(f"[WARNING] Could not warm the fallback model either: {e}")
+        listing = await asyncio.get_running_loop().run_in_executor(None, ollama.list)
+        installed: Optional[List[str]] = extract_model_names(listing)
+    except Exception:
+        installed = None                        # can't tell - so don't conclude anything
+
+    chosen = startup_model_choice(saved, DEFAULT_MODEL, loaded, installed)
+    if chosen == saved:
+        reason = "Ollama isn't reachable yet" if installed is None else "it's installed"
+        safe_print(f"[WARNING] Couldn't load saved model '{saved}' right now; keeping it "
+                   f"because {reason}. The first reply will load it.")
+        return
+    if model != saved:
+        return                                  # an admin ran /model meanwhile - theirs wins
+    safe_print(f"[WARNING] Saved model '{saved}' is no longer installed; using "
+               f"'{chosen}' for this run. The saved choice is kept, so reinstalling "
+               f"'{saved}' brings it back.")
+    model = chosen
+    await warm_model(model)
 
 
 @bot.event
@@ -2431,7 +2472,7 @@ async def on_ready() -> None:
     # to wait for it.
     global _warmup_task
     if _warmup_task is None or _warmup_task.done():
-        _warmup_task = asyncio.create_task(warm_model())
+        _warmup_task = asyncio.create_task(verify_restored_model())
 
     # Clean up voice channels Amy created before a restart
     try:

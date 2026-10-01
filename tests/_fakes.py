@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+import tempfile
 from collections import deque
 
 import discord
@@ -16,14 +17,48 @@ import discord
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+REAL_DB = os.path.abspath(os.path.join(PROJ, "amy_memory.db"))
+
+
+def isolate_db():
+    """
+    Point the bot at a throwaway database. Must run BEFORE the bot is imported.
+
+    The bot reads /model and /toggle from its database at import time, so swapping `amy.db`
+    afterwards is too late. Without this the suites ran against the operator's real
+    amy_memory.db - and one warm-up test could overwrite their saved /model choice.
+
+    A value already set by the test runner is kept only if it is a temp file; anything else
+    (say, an AMY_DB_PATH in the user's own shell pointing at a real database) is replaced.
+    """
+    current = os.environ.get("AMY_DB_PATH", "")
+    temp_root = os.path.abspath(tempfile.gettempdir())
+    if current and os.path.abspath(current).startswith(temp_root):
+        return current
+    path = tempfile.mktemp(prefix="amy_test_", suffix=".db")
+    os.environ["AMY_DB_PATH"] = path
+    return path
+
+
+def assert_isolated_db(amy):
+    """Fail loudly if a suite is about to run against the real database."""
+    path = getattr(amy.db, "path", None)
+    assert path, "ConversationDB has no .path - cannot prove the suite is isolated"
+    assert os.path.abspath(path) != REAL_DB, (
+        "tests are pointed at the REAL database (%s) - call isolate_db() before "
+        "importing the bot" % path)
+
+
 def load_bot():
     """Import Amy_chatbot_V2 as a module, with duck-typed voice helpers for the fakes."""
     sys.path.insert(0, PROJ)
     os.chdir(PROJ)
+    isolate_db()
     spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
     amy = importlib.util.module_from_spec(spec)
     sys.modules["amy"] = amy
     spec.loader.exec_module(amy)
+    assert_isolated_db(amy)
 
     # The real helpers isinstance-check against discord.VoiceClient / VoiceChannel, which
     # these fakes are not. The narrowing itself is exercised against real types elsewhere;

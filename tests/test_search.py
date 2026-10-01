@@ -29,9 +29,13 @@ check("long query clipped in author", len(e2.author.name) <= 256, len(e2.author.
 
 print()
 print("=== SearchResults view structure ===")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fakes import assert_isolated_db, isolate_db
+isolate_db()            # before importing: the bot reads its DB at import time
 spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
 amy = importlib.util.module_from_spec(spec); sys.modules["amy"] = amy
 spec.loader.exec_module(amy)
+assert_isolated_db(amy)
 
 class FakeGuild:
     id = 500
