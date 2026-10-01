@@ -131,6 +131,18 @@ Page text is still untrusted input. Amy was tested against three injection style
 page bodies — a direct "ignore all previous instructions", a fake `[SYSTEM]` directive, and a
 persona swap — and ignored all three, answering the actual question instead.
 
+#### Amy can't be made to mass-ping the server
+
+Nothing Amy sends can ping `@everyone`, `@here`, a role, or an arbitrary user. That matters
+because she repeats text she doesn't control: her own replies (which a planted web page — or
+simply asking her — could steer), and YouTube titles shown while a track loads. Discord
+otherwise treats every mention in that text as a real ping. The block is set once for the
+whole bot, so it covers chat replies, their live edits, and slash-command responses alike.
+Replying to you still notifies you, as before.
+
+As a second layer, mentions in search results and fetched pages are defused before the model
+ever sees them, so they don't end up in the conversation history either.
+
 The end-to-end effect, asked of the running model: *"who won the most recent Ballon d'Or?"*
 answered **"Lionel Messi in 2024"** from snippets alone — confidently wrong — and
 **"Ousmane Dembélé in 2025"**, correctly, once the pages were read.

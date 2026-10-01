@@ -155,6 +155,27 @@ def _drop_noise(text: str) -> str:
     return " ".join(kept)
 
 
+# Discord's mention syntax. Mass mentions are defused with a zero-width space, which keeps
+# the text readable but stops Discord treating it as a ping; id mentions become plain words.
+_MASS_MENTION_RE = re.compile(r"@(everyone|here)\b", re.IGNORECASE)
+_ID_MENTION_RE = re.compile(r"<@([!&]?)\d+>")
+
+
+def neutralise_mentions(text: str) -> str:
+    """
+    Defuse anything in untrusted text that Discord would treat as a ping.
+
+    Fetched pages and search snippets are written by strangers, then quoted to the model,
+    which may repeat them - and the conversation history stores them. The bot also sets a
+    client-wide allowed_mentions policy, which is what actually stops the ping; this just
+    means mention-shaped text never reaches the model or the history in the first place.
+    """
+    if not text:
+        return text
+    text = _ID_MENTION_RE.sub(lambda m: "@role" if m.group(1) == "&" else "@user", text)
+    return _MASS_MENTION_RE.sub(lambda m: "@\u200b" + m.group(1), text)
+
+
 def strip_tags(raw: str) -> str:
     """Turn a fragment of result markup into readable text."""
     return html.unescape(_TAG_RE.sub("", raw)).strip()
@@ -326,7 +347,7 @@ def extract_page_text(html_text: str, limit: int = MAX_PAGE_CHARS) -> str:
     if len(text) < MIN_PAGE_CHARS:
         text = _drop_noise(re.sub(r"\s+", " ", strip_tags(body)).strip())
 
-    return text[:limit]
+    return neutralise_mentions(text[:limit])
 
 
 def parse_results(html_text: str, limit: int = DEFAULT_LIMIT) -> List[SearchResult]:
@@ -350,9 +371,9 @@ def parse_results(html_text: str, limit: int = DEFAULT_LIMIT) -> List[SearchResu
             continue
         snippet = snippets[i] if i < len(snippets) else ""
         results.append(SearchResult(
-            title=title[:MAX_TITLE],
+            title=neutralise_mentions(title[:MAX_TITLE]),
             url=url,
-            snippet=snippet[:MAX_SNIPPET],
+            snippet=neutralise_mentions(snippet[:MAX_SNIPPET]),
         ))
     return results
 
@@ -386,12 +407,12 @@ def format_for_model(query: str, results: List[SearchResult],
         "",
     ]
     for i, r in enumerate(results, start=1):
-        lines.append(f"[{i}] {r.title}")
+        lines.append(f"[{i}] {neutralise_mentions(r.title)}")
         lines.append(f"    URL: {r.url}")
         if r.snippet:
-            lines.append(f"    Summary: {r.snippet}")
+            lines.append(f"    Summary: {neutralise_mentions(r.snippet)}")
         if r.content:
-            lines.append(f"    Page text: {r.content}")
+            lines.append(f"    Page text: {neutralise_mentions(r.content)}")
     lines.append("")
     lines.append("Prefer the page text over the summary where they disagree, and prefer "
                  "sources that agree with each other. If the results do not actually answer "

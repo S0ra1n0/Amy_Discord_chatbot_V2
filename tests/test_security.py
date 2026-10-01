@@ -74,6 +74,48 @@ os.environ.pop("MUSIC_DIR", None)
 shutil.rmtree(base, ignore_errors=True)
 shutil.rmtree(sibling, ignore_errors=True)
 
+# --- review M10: nothing Amy sends may ping @everyone, a role, or an arbitrary user ---
+# discord.py sends no mention restriction unless the client sets one, and Discord then
+# parses everything. Amy repeats text she doesn't control - model replies, which can be
+# steered by fetched web pages or simply by asking; YouTube titles in "Loading **...**" -
+# so any of it could mass-ping the server.
+print()
+print("=== no text Amy sends can ping everyone, roles or users ===")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fakes import assert_isolated_db, isolate_db
+isolate_db()
+import importlib.util
+import discord
+from discord.http import handle_message_parameters
+_spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_chatbot_V2.py"))
+amy = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(amy)
+assert_isolated_db(amy)
+
+am = amy.bot.allowed_mentions
+check("the bot sets a client-wide mention policy", am is not None)
+if am is not None:
+    check("@everyone and @here never ping", am.everyone is False)
+    check("roles never ping", am.roles is False)
+    check("arbitrary users never ping", am.users is False)
+    check("replying to someone still notifies them, as before", am.replied_user is True)
+
+    hostile = "@everyone @here <@123456789> <@!987654321> <@&555> read this"
+    sent = handle_message_parameters(content=hostile, previous_allowed_mentions=am)
+    wire = sent.payload.get("allowed_mentions") or {}
+    check("on the wire, Discord is told to parse no mentions at all", wire.get("parse") == [])
+    check("and no user or role ids are whitelisted",
+          not wire.get("users") and not wire.get("roles"))
+
+    # Slash-command follow-ups (the "Loading **<title>**..." line) are sent through an
+    # interaction webhook, a different code path from channel messages. Build one exactly
+    # as discord.Interaction.followup does and check it inherits the same policy.
+    hook = discord.Webhook.from_state(
+        data={"id": "1", "type": 3, "token": "t", "application_id": "1"},
+        state=amy.bot._connection)
+    check("slash-command follow-ups inherit the policy",
+          getattr(hook._state, "allowed_mentions", None) is am)
+
 print()
 if fails:
     print("%d CHECK(S) FAILED" % len(fails))

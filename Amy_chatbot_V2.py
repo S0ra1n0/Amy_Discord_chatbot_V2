@@ -202,7 +202,16 @@ intents.message_content = True
 # Needed so VoiceChannel.members resolves reliably (it looks up guild.get_member),
 # which is what empty-channel auto-disconnect depends on.
 intents.members = True
-bot = discord.Client(intents=intents)
+
+# Nothing Amy sends may ping @everyone, @here, a role, or an arbitrary user. She repeats
+# text she doesn't control - model replies (steerable by fetched web pages, or by simply
+# asking her to), YouTube titles in "Loading **...**" - and without this discord.py sends
+# no restriction at all, so Discord parses every mention in it. Set client-wide so it
+# covers channel messages, their streamed edits, and slash-command follow-ups alike.
+# Replies still notify the person replied to, as they always have.
+NO_MASS_PINGS = discord.AllowedMentions(everyone=False, users=False, roles=False,
+                                        replied_user=True)
+bot = discord.Client(intents=intents, allowed_mentions=NO_MASS_PINGS)
 
 # The model Amy talks with. Set OLLAMA_MODEL in .env to change it without editing source.
 # This is the fallback: the value actually used is restored from saved settings below, and
