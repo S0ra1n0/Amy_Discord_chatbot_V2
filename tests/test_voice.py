@@ -53,6 +53,19 @@ assert all(found and humans for _, found, humans, _ in resuming),     "Amy must 
 assert all(tracks > 0 for tracks, _, _, _ in resuming)
 print("resume only with an audience: OK")
 
+# A player already in use beats any snapshot. Restore runs while on_ready is still syncing,
+# so a /play can get in first, and on a re-READY the player is live - applying the snapshot
+# on top used to replace the live queue outright.
+for tracks, found, humans in [(3, True, True), (3, True, False), (3, False, False),
+                              (0, False, False), (1, True, True)]:
+    got = decide_restore_action(tracks, found, humans, player_active=True)
+    assert got is RestoreAction.NOTHING, \
+        "active player must win: tracks=%d found=%s humans=%s -> %s" % (
+            tracks, found, humans, got)
+assert decide_restore_action(3, True, True) is RestoreAction.RESUME, \
+    "player_active defaults to False for existing callers"
+print("decide_restore_action: OK (an active player always wins)")
+
 from database import ConversationDB
 tmp = tempfile.mktemp(suffix=".db")
 db = ConversationDB(tmp)

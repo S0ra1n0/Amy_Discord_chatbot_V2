@@ -261,5 +261,15 @@ _p.reset()
 assert _p.resume_position == 0.0, "reset must clear a pending resume"
 print("resume_position: OK (defaults to 0, cleared by reset)")
 
+# ---- starts_immediately --------------------------------------------------------------
+# Whether a just-added track is the one that plays next. With a backlog ahead of it - a
+# queue restored after a restart - /play used to say "Loading <it>" while the backlog's
+# head played instead.
+assert music.starts_immediately(1, False) is True, "alone and idle -> plays now"
+assert music.starts_immediately(3, False) is False, "idle with a backlog -> queued behind it"
+assert music.starts_immediately(1, True) is False, "something playing -> queued"
+assert music.starts_immediately(5, True) is False
+print("starts_immediately: OK (only alone-and-idle plays straight away)")
+
 print()
 print("ALL MUSIC TESTS PASSED")

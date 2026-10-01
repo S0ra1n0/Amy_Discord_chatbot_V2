@@ -55,6 +55,15 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
 - `test_ui.py` — a long track title exceeded Discord's limit and rejected the whole message
+- `test_queue_cmds.py` — **its own exit gate.** The only `if fails: sys.exit(1)` used to sit
+  above the snapshot/restore section, so ~30 checks there could print FAIL while the script
+  exited 0 and reported success. Found by review, not by a failing run. Each of the restore
+  fixes below was then mutation-checked: undo it, and the suite fails.
+- `test_queue_cmds.py` — restore safety: a stale snapshot used to replace a live queue when
+  `/play` landed during startup, a re-sent READY restored a second time and queued the
+  playing track twice, `/join` never started a quietly restored queue, `/play` said
+  "Loading <your song>" while a restored one played, and `/leave` left the snapshot behind
+  for up to 20s so a restart could rejoin the channel.
 - `test_queue_cmds.py` — the queue-restore resume path. `restore_player` narrows with
   `isinstance(channel, discord.VoiceChannel)`, so a duck-typed fake was invisible to it and
   the most important branch of queue persistence had no test at all. `_fakes.RealVoiceChannel`

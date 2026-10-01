@@ -9,7 +9,7 @@ PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _fakes import (Guild, Interaction, Member, RealVoiceChannel, VoiceChannel, VoiceClient,
-                    load_bot, run_music, seed_queue)
+                    load_bot, run_music, run_voice, seed_queue, text_of)
 
 amy = load_bot()
 
@@ -89,10 +89,6 @@ check("triggered stop()", it.guild.voice_client.stopped)
 p, it = setup(USER, "userA", ["a"])
 check("bad position rejected", "no track at position" in run_music(amy, "skipto", [9], interaction=it))
 
-print()
-if fails:
-    print("%d FAILED" % len(fails))
-    sys.exit(1)
 # ---- Snapshot / restore ---------------------------------------------------------------
 # A restart used to lose the whole queue. snapshot_player writes the current track into
 # slot 0 so a restore knows where to pick up, and restore_player puts it all back.
@@ -157,8 +153,7 @@ try:
     amy.voice.connect_to = fake_connect
     amy.advance_playback = fake_advance
     try:
-        listener = Member(7, "listener")
-        listener.bot = False
+        listener = Member(7, name="listener")
 
         # People still in the channel -> rejoin and pick up mid-track
         p3 = seed_queue(amy, 4343, ["a", "b"], current="mid track")
@@ -195,11 +190,12 @@ try:
         check("did not start playing", advanced == [], advanced)
         check("queue still restored", [t.title for t in p5.queue] == ["x"],
               [t.title for t in p5.queue])
-        check("no mid-track resume queued", p5.resume_position == 0.0, p5.resume_position)
+        check("mid-track position kept for when it is picked up",
+              abs(p5.resume_position - 9.0) < 1e-9, p5.resume_position)
 
         # Only bots left counts as empty
         joined.clear(); advanced.clear()
-        robot = Member(8, "robot"); robot.bot = True
+        robot = Member(8, is_bot=True, name="robot")
         _snap_db.save_player_state(
             4345, [{"title": "y", "query": "https://youtu.be/y"}],
             "off", 1.0, voice_channel_id=79, text_channel_id=88, resume_position=0.0)
@@ -232,5 +228,181 @@ finally:
     amy.db = _real_db
     _snap_db.conn.close()
 
+# ---- Restore safety (review findings M2, M3, L3) ------------------------------------
+# Each of these failed against the pre-fix code; see the review report for the scenarios.
+_safe_db = _DB(_tf.mktemp(suffix=".db"))
+_saved = {
+    "db": amy.db, "connect": amy.voice.connect_to, "advance": amy.advance_playback,
+    "ffmpeg": amy.music.find_ffmpeg, "resolve": amy.music.resolve_metadata,
+    "get_guild": amy.bot.get_guild,
+}
+amy.db = _safe_db
+_advanced = []
+
+
+async def _record_advance(g):
+    _advanced.append(g.id)
+    p_ = amy.music_manager.player_for(g.id)
+    if p_.current is None and p_.queue:          # behave like a real advance: pop the head
+        p_.current = p_.queue.popleft()
+
+
+amy.advance_playback = _record_advance
+
+
+def _snapshot(gid, titles, channel_id=None, pos=0.0):
+    _safe_db.save_player_state(
+        gid, [{"title": t, "query": "https://youtu.be/%s" % t} for t in titles],
+        "off", 1.0, voice_channel_id=channel_id, text_channel_id=88, resume_position=pos)
+
+
+try:
+    # M2: restore must never overwrite a player that is already in use. At startup a /play
+    # can land while on_ready is still syncing commands; on a re-READY the player is live.
+    live = seed_queue(amy, 4400, ["live1", "live2"], current="live now")
+    _snapshot(4400, ["stale1", "stale2"])
+    ok = asyncio.run(amy.restore_player(Guild(owner_id=1, member=None, guild_id=4400)))
+    check("M2: restore declines a player that is already playing", ok is False, ok)
+    check("M2: the live queue is untouched",
+          [t.title for t in live.queue] == ["live1", "live2"], [t.title for t in live.queue])
+    check("M2: the live track is untouched", live.current.title == "live now", live.current)
+    check("M2: the stale snapshot is dropped", _safe_db.load_player_state(4400) is None)
+
+    # Connected but idle also counts as in use - restore must not stack a queue onto it.
+    amy.music_manager.cleanup(4401)
+    g_conn = Guild(owner_id=1, member=None, guild_id=4401)
+    g_conn.voice_client = VoiceClient(RealVoiceChannel(90, "Here", []))
+    _snapshot(4401, ["stale"])
+    ok = asyncio.run(amy.restore_player(g_conn))
+    check("M2: restore declines while Amy is already in a voice channel", ok is False, ok)
+    check("M2: nothing was queued onto the connected player",
+          list(amy.music_manager.player_for(4401).queue) == [])
+
+    # M2: restoring is a once-per-process event. discord.py fires READY again after a
+    # failed RESUME, and by then the snapshot holds the track that is currently playing.
+    amy._queues_restored = False
+    fakes = {4402: Guild(owner_id=1, member=None, guild_id=4402)}
+    amy.bot.get_guild = lambda gid: fakes.get(gid)
+    amy.music_manager.cleanup(4402)
+    _snapshot(4402, ["first"])
+    asyncio.run(amy.restore_saved_queues())
+    first_run = [t.title for t in amy.music_manager.player_for(4402).queue]
+    amy.music_manager.cleanup(4402)
+    _snapshot(4402, ["second"])
+    asyncio.run(amy.restore_saved_queues())
+    check("M2: the first READY restores", first_run == ["first"], first_run)
+    check("M2: a later READY restores nothing",
+          list(amy.music_manager.player_for(4402).queue) == [],
+          [t.title for t in amy.music_manager.player_for(4402).queue])
+
+    # M3: /join must pick up a queue that is waiting with nothing playing. The docs promised
+    # this; the code only connected and went quiet.
+    _join_guild = {}
+
+    async def _connect_and_attach(channel):
+        g_ = _join_guild["g"]
+        g_.voice_client = VoiceClient(channel)
+        # A real client is idle the moment it connects. The shared fake defaults to
+        # "playing" because other suites use a fresh one to mean "Amy is mid-song".
+        g_.voice_client.stopped = True
+        return g_.voice_client
+
+    amy.voice.connect_to = _connect_and_attach
+
+    joiner = Member(10, VoiceChannel(91, "Joinable"), name="joiner")
+    g_join = Guild(OWNER, joiner, None, guild_id=4403)
+    _join_guild["g"] = g_join
+    amy.music_manager.cleanup(4403)
+    backlog = seed_queue(amy, 4403, ["waiting1", "waiting2"], current=None)
+    _advanced.clear()
+    out = run_voice(amy, "join", user=joiner, guild=g_join)
+    check("M3: /join starts a waiting queue", _advanced == [4403], _advanced)
+    check("M3: /join says it is picking the queue up", "queued" in out.lower(), out)
+    check("M3: playback begins with the head of the queue",
+          backlog.current is not None and backlog.current.title == "waiting1", backlog.current)
+
+    # ...and stays quiet when there is nothing waiting.
+    joiner2 = Member(11, VoiceChannel(92, "Empty queue room"), name="j2")
+    g_join2 = Guild(OWNER, joiner2, None, guild_id=4404)
+    _join_guild["g"] = g_join2
+    amy.music_manager.cleanup(4404)
+    _advanced.clear()
+    run_voice(amy, "join", user=joiner2, guild=g_join2)
+    check("M3: /join with no queue does not start anything", _advanced == [], _advanced)
+
+    # M3: /play while idle with a backlog must say where the track landed, not
+    # "Loading <it>" while the backlog's head actually plays.
+    CH_P = VoiceChannel(93, "Player room")
+    asker = Member(12, CH_P, name="asker")
+    idle_vc = VoiceClient(CH_P)
+    idle_vc.stopped = True                          # connected, nothing playing
+    g_play = Guild(OWNER, asker, idle_vc, guild_id=4405)
+    amy.music_manager.cleanup(4405)
+    pl = seed_queue(amy, 4405, ["restored1", "restored2"], current=None)
+    amy.music.find_ffmpeg = lambda: "ffmpeg"
+
+    async def _fake_resolve(query, requested_by="?"):
+        return amy.music.Track(title="Requested Song", query="https://youtu.be/req",
+                               duration=200, requested_by=requested_by)
+
+    amy.music.resolve_metadata = _fake_resolve
+    _advanced.clear()
+    it_play = Interaction(asker, g_play)
+    run_music(amy, "play", ["requested", "song"], interaction=it_play)
+    status = it_play.sent[0]
+    final_text = text_of(None, it_play)
+    check("M3: /play with a backlog starts the backlog", _advanced == [4405], _advanced)
+    check("M3: /play does not claim to be loading the requested track",
+          "Loading **Requested Song**" not in final_text, final_text[:200])
+    check("M3: /play reports the track as queued",
+          status.embed is not None and (status.embed.author.name or "") == "Added to queue",
+          status.embed.author.name if status.embed else status.content)
+    pos = [f.value for f in status.embed.fields if f.name == "Position"] if status.embed else []
+    check("M3: and at the right position, behind what is now playing",
+          pos == [str(len(pl.queue))] and pl.queue[-1].title == "Requested Song",
+          (pos, [t.title for t in pl.queue]))
+
+    # A plain /play with nothing queued still starts the requested track straight away.
+    idle_vc2 = VoiceClient(CH_P)
+    idle_vc2.stopped = True
+    g_play2 = Guild(OWNER, asker, idle_vc2, guild_id=4406)
+    amy.music_manager.cleanup(4406)
+    _advanced.clear()
+    it_play2 = Interaction(asker, g_play2)
+    run_music(amy, "play", ["requested", "song"], interaction=it_play2)
+    check("M3: /play on an empty queue still starts immediately", _advanced == [4406], _advanced)
+    check("M3: and still says it is loading that track",
+          "Loading **Requested Song**" in text_of(None, it_play2), text_of(None, it_play2)[:200])
+
+    # L3: leaving voice must forget the saved queue at once, not up to 20s later - otherwise a
+    # restart in that window rejoins a channel Amy was told to leave and resumes the music.
+    _snapshot(4407, ["should be forgotten"], channel_id=77)
+    seed_queue(amy, 4407, ["x"], current="y")
+    amy.cleanup_guild_music(4407)
+    check("L3: leaving clears the saved queue", _safe_db.load_player_state(4407) is None)
+    check("L3: leaving clears the in-memory player",
+          4407 not in amy.music_manager.players, list(amy.music_manager.players))
+    import inspect as _inspect
+    _src = _inspect.getsource(amy)
+    check("L3: every leave path uses the clearing cleanup",
+          _src.count("on_cleanup=cleanup_guild_music") == 3
+          and "on_cleanup=music_manager.cleanup" not in _src,
+          (_src.count("on_cleanup=cleanup_guild_music"),
+           _src.count("on_cleanup=music_manager.cleanup")))
+finally:
+    amy.db = _saved["db"]
+    amy.voice.connect_to = _saved["connect"]
+    amy.advance_playback = _saved["advance"]
+    amy.music.find_ffmpeg = _saved["ffmpeg"]
+    amy.music.resolve_metadata = _saved["resolve"]
+    amy.bot.get_guild = _saved["get_guild"]
+    _safe_db.conn.close()
+
+# One gate, at the very end. It used to sit above the snapshot/restore section, so ~30
+# checks there could print FAIL while the script still exited 0 and reported success -
+# the restore path looked covered and wasn't.
 print()
+if fails:
+    print("%d FAILED" % len(fails))
+    sys.exit(1)
 print("ALL QUEUE COMMAND TESTS PASSED")

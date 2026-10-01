@@ -288,15 +288,27 @@ Whether she *resumes* depends on who is still there:
 | Situation on startup | What happens |
 |---|---|
 | People still in the voice channel she was in | She rejoins and carries on from where she left off |
-| That channel is now empty | The queue is restored silently; she stays out until someone runs `/join` or `/play` |
-| The channel is gone, or she left the server | The snapshot is discarded |
+| That channel is now empty, or has been deleted | The queue is restored silently and she stays out of voice |
+| She is no longer in that server | The snapshot is discarded |
+| Someone already started music before the restore ran | The live queue wins and the snapshot is discarded |
 
 Playing music to an empty channel after a restart would be worse than waiting, which is why
-an empty channel restores the queue but doesn't resume it.
+an empty channel restores the queue but doesn't resume it. A quietly restored queue starts
+the next time someone uses it:
 
-`/stop` clears the snapshot immediately, so a deliberate clear doesn't come back later. A
-track whose saved row can't be read is skipped individually rather than failing the whole
-restore.
+- **`/join`** starts it straight away, from where it stopped, and says how many tracks were
+  waiting.
+- **`/play <song>`** starts the restored queue first and tells you where your song landed
+  (*"Added to queue · Position 3"*). It doesn't claim to be loading your song while a
+  restored one plays.
+
+Restoring happens once per start. Discord sometimes re-sends its "ready" event after a
+network blip; by then the snapshot holds the song that's already playing, so restoring again
+would queue it twice.
+
+`/stop` and `/leave` both forget the saved queue immediately, so a deliberate clear doesn't
+come back after a restart — and Amy won't rejoin a channel she was told to leave. A track
+whose saved row can't be read is skipped individually rather than failing the whole restore.
 
 ### Player controls
 

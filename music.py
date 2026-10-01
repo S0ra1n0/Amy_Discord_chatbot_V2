@@ -650,6 +650,17 @@ class MusicManager:
 
 
 #----Playback Engine------
+def starts_immediately(queue_len_after_add: int, playing: bool) -> bool:
+    """
+    Whether a track just added to the queue will be the one that plays next.
+
+    Only true when nothing is playing AND it is alone in the queue. With a backlog in front
+    of it - a queue restored after a restart, say - the backlog's head plays first, so the
+    reply must say "queued at #N" rather than "Loading <this track>".
+    """
+    return not playing and queue_len_after_add == 1
+
+
 def track_to_dict(track: Track) -> Dict[str, Any]:
     """Flatten a Track for storage. Every field is already a plain scalar."""
     return {

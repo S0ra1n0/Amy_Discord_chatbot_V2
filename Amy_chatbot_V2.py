@@ -509,8 +509,12 @@ async def restore_player(guild: discord.Guild) -> bool:
 
     Amy rejoins and resumes only when people are still sitting in the voice channel she was
     in. Coming back from a restart to an empty channel and playing music to nobody would be
-    worse than waiting - so in that case the queue is restored silently and the next /play
-    or /join picks it up.
+    worse than waiting - so in that case the queue is restored silently, and the next /play
+    or /join starts it (from where it stopped, the same as a resume would).
+
+    A player that is already in use always wins: the snapshot is dropped and nothing is
+    touched. Restore runs while on_ready is still syncing commands, so a /play can get in
+    first - and applying a stale snapshot on top used to replace the live queue outright.
     """
     state = db.load_player_state(guild.id)
     if not state:
@@ -521,24 +525,32 @@ async def restore_player(guild: discord.Guild) -> bool:
     if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
         channel = None
 
+    player = music_manager.player_for(guild.id)
+    player_active = (player.current is not None or bool(player.queue)
+                     or voice.active_channel(voice.get_voice_client(guild)) is not None)
+
     # The decision itself lives in voice.py, free of Discord objects, so every branch can
     # be covered offline - this one only runs at startup and is otherwise awkward to reach.
     action = voice.decide_restore_action(
         restorable_tracks=len(tracks),
         channel_found=channel is not None,
         channel_has_humans=bool(channel is not None and voice.humans_in(channel)),
+        player_active=player_active,
     )
 
     if action is voice.RestoreAction.NOTHING:
+        if player_active:
+            safe_print(f"[INFO] Guild {guild.id} is already playing - saved queue discarded")
         db.clear_player_state(guild.id)
         return False
 
-    player = music_manager.player_for(guild.id)
-    player.queue.clear()
+    player.queue.clear()                        # empty by construction; NOTHING covers live
     player.queue.extend(tracks)                 # slot 0 replays from the front
     player.loop_mode = music.loop_mode_from(state["loop_mode"])
     player.volume = state["volume"]
     player.text_channel_id = state["text_channel_id"]
+    # Kept for whichever starts it - an immediate resume below, or a later /play or /join
+    player.resume_position = max(0.0, float(state["resume_position"]))
     db.clear_player_state(guild.id)             # consumed; the snapshot task rewrites it
     safe_print(f"[INFO] Restored {len(tracks)} track(s) for guild {guild.id}")
 
@@ -548,17 +560,78 @@ async def restore_player(guild: discord.Guild) -> bool:
         return True
 
     assert channel is not None                  # RESUME implies a channel with people in it
-    try:
-        await voice.connect_to(channel)
-    except Exception as e:
-        safe_print(f"[WARNING] Could not rejoin {channel.name} to resume: {e}")
-        return True
+    # Same lock /play and /join connect under, re-checked inside, so a command that connects
+    # while this is waiting doesn't race it into a second connect.
+    async with voice_manager.lock_for(guild.id):
+        if voice.active_channel(voice.get_voice_client(guild)) is None:
+            try:
+                await voice.connect_to(channel)
+            except Exception as e:
+                safe_print(f"[WARNING] Could not rejoin {channel.name} to resume: {e}")
+                return True
 
-    # Pick up mid-track where it left off, within the snapshot interval
-    player.resume_position = max(0.0, float(state["resume_position"]))
-    await advance_playback(guild)
+    await advance_playback(guild)               # no-op if a command already started playback
     safe_print(f"[INFO] Resumed playback in {channel.name}")
     return True
+
+
+# Restoring is a once-per-process event. discord.py fires on_ready again whenever a RESUME
+# fails, and by then the snapshot holds the track that is currently playing - restoring
+# again would queue it a second time and revert any edits made in the last 20 seconds.
+_queues_restored: bool = False
+
+
+async def restore_saved_queues() -> int:
+    """Restore every saved queue, once per process. Returns how many guilds were restored."""
+    global _queues_restored
+    if _queues_restored:
+        return 0
+    _queues_restored = True                     # set first, so an overlapping READY can't
+                                                # start a second pass while this one runs
+    restored = 0
+    for saved_id in db.saved_guild_ids():
+        saved_guild = bot.get_guild(saved_id)
+        if saved_guild is None:
+            db.clear_player_state(saved_id)     # she is no longer in that server
+            continue
+        try:
+            if await restore_player(saved_guild):
+                restored += 1
+        except Exception as e:
+            safe_print(f"[WARNING] Could not restore the queue for {saved_id}: {e}")
+    return restored
+
+
+async def start_waiting_queue(guild: discord.Guild) -> int:
+    """
+    If tracks are queued but nothing is playing, start them. Returns how many were waiting.
+
+    This is how a quietly restored queue gets picked up when someone joins: the docs always
+    said /join would do it, but /join only connected and went silent.
+    """
+    player = music_manager.player_for(guild.id)
+    vc = voice.get_voice_client(guild)
+    if player.current is not None or not player.queue:
+        return 0
+    if vc is not None and (vc.is_playing() or vc.is_paused()):
+        return 0
+    waiting = len(player.queue)
+    await advance_playback(guild)
+    return waiting
+
+
+def cleanup_guild_music(guild_id: int) -> None:
+    """
+    Forget all playback state for a guild that Amy has left - in memory and on disk.
+
+    music_manager.cleanup alone left the saved snapshot in place until the next 20-second
+    tick, so a restart inside that window rejoined the channel she had been told to leave.
+    """
+    music_manager.cleanup(guild_id)
+    try:
+        db.clear_player_state(guild_id)
+    except Exception as e:                      # never let persistence break leaving voice
+        safe_print(f"[WARNING] Could not clear the saved queue for {guild_id}: {e}")
 #----------------------------------------------
 
 #----Streaming Chat------
@@ -796,9 +869,10 @@ async def execute_voice_command(
             try:
                 if action is voice.JoinAction.MOVE and vc is not None:
                     await vc.move_to(target)
-                    return Reply(embed=ui.voice_embed(f"Moved to **{target.name}**."))
-                await voice.connect_to(target)
-                return Reply(embed=ui.voice_embed(f"Joined **{target.name}**."))
+                    verb = "Moved to"
+                else:
+                    await voice.connect_to(target)
+                    verb = "Joined"
             except RuntimeError as e:
                 # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
                 # Report what it actually said rather than guessing which one.
@@ -810,6 +884,16 @@ async def execute_voice_command(
             except (discord.ClientException, asyncio.TimeoutError) as e:
                 safe_print(f"[ERROR] Voice connect failed: {e}")
                 return Reply(embed=ui.error_embed(f"I couldn't connect to **{target.name}**. Please try again."))
+
+        # A queue may be waiting with nothing playing - typically one restored quietly after
+        # a restart. Joining is the moment to start it. Outside the voice lock, since
+        # advance_playback can take seconds to resolve the first track.
+        player = music_manager.player_for(guild.id)
+        if player.text_channel_id is None:
+            player.text_channel_id = interaction.channel_id
+        waiting = await start_waiting_queue(guild)
+        note = f" Picking up {waiting} queued track(s)." if waiting else ""
+        return Reply(embed=ui.voice_embed(f"{verb} **{target.name}**.{note}"))
 
     if command == "create":
         if not is_admin_member(interaction.guild, interaction.user.id):
@@ -874,7 +958,7 @@ async def execute_voice_command(
             return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
 
         async with voice_manager.lock_for(guild.id):
-            left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+            left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
         if not left:
             return Reply(embed=ui.error_embed("I'm not in a voice channel."))
         return Reply(embed=ui.voice_embed(f"Left **{left}**.", heading="Voice"))
@@ -1115,7 +1199,15 @@ class SearchResults(discord.ui.View):
         self.stop()
 
         vc = voice.get_voice_client(guild)
-        if vc is not None and (vc.is_playing() or vc.is_paused()):
+        playing = vc is not None and (vc.is_playing() or vc.is_paused())
+        if not music.starts_immediately(len(player.queue), playing):
+            # Acknowledge first: starting a backlog resolves a stream URL, which can outlast
+            # the 3-second interaction window.
+            if not playing:
+                await interaction.response.edit_message(
+                    embed=ui.queued_embed(track, len(player.queue) - 1), view=None)
+                await advance_playback(guild)
+                return
             await interaction.response.edit_message(
                 embed=ui.queued_embed(track, len(player.queue)), view=None)
             return
@@ -1231,7 +1323,7 @@ async def idle_disconnect(guild: discord.Guild) -> None:
         return
 
     async with voice_manager.lock_for(guild.id):
-        left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+        left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
     if left:
         safe_print(f"[INFO] Left {left} after being idle")
 #--------------------------------------
@@ -1399,7 +1491,12 @@ async def execute_music_command(
         player.cancel_idle()
         duration = music.format_duration(track.duration)
 
-        if vc is not None and (vc.is_playing() or vc.is_paused()):
+        playing = vc is not None and (vc.is_playing() or vc.is_paused())
+        if not music.starts_immediately(len(player.queue), playing):
+            if not playing:
+                # Idle with a backlog in front of this track (e.g. a restored queue): start
+                # the backlog, and say truthfully where the requested track landed.
+                await advance_playback(guild)
             await status_msg.edit(content=None,
                                   embed=ui.queued_embed(track, len(player.queue)))
             return ""
@@ -2345,16 +2442,9 @@ async def on_ready() -> None:
         safe_print(f"[WARNING] Orphan voice channel sweep failed: {e}")
 
     # Put back any queue that was playing when Amy last stopped. Done after the orphan
-    # sweep so a channel she created and is about to delete isn't rejoined.
-    for saved_id in db.saved_guild_ids():
-        saved_guild = bot.get_guild(saved_id)
-        if saved_guild is None:
-            db.clear_player_state(saved_id)     # she is no longer in that server
-            continue
-        try:
-            await restore_player(saved_guild)
-        except Exception as e:
-            safe_print(f"[WARNING] Could not restore the queue for {saved_id}: {e}")
+    # sweep so a channel she created and is about to delete isn't rejoined. Guarded to run
+    # once per process: on_ready fires again after a failed RESUME.
+    await restore_saved_queues()
 
 @bot.event
 async def on_connect() -> None:
@@ -2446,7 +2536,7 @@ async def on_voice_state_update(
         return
 
     async with voice_manager.lock_for(guild.id):
-        left = await voice.leave_voice(guild, voice_manager, on_cleanup=music_manager.cleanup)
+        left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
     if left:
         safe_print(f"[INFO] Left empty voice channel: {left}")
 

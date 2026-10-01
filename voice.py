@@ -61,6 +61,7 @@ def decide_restore_action(
     restorable_tracks: int,
     channel_found: bool,
     channel_has_humans: bool,
+    player_active: bool = False,
 ) -> RestoreAction:
     """
     Decide what to do with a saved queue at startup. Free of Discord objects, like
@@ -70,8 +71,12 @@ def decide_restore_action(
     Coming back from a restart to an empty room and playing music to nobody is worse than
     waiting, so the queue is restored quietly instead and the next /play or /join picks it
     up. A snapshot whose tracks can't be rebuilt is worth nothing and is simply dropped.
+
+    A player that is already in use always wins over a snapshot. Restore runs while
+    on_ready is still syncing commands, so a /play can get in first; and a stale snapshot
+    applied on top of it used to replace the live queue outright.
     """
-    if restorable_tracks <= 0:
+    if player_active or restorable_tracks <= 0:
         return RestoreAction.NOTHING
     if not channel_found or not channel_has_humans:
         return RestoreAction.QUEUE_ONLY
