@@ -578,6 +578,10 @@ class GuildPlayer:
         # One-shot, set when a saved queue is restored so the first track picks up where it
         # left off. Consumed by the next advance, like skip_requested.
         self.resume_position: float = 0.0
+        # Bumped whenever playback is deliberately stopped. Starting a track takes seconds
+        # to resolve; a start that finds the generation moved on abandons itself rather
+        # than undoing the stop.
+        self.generation: int = 0
 
     def cancel_idle(self) -> None:
         if self.idle_task is not None and not self.idle_task.done():
@@ -620,15 +624,26 @@ class GuildPlayer:
         return elapsed_seconds(self.started_at, self.paused_at, self.seek_offset,
                                time.monotonic() if now is None else now)
 
-    def reset(self) -> None:
-        self.cancel_idle()
+    def stop_all(self) -> None:
+        """
+        Forget what's playing and queued, and cancel any track still being prepared.
+
+        The one place a deliberate stop happens - /stop and the Stop button used to repeat
+        these lines separately, and the generation bump is what stops an in-flight start
+        from bringing the music back.
+        """
         self.queue.clear()
-        self.current = None
         self.loop_mode = LoopMode.OFF
         self.skip_requested = False
+        self.current = None
+        self.resume_position = 0.0
+        self.generation += 1
+
+    def reset(self) -> None:
+        self.cancel_idle()
+        self.stop_all()
         self.now_playing_msg = None
         self.last_played = None
-        self.resume_position = 0.0
         self.mark_stopped()
 
 
@@ -790,17 +805,30 @@ async def build_source(
     return discord.PCMVolumeTransformer(source, volume=volume)
 
 
-async def play_track(
-    voice_client: discord.VoiceClient,
-    player: GuildPlayer,
-    track: Track,
-    on_finished: Callable[[Optional[Exception]], None],
-    start_at: float = 0.0,
-) -> None:
-    """Resolve `track` and start playing it on `voice_client`, `start_at` seconds in."""
-    stream_url = await resolve_stream_url(track)
-    source = await build_source(stream_url, player.volume, find_ffmpeg(), start_at)
+async def prepare_source(track: Track, volume: float,
+                         start_at: float = 0.0) -> discord.AudioSource:
+    """
+    Resolve `track` and build its audio source - the slow part, seconds over the network.
 
+    Kept separate from starting playback so callers can have the new source in hand before
+    touching what is already playing: if this raises, nothing has been disturbed.
+    """
+    stream_url = await resolve_stream_url(track)
+    return await build_source(stream_url, volume, find_ffmpeg(), start_at)
+
+
+def _discard(source: discord.AudioSource) -> None:
+    """Release a source that will never play. FFmpeg sources hold a running process."""
+    try:
+        source.cleanup()
+    except Exception:
+        pass
+
+
+def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
+           source: discord.AudioSource, on_finished: Callable[[Optional[Exception]], None],
+           start_at: float) -> None:
+    """Hand a ready source to the voice client and record it on the player."""
     player.current = track
     player.cancel_idle()
     voice_client.play(source, after=on_finished)
@@ -809,23 +837,65 @@ async def play_track(
         + (f" (from {format_duration(int(start_at))})" if start_at else ""))
 
 
+async def play_track(
+    voice_client: discord.VoiceClient,
+    player: GuildPlayer,
+    track: Track,
+    on_finished: Callable[[Optional[Exception]], None],
+    start_at: float = 0.0,
+) -> bool:
+    """
+    Resolve `track` and start playing it, `start_at` seconds in. Returns whether it started.
+
+    Returns False without playing anything if playback was stopped while the source was
+    being prepared - otherwise a /stop pressed during those seconds would be undone the
+    moment the source was ready.
+    """
+    generation = player.generation
+    source = await prepare_source(track, player.volume, start_at)
+    if player.generation != generation:
+        _discard(source)
+        log(f"[INFO] Not starting {track.title}: playback was stopped while it loaded")
+        return False
+    _start(voice_client, player, track, source, on_finished, start_at)
+    return True
+
+
 async def restart_at(
     voice_client: discord.VoiceClient,
     player: GuildPlayer,
     track: Track,
     on_finished: Callable[[Optional[Exception]], None],
     position: float,
-) -> None:
+) -> bool:
     """
-    Restart `track` at `position`. Backs /seek and /replay.
+    Restart `track` at `position`. Backs /seek and /replay. Returns whether it restarted.
 
-    An audio source has no seek of its own, so the only way to move is to stop and build a
-    new one with an input offset. Stopping fires the after-callback, which normally advances
-    the queue - the caller must hold the player lock across this call so that advance blocks
-    until the new source is playing and then bails on its own is_playing() guard.
+    An audio source has no seek of its own, so the only way to move is to build a new one
+    with an input offset and swap it in. Order matters:
+
+      1. Build the new source FIRST, while the old one keeps playing. It used to stop first,
+         so a failed resolve left nothing playing, the after-callback advanced the queue, and
+         the track was silently dropped while the user was told the seek had failed.
+      2. Abandon it if playback was stopped meanwhile (see play_track).
+      3. Only then stop the old source and start the new one. Stopping fires the old
+         after-callback, which would advance the queue - so the caller holds the player lock
+         across this call, and that advance finds the new source playing and does nothing.
+      4. Keep a paused track paused. Seeking used to start the music for everyone.
     """
+    generation = player.generation
+    was_paused = voice_client.is_paused()
+    source = await prepare_source(track, player.volume, position)   # raises: nothing changed
+    if player.generation != generation:
+        _discard(source)
+        log(f"[INFO] Not seeking {track.title}: playback was stopped while it loaded")
+        return False
     voice_client.stop()
-    await play_track(voice_client, player, track, on_finished, start_at=position)
+    _start(voice_client, player, track, source, on_finished, position)
+    if was_paused:
+        voice_client.pause()
+        player.mark_paused()
+    return True
 
 
 def make_after_callback(

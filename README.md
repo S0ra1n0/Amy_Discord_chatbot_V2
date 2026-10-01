@@ -273,6 +273,18 @@ instead of decoding and discarding everything up to that point — instant rathe
 seconds on a long track. Seeking past the end is refused rather than silently ending the
 track, since that would be a confusing way to spell `/skip`.
 
+A few guarantees around seeking and stopping:
+
+- **A failed seek changes nothing.** The new source is built *before* the old one is
+  stopped, so if YouTube or the network hiccups mid-seek, the track keeps playing where it
+  was and Amy says so. (It used to stop first, so a failed seek silently skipped to the next
+  song while claiming the seek had failed.)
+- **Seeking while paused stays paused.** The track moves to the new spot and waits for
+  `/resume`, rather than starting the music for everyone.
+- **`/stop` always wins.** Loading a track or a seek position takes a few seconds; a
+  `/stop` or the Stop button pressed during that time is no longer undone when the loading
+  finishes.
+
 ### The queue survives a restart
 
 Amy snapshots each server's queue to the database every 20 seconds and at every track

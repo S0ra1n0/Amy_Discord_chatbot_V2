@@ -503,8 +503,17 @@ def snapshot_player(guild_id: int) -> None:
 
 @tasks.loop(seconds=SNAPSHOT_INTERVAL)
 async def snapshot_queues_task() -> None:
-    """Keep every active guild's snapshot fresh, including the playback position."""
-    for guild_id in list(music_manager.players.keys()):
+    """
+    Keep every active guild's snapshot fresh, including the playback position.
+
+    Skips a player whose lock is held. advance_playback pops the next track into a local
+    and spends seconds resolving it while player.current still holds the finished one; a
+    snapshot taken then saved neither, so a crash in that window lost the next track. Once
+    the change completes, advance_playback snapshots it itself.
+    """
+    for guild_id, player in list(music_manager.players.items()):
+        if player.lock.locked():
+            continue
         snapshot_player(guild_id)
 
 
@@ -1093,10 +1102,7 @@ class PlayerControls(discord.ui.View):
 
         player = music_manager.player_for(guild.id)
         finished = player.current or player.last_played
-        player.queue.clear()
-        player.loop_mode = LoopMode.OFF
-        player.skip_requested = False
-        player.current = None
+        player.stop_all()       # also cancels a track that is still being prepared
         # Matches /stop: stop and stay. The idle timer still disconnects her later.
         vc.stop()
 
@@ -1260,6 +1266,19 @@ async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
 #--------------------------------------
 
 #----Music Playback Engine------
+async def finish_playback(guild: discord.Guild, player: music.GuildPlayer) -> None:
+    """Nothing left to play: show the finished card, forget the snapshot, start idling."""
+    if player.current is not None:
+        player.last_played = player.current
+    player.current = None
+    player.mark_stopped()      # nothing playing, so the position clock resets
+    snapshot_player(guild.id)  # nothing left to restore; drops the saved snapshot
+    await refresh_now_playing(guild, stopped=True)
+    safe_print("[INFO] Queue empty - starting idle timer")
+    player.cancel_idle()  # never stack timers; a stale one could disconnect later
+    player.idle_task = asyncio.create_task(idle_disconnect(guild))
+
+
 async def advance_playback(guild: discord.Guild) -> None:
     """
     Play the next track. Called when one finishes, and to kick off the first track.
@@ -1285,15 +1304,7 @@ async def advance_playback(guild: discord.Guild) -> None:
             player.current, player.queue, player.loop_mode, force_next=force_next
         )
         if next_track is None:
-            if player.current is not None:
-                player.last_played = player.current
-            player.current = None
-            player.mark_stopped()      # nothing playing, so the position clock resets
-            snapshot_player(guild.id)  # nothing left to restore; drops the saved snapshot
-            await refresh_now_playing(guild, stopped=True)
-            safe_print("[INFO] Queue empty - starting idle timer")
-            player.cancel_idle()  # never stack timers; a stale one could disconnect later
-            player.idle_task = asyncio.create_task(idle_disconnect(guild))
+            await finish_playback(guild, player)
             return
 
         loop = asyncio.get_running_loop()
@@ -1302,7 +1313,11 @@ async def advance_playback(guild: discord.Guild) -> None:
         start_at = player.resume_position
         player.resume_position = 0.0
         try:
-            await music.play_track(vc, player, next_track, after, start_at=start_at)
+            if not await music.play_track(vc, player, next_track, after, start_at=start_at):
+                # /stop landed while the track was loading. Nothing was playing for its
+                # vc.stop() to interrupt, so no after-callback will tidy up - do it here.
+                await finish_playback(guild, player)
+                return
             player.last_played = next_track
             await refresh_now_playing(guild)
             snapshot_player(guild.id)   # record the new track and a fresh position
@@ -1582,14 +1597,17 @@ async def execute_music_command(
             # next track off the queue. Holding the lock keeps that advance waiting until
             # the new source is playing, at which point its is_playing() guard returns.
             async with player.lock:
-                await music.restart_at(vc, player, track, after, target)
+                moved = await music.restart_at(vc, player, track, after, target)
         except Exception as e:
+            # The new source is built before the old one is touched, so a failure here
+            # leaves the track playing where it was - and the message says exactly that.
             safe_print(f"[ERROR] Seek failed on '{track.title}': {e}")
             return Reply(embed=ui.error_embed(
-                "I couldn't move to that position. The track may have expired - try "
-                "playing it again."))
+                f"I couldn't jump there, so **{track.title}** is still playing where it was."))
+        if not moved:
+            return Reply(embed=ui.info_embed("Playback was stopped, so I didn't jump."))
 
-        await refresh_now_playing(guild)
+        await refresh_now_playing(guild, paused=vc.is_paused())
         if command == "replay":
             return Reply(embed=ui.info_embed(f"Replaying **{track.title}** from the start."))
         return Reply(embed=ui.info_embed(
@@ -1598,10 +1616,7 @@ async def execute_music_command(
     if command == "stop":
         if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
             return Reply(embed=ui.error_embed("You need to be in my voice channel (or be an admin) to stop playback."))
-        player.queue.clear()
-        player.loop_mode = LoopMode.OFF
-        player.skip_requested = False
-        player.current = None
+        player.stop_all()       # also cancels a track that is still being prepared
         # Stop only. vc.stop() fires the after-callback, which finds an empty queue,
         # shows the finished card and starts the idle timer - so Amy still leaves on her
         # own after 5 minutes. /leave is the command for disconnecting straight away.

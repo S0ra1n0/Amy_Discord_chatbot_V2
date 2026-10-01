@@ -271,5 +271,151 @@ assert music.starts_immediately(1, True) is False, "something playing -> queued"
 assert music.starts_immediately(5, True) is False
 print("starts_immediately: OK (only alone-and-idle plays straight away)")
 
+# ---- Playback engine: seeking and stopping (review M6, L1, L2) -------------------------
+import asyncio as _aio
+
+
+class _Src:
+    """Stands in for an FFmpeg source; records whether its process was cleaned up."""
+    def __init__(self, label):
+        self.label, self.cleaned = label, False
+
+    def cleanup(self):
+        self.cleaned = True
+
+
+class _VC:
+    """Just enough of discord.VoiceClient for the engine: play/stop/pause and their state."""
+    def __init__(self, playing=None, paused=False):
+        self.playing, self.paused, self.stops = playing, paused, 0
+
+    def is_playing(self):
+        return self.playing is not None and not self.paused
+
+    def is_paused(self):
+        return self.playing is not None and self.paused
+
+    def stop(self):
+        self.stops += 1
+        self.playing, self.paused = None, False
+
+    def play(self, source, after=None):
+        assert self.playing is None, "Already playing audio"
+        self.playing, self.paused = source, False
+
+    def pause(self):
+        self.paused = True
+
+
+_real_resolve, _real_build = music.resolve_stream_url, music.build_source
+
+
+async def _ok_resolve(track):
+    return "https://stream/" + track.title
+
+
+async def _ok_build(url, volume, ffmpeg, start_at=0.0):
+    return _Src("%s@%s" % (url, start_at))
+
+
+def _on_finished(error):
+    pass
+
+
+try:
+    music.build_source = _ok_build
+
+    # M6: a seek whose new source fails to build must leave the old one playing. It used to
+    # stop first, so the after-callback advanced the queue and the track was silently lost
+    # while the user was told "I couldn't move to that position".
+    async def _broken_resolve(track):
+        raise RuntimeError("yt-dlp hiccup")
+
+    music.resolve_stream_url = _broken_resolve
+    pl = music.GuildPlayer(1)
+    song = T("Song", 300)
+    pl.current = song
+    old = _Src("old")
+    vc = _VC(playing=old)
+    try:
+        _aio.run(music.restart_at(vc, pl, song, _on_finished, 90.0))
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised, "a failed seek must still report failure"
+    assert vc.stops == 0, "the old source was stopped before the new one existed"
+    assert vc.playing is old, "the track must keep playing when a seek fails"
+    assert pl.current is song, "the current track must be untouched"
+
+    # The happy path still works: old stopped, new playing at the offset.
+    music.resolve_stream_url = _ok_resolve
+    vc = _VC(playing=_Src("old"))
+    ok = _aio.run(music.restart_at(vc, pl, song, _on_finished, 90.0))
+    assert ok is True and vc.stops == 1
+    assert vc.playing.label.endswith("@90.0"), vc.playing.label
+    assert abs(pl.seek_offset - 90.0) < 1e-9
+    print("restart_at: OK (a failed seek leaves the track playing)")
+
+    # L2: seeking while paused must stay paused - it used to start the music for everyone.
+    vc = _VC(playing=_Src("old"), paused=True)
+    pl.mark_started(0.0, now=0.0)
+    pl.mark_paused(now=5.0)
+    ok = _aio.run(music.restart_at(vc, pl, song, _on_finished, 60.0))
+    assert ok is True
+    assert vc.is_paused(), "seeking a paused track must not unpause it"
+    assert pl.paused_at is not None, "and the position clock must stay frozen"
+    assert abs(pl.position(now=pl.paused_at + 100) - 60.0) < 1e-6, \
+        "a paused seek must sit at the new position, not drift"
+    print("restart_at: OK (a paused track stays paused after seeking)")
+
+    # L1: a /stop that lands while a source is still being prepared must win. Simulate it
+    # by stopping from inside the resolve, which is exactly the seconds-long window.
+    def _stop_during(player_):
+        async def _resolve(track):
+            player_.stop_all()
+            return "https://stream/" + track.title
+        return _resolve
+
+    pl = music.GuildPlayer(2)
+    pl.current = song
+    vc = _VC(playing=_Src("old"))
+    music.resolve_stream_url = _stop_during(pl)
+    built = []
+
+    async def _tracking_build(url, volume, ffmpeg, start_at=0.0):
+        src = _Src(url)
+        built.append(src)
+        return src
+
+    music.build_source = _tracking_build
+    ok = _aio.run(music.restart_at(vc, pl, song, _on_finished, 90.0))
+    assert ok is False, "a seek overtaken by /stop must report that it did nothing"
+    assert pl.current is None, "/stop cleared the track and nothing may bring it back"
+    assert vc.playing is None or vc.playing.label == "old", "the new source must not start"
+    assert built and built[-1].cleaned, "the unused FFmpeg source must be cleaned up"
+
+    pl = music.GuildPlayer(3)
+    vc = _VC()
+    music.resolve_stream_url = _stop_during(pl)
+    started = _aio.run(music.play_track(vc, pl, song, _on_finished))
+    assert started is False, "a track start overtaken by /stop must not start"
+    assert vc.playing is None and pl.current is None
+    print("stop generation: OK (/stop during a resolve is not undone)")
+
+    # stop_all is the single place that stops; reset counts as a stop too.
+    pl = music.GuildPlayer(4)
+    pl.queue.extend([T("a"), T("b")])
+    pl.current, pl.loop_mode, pl.skip_requested, pl.resume_position = song, LoopMode.QUEUE, True, 9.0
+    gen = pl.generation
+    pl.stop_all()
+    assert (list(pl.queue), pl.current, pl.loop_mode, pl.skip_requested, pl.resume_position) \
+        == ([], None, LoopMode.OFF, False, 0.0)
+    assert pl.generation == gen + 1
+    pl.reset()
+    assert pl.generation == gen + 2, "reset must also cancel in-flight starts"
+    print("stop_all: OK (clears everything and bumps the generation)")
+finally:
+    music.resolve_stream_url, music.build_source = _real_resolve, _real_build
+
 print()
 print("ALL MUSIC TESTS PASSED")

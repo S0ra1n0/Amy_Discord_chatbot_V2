@@ -9,7 +9,7 @@ PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _fakes import (Guild, Interaction, Member, RealVoiceChannel, VoiceChannel, VoiceClient,
-                    load_bot, run_music, run_voice, seed_queue, text_of)
+                    load_bot, make_track, run_music, run_voice, seed_queue, text_of)
 
 amy = load_bot()
 
@@ -397,6 +397,120 @@ finally:
     amy.music.resolve_metadata = _saved["resolve"]
     amy.bot.get_guild = _saved["get_guild"]
     _safe_db.conn.close()
+
+# ---- L4: the periodic snapshot must not catch a half-finished track change ----------
+# advance_playback pops the next track into a local variable and then spends seconds
+# resolving it, with player.current still holding the finished track. A snapshot taken in
+# that window saved neither, so a crash then lost the next track. The periodic task now
+# skips a player whose lock is held; advance_playback snapshots itself once it's done.
+_l4_db = _DB(_tf.mktemp(suffix=".db"))
+_l4_real = amy.db
+amy.db = _l4_db
+try:
+    busy = seed_queue(amy, 4500, ["after"], current="finishing")
+
+    async def _tick_while_locked():
+        async with busy.lock:
+            await amy.snapshot_queues_task.coro()
+
+    asyncio.run(_tick_while_locked())
+    check("L4: no snapshot while a track change is in progress",
+          _l4_db.load_player_state(4500) is None, _l4_db.load_player_state(4500))
+    asyncio.run(amy.snapshot_queues_task.coro())
+    st = _l4_db.load_player_state(4500)
+    check("L4: the next tick saves it once the change is done",
+          st is not None and [t["title"] for t in st["tracks"]] == ["finishing", "after"],
+          st and [t["title"] for t in st["tracks"]])
+finally:
+    amy.db = _l4_real
+    _l4_db.conn.close()
+    amy.music_manager.cleanup(4500)
+
+# ---- Playback wiring in the bot (review M6, L1, L2) ------------------------------------
+# The engine is tested in test_music.py; these check the bot actually uses it.
+_pw_db = _DB(_tf.mktemp(suffix=".db"))
+_pw_saved = (amy.db, amy.music.restart_at, amy.music.play_track, amy.refresh_now_playing,
+             amy.idle_disconnect)
+amy.db = _pw_db
+try:
+    # L1: both stop paths must cancel a track that is still being prepared.
+    p, it = setup(USER, "userA", ["a", "b"])
+    gen = p.generation
+    run_music(amy, "stop", interaction=it)
+    check("L1: /stop cancels in-flight starts", p.generation == gen + 1, (gen, p.generation))
+    import inspect as _insp
+    _btn = _insp.getsource(amy.PlayerControls.stop_button)
+    check("L1: the Stop button goes through stop_all as well",
+          "stop_all()" in _btn and "queue.clear()" not in _btn, _btn[:160])
+
+    # M6: a failed seek must say the track is still playing - because it now is.
+    async def _seek_fails(*a, **kw):
+        raise RuntimeError("yt-dlp hiccup")
+    amy.music.restart_at = _seek_fails
+    p, it = setup(USER, "userA", ["a"])
+    p.current = amy.music.Track(title="Long song", query="https://youtu.be/long", duration=600, requested_by="userA")
+    out = run_music(amy, "seek", ["1:30"], interaction=it)
+    check("M6: a failed seek says the track is still playing",
+          "still playing" in out, out)
+    check("M6: a failed seek leaves the queue alone",
+          [t.title for t in p.queue] == ["a"] and p.current.title == "Long song",
+          ([t.title for t in p.queue], p.current))
+
+    # L1: a seek overtaken by /stop says so instead of claiming to have jumped.
+    async def _seek_stopped(*a, **kw):
+        return False
+    amy.music.restart_at = _seek_stopped
+    p, it = setup(USER, "userA", [])
+    p.current = amy.music.Track(title="Long song", query="https://youtu.be/long", duration=600, requested_by="userA")
+    out = run_music(amy, "seek", ["1:30"], interaction=it)
+    check("L1: a seek overtaken by /stop does not claim to have jumped",
+          "stopped" in out.lower() and "Jumped" not in out, out)
+
+    # L2: the refreshed card must reflect a paused track as paused.
+    seen = {}
+
+    async def _record_refresh(guild, stopped=False, paused=False):
+        seen["paused"] = paused
+
+    async def _seek_ok(vc, player, track, after, position):
+        vc._paused = True                       # restart_at kept the track paused
+        return True
+
+    amy.refresh_now_playing = _record_refresh
+    amy.music.restart_at = _seek_ok
+    p, it = setup(USER, "userA", [])
+    p.current = amy.music.Track(title="Long song", query="https://youtu.be/long", duration=600, requested_by="userA")
+    it.guild.voice_client._paused = True
+    run_music(amy, "seek", ["1:30"], interaction=it)
+    check("L2: after seeking a paused track the card shows it paused",
+          seen.get("paused") is True, seen)
+
+    # L1: if advance_playback's start is overtaken by /stop, nothing interrupted a playing
+    # source, so no after-callback tidies up - advance_playback must do it itself.
+    async def _start_stopped(*a, **kw):
+        return False
+
+    async def _no_idle(guild):
+        return None
+
+    amy.music.play_track = _start_stopped
+    amy.idle_disconnect = _no_idle
+    seen.clear()
+    p, it = setup(USER, "userA", ["next one"])
+    p.current = None
+    it.guild.voice_client.stopped = True        # between tracks: nothing playing
+    asyncio.run(amy.advance_playback(it.guild))
+    check("L1: an aborted start leaves nothing marked as playing", p.current is None, p.current)
+    check("L1: an aborted start still shows the finished card", seen.get("paused") is False
+          and "paused" in seen, seen)
+    check("L1: an aborted start still starts the idle timer", p.idle_task is not None)
+    if p.idle_task is not None:
+        p.idle_task.cancel()
+finally:
+    (amy.db, amy.music.restart_at, amy.music.play_track, amy.refresh_now_playing,
+     amy.idle_disconnect) = _pw_saved
+    _pw_db.conn.close()
+    amy.music_manager.cleanup(GUILD)
 
 # One gate, at the very end. It used to sit above the snapshot/restore section, so ~30
 # checks there could print FAIL while the script still exited 0 and reported success -
