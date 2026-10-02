@@ -21,14 +21,7 @@ amy = load_bot()
 commands = list(amy.tree.walk_commands())
 by_name = {c.name: c for c in commands}
 
-fails = []
-
-
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
-        print("        got:", str(got)[:130])
+from _check import check, finish
 
 
 print("=== tree is populated ===")
@@ -139,9 +132,4 @@ asyncio.run(amy.send_reply(it2, full, ephemeral=True))
 check("/help sends in one piece today", len(sent) == 1, len(sent))
 check("/help fits the limit", len(sent[0]) <= amy.MAX_DISCORD_LEN, len(sent[0]))
 
-print()
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    sys.exit(1)
-print("ALL SLASH TESTS PASSED")
+finish("ALL SLASH TESTS PASSED")

@@ -7,11 +7,7 @@ sys.path.insert(0, PROJ)
 os.chdir(PROJ)
 import music
 
-fails = []
-def check(label, ok):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
+from _check import check, finish
 
 # --- with MUSIC_DIR unset, local playback must be completely off ---
 os.environ.pop("MUSIC_DIR", None)
@@ -142,8 +138,4 @@ if am is not None:
     check("slash-command follow-ups inherit the policy",
           getattr(hook._state, "allowed_mentions", None) is am)
 
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    sys.exit(1)
-print("ALL SECURITY CHECKS PASSED")
+finish("ALL SECURITY CHECKS PASSED")

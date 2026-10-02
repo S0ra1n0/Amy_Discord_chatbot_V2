@@ -31,14 +31,7 @@ from database import ConversationDB
 amy = load_bot()
 amy.db = ConversationDB(tempfile.mktemp(suffix=".db"))   # never touch the real settings
 
-fails = []
-
-
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
-        print("        got:", str(got)[:150])
+from _check import check, finish
 
 
 async def _switch_and_settle(name):
@@ -163,8 +156,4 @@ check("refused instantly, without loading anything", time.time() - t0 < 5.0,
 check("the active model is unchanged", amy.model == default, amy.model)
 
 amy.db.conn.close()
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    sys.exit(1)
-print("ALL MODEL TESTS PASSED")
+finish("ALL MODEL TESTS PASSED")

@@ -7,11 +7,7 @@ sys.path.insert(0, PROJ); os.chdir(PROJ)
 import discord, music, ui
 from music import LoopMode
 
-fails = []
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label); print("        got:", str(got)[:120])
+from _check import check, finish
 
 def T(title="Song", dur=215, thumb=None, url="https://youtu.be/x", who="me"):
     return music.Track(title=title, query=url, duration=dur, requested_by=who, thumbnail=thumb)
@@ -106,8 +102,6 @@ check("paused=True flips the label to Resume",
 check("Skip and Stop present", labels[1] == "Skip" and labels[2] == "Stop", labels)
 
 print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails)); sys.exit(1)
 # The progress bar replaces the Duration field only while something is actually playing.
 # On the finished card a position would be meaningless.
 _t = music.Track(title="Song", query="https://youtu.be/x", duration=260, requested_by="me")
@@ -134,4 +128,4 @@ _lp = [f for f in _live_stream.fields if f.name == "Position"][0]
 assert "live" in _lp.value, _lp.value
 print("now_playing progress bar: OK (replaces Duration, hidden when finished)")
 
-print("ALL UI TESTS PASSED")
+finish("ALL UI TESTS PASSED")

@@ -20,11 +20,12 @@ helptxt = open("commands_help.py", encoding="utf-8").read()
 envex = open(".env.example", encoding="utf-8").read()
 reqs = open("requirements.txt", encoding="utf-8").read()
 
-fails = []
+from _check import finish, record
+
+
 def check(label, ok, detail=""):
     print(("  PASS " if ok else "  FAIL ") + label + (("  -> " + detail) if detail and not ok else ""))
-    if not ok:
-        fails.append(label)
+    record(label, ok)
 
 print("=== constants: code vs README ===")
 check("model name in README matches code (%s)" % amy.model,
@@ -94,9 +95,4 @@ check("intents.members enabled", amy.intents.members)
 check("intents.message_content enabled", amy.intents.message_content)
 
 print()
-if fails:
-    print("%d CHECK(S) FAILED:" % len(fails))
-    for f in fails:
-        print("   - " + f)
-    sys.exit(1)
-print("ALL AUDIT CHECKS PASSED")
+finish("ALL AUDIT CHECKS PASSED")

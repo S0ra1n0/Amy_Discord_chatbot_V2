@@ -7,6 +7,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from _check import record
 from _fakes import (Guild, Interaction, Member, Perms, VoiceChannel, VoiceClient,
                     load_bot, run_voice)
 
@@ -18,7 +19,7 @@ results = []
 
 def check(label, got, expect):
     ok = expect.lower() in got.lower()
-    results.append(ok)
+    results.append(record(label, ok))
     print(("PASS" if ok else "FAIL"), "|", label)
     if not ok:
         print("      expected:", expect)
@@ -86,12 +87,11 @@ check("/leave outsider blocked", run_voice(amy, "leave", interaction=scene(USER,
 # 11-12. The cooldown lives in the slash layer now, so exercise it there
 amy.voice_cmd_store.clear()
 outs = [amy.check_voice_cooldown(USER)[0] for _ in range(amy.VOICE_CMD_MAX + 1)]
-results.append(outs[:-1] == [True] * amy.VOICE_CMD_MAX and outs[-1] is False)
+results.append(record("cooldown blocks", outs[:-1] == [True] * amy.VOICE_CMD_MAX and outs[-1] is False))
 print(("PASS" if results[-1] else "FAIL"), "| cooldown blocks after %d uses" % amy.VOICE_CMD_MAX)
 
-results.append(amy.is_admin_member(Guild(OWNER, Member(OWNER)), OWNER) is True)
+results.append(record("owner is admin", amy.is_admin_member(Guild(OWNER, Member(OWNER)), OWNER) is True))
 print(("PASS" if results[-1] else "FAIL"), "| server owner counts as admin (cooldown exempt)")
 
 print()
 print("{}/{} passed".format(sum(results), len(results)))
-sys.exit(0 if all(results) else 1)

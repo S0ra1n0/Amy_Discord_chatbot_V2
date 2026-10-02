@@ -20,14 +20,7 @@ os.chdir(PROJ)
 
 import config
 
-fails = []
-
-
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
-        print("        got:", str(got)[:160])
+from _check import check, finish
 
 
 # ---- pure parsers ----------------------------------------------------------------------
@@ -126,8 +119,4 @@ code, res, out = probe({"OLLAMA_KEEP_ALIVE": "30m"})
 check("no warning when nothing is shadowed",
       not any("[WARNING]" in l and "OLLAMA_KEEP_ALIVE" in l for l in out.splitlines()))
 
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    sys.exit(1)
-print("ALL CONFIG TESTS PASSED")
+finish("ALL CONFIG TESTS PASSED")

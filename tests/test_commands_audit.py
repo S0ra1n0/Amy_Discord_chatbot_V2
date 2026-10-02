@@ -14,14 +14,7 @@ amy = load_bot()
 
 OWNER, USER = 42, 99
 GUILD = 500
-fails = []
-
-
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
-        print("        got:", str(got)[:130])
+from _check import check, finish
 
 
 def command(name):
@@ -73,8 +66,4 @@ check("STILL CONNECTED (the behaviour change)", not vcl.disconnected)
 check("reply mentions staying", "stay" in out.lower(), out)
 check("reply points at /leave", "/leave" in out, out)
 
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    sys.exit(1)
-print("ALL COMMAND AUDIT TESTS PASSED")
+finish("ALL COMMAND AUDIT TESTS PASSED")

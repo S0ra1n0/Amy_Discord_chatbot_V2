@@ -1,0 +1,4 @@
+# Everything needed to run the checks: the bot's own requirements plus the type checker.
+-r requirements.txt
+pyright==1.1.414
+nodeenv==1.11.0   # pyright fetches node through this

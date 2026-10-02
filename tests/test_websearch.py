@@ -18,14 +18,7 @@ os.chdir(PROJ)
 
 import websearch
 
-fails = []
-
-
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
-        print("        got:", str(got)[:140])
+from _check import check, finish
 
 
 # A trimmed copy of real DuckDuckGo markup, captured from a live response.
@@ -591,7 +584,4 @@ if "--network" in sys.argv:
           all(x.snippet or x.content for x in enriched))
     print()
 
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    sys.exit(1)
-print("ALL WEBSEARCH TESTS PASSED")
+finish("ALL WEBSEARCH TESTS PASSED")

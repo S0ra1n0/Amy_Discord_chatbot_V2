@@ -17,14 +17,7 @@ OWNER, USER = 42, 99
 GUILD = 500
 CH = VoiceChannel(10, "Chung")
 
-fails = []
-
-
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label)
-        print("        got:", str(got)[:120])
+from _check import check, finish
 
 
 def setup(author_id, name, titles, owners=None):
@@ -643,8 +636,4 @@ finally:
 # One gate, at the very end. It used to sit above the snapshot/restore section, so ~30
 # checks there could print FAIL while the script still exited 0 and reported success -
 # the restore path looked covered and wasn't.
-print()
-if fails:
-    print("%d FAILED" % len(fails))
-    sys.exit(1)
-print("ALL QUEUE COMMAND TESTS PASSED")
+finish("ALL QUEUE COMMAND TESTS PASSED")

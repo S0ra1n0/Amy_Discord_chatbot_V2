@@ -13,11 +13,24 @@ import tempfile
 from collections import deque
 
 import discord
+from dotenv import dotenv_values
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 REAL_DB = os.path.abspath(os.path.join(PROJ, "amy_memory.db"))
+
+
+def ensure_token():
+    """
+    The bot exits at import without a DISCORD_TOKEN. A fresh checkout (CI, a new
+    contributor) has no .env, so supply a dummy - the offline tests never connect. Only
+    when there's no real one, so a local run doesn't trip the "system environment
+    overrides .env" warning.
+    """
+    if not os.environ.get("DISCORD_TOKEN") and \
+            not dotenv_values(os.path.join(PROJ, ".env")).get("DISCORD_TOKEN"):
+        os.environ["DISCORD_TOKEN"] = "dummy-not-a-real-token"
 
 
 def isolate_db():
@@ -31,6 +44,7 @@ def isolate_db():
     A value already set by the test runner is kept only if it is a temp file; anything else
     (say, an AMY_DB_PATH in the user's own shell pointing at a real database) is replaced.
     """
+    ensure_token()   # every bot import starts here, so this is the one place to do it
     current = os.environ.get("AMY_DB_PATH", "")
     temp_root = os.path.abspath(tempfile.gettempdir())
     if current and os.path.abspath(current).startswith(temp_root):

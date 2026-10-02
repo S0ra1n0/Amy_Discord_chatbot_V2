@@ -1,12 +1,32 @@
 # Tests
 
 Plain Python scripts — no pytest, no extra dependencies. Each one prints its own checks and
-exits non-zero on failure, so the runner and CI both work off exit codes.
+exits non-zero on failure, so the runner and CI (`.github/workflows/checks.yml`, offline tier
+plus pyright on every push) both work off exit codes.
+
+## Writing checks
+
+Suites record results through `_check.py`, never a local `fails` list:
+
+```python
+from _check import check, finish
+check("label", condition, got_value)   # prints PASS/FAIL, records the result
+finish("ALL FOO TESTS PASSED")         # summary line only
+```
+
+The exit code does **not** depend on where `finish` sits. A failed check anywhere in the file
+— even after `finish` — makes the process exit 1 when it ends. Suites that format their own
+lines call `record(label, ok)` instead. Plain `assert` suites need nothing: they stop at the
+first failure.
+
+Suites run on a fresh clone with no `.env`: `_fakes.isolate_db()`, which every bot import
+calls first, supplies a dummy `DISCORD_TOKEN` when there's no real one (the bot exits at
+import without one, and the offline tests never connect).
 
 ## Running
 
 ```bash
-python tests/run_tests.py             # offline only (~8s) — safe to run anywhere
+python tests/run_tests.py             # offline only (~20s) — safe to run anywhere
 python tests/run_tests.py --network   # + suites that reach YouTube and FFmpeg
 python tests/run_tests.py --live      # + starts the real bot against Discord
 python tests/run_tests.py --all       # everything
@@ -73,7 +93,13 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_queue_cmds.py` — **its own exit gate.** The only `if fails: sys.exit(1)` used to sit
   above the snapshot/restore section, so ~30 checks there could print FAIL while the script
   exited 0 and reported success. Found by review, not by a failing run. Each of the restore
-  fixes below was then mutation-checked: undo it, and the suite fails.
+  fixes below was then mutation-checked: undo it, and the suite fails. Every check-based suite
+  now records through `_check.py`, whose gate runs at exit, so this can't recur by placement;
+  verified by appending a failing check after `finish` in four suites — each exits 1.
+- **Every suite that imports the bot** — failed on a fresh clone. With no `.env` the bot exits
+  at import for want of a `DISCORD_TOKEN`, so 8 of the 14 offline suites failed, though both
+  READMEs said they needed no token. Found by running them from a clean `git clone` before
+  adding CI. `isolate_db()` now supplies a dummy token when there's no real one.
 - `test_queue_cmds.py` — restore safety: a stale snapshot used to replace a live queue when
   `/play` landed during startup, a re-sent READY restored a second time and queued the
   playing track twice, `/join` never started a quietly restored queue, `/play` said

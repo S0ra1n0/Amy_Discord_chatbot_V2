@@ -424,7 +424,7 @@ On macOS/Linux use `source .venv/bin/activate`. Once active, plain `python` and 
 pip install -r requirements.txt
 ```
 
-Versions are pinned to the exact set the project is tested against. If you skipped the venv, make sure you install into the same interpreter you'll run the bot with — e.g. `py -3.11 -m pip install -r requirements.txt`.
+Versions are pinned to the exact set the project is tested against — the packages Amy imports in `requirements.txt`, and everything those pull in indirectly in `constraints.txt`, which `requirements.txt` loads for you. `yt-dlp` is the one deliberate exception (see the note on YouTube above). To run the tests and type checker as well, install `requirements-dev.txt` instead; it includes everything above. If you skipped the venv, make sure you install into the same interpreter you'll run the bot with — e.g. `py -3.11 -m pip install -r requirements.txt`.
 
 > ⚠️ Install via `requirements.txt`, not by hand. It specifies `discord.py[voice]`, and that **`[voice]` extra is required** — it pulls `PyNaCl` and `davey`, both of which discord.py needs before it will open a voice connection. Installing plain `discord.py` leaves the bot starting up perfectly fine but failing on `/join` at runtime.
 
@@ -553,6 +553,9 @@ Amy_chatbot_V2/
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
+├── constraints.txt         # Pinned indirect dependencies (loaded by requirements.txt)
+├── requirements-dev.txt    # + pyright, for running the checks
+├── .github/workflows/      # CI: offline tests + type check on every push
 ├── amy_memory.db           # SQLite conversation store, auto-created (Git ignored)
 ├── .venv/                  # Virtual environment (Git ignored)
 ├── .vscode/                # Editor settings, points at .venv (Git ignored)
@@ -565,13 +568,16 @@ Amy_chatbot_V2/
 ## Testing
 
 ```bash
-python tests/run_tests.py             # offline suites only (~8s)
+python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
 20 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
 and a docs audit that fails if a command is missing from the help text or this README.
-Offline suites need no network and no Discord token. A suite whose dependency is missing — Ollama not running, say — is reported as **SKIPPED**, never as passed. See [tests/README.md](tests/README.md).
+Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
+which is exactly what CI does: every push and pull request runs the offline suites and
+`pyright` on Windows (`.github/workflows/checks.yml`). The network and live tiers stay local,
+since they need YouTube, Ollama and a real bot token. A suite whose dependency is missing — Ollama not running, say — is reported as **SKIPPED**, never as passed. See [tests/README.md](tests/README.md).
 
 ## Troubleshooting
 

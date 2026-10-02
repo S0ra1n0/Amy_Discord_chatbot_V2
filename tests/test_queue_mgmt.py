@@ -10,10 +10,7 @@ from music import LoopMode
 def T(n, d=None, who="me"):
     return music.Track(title=n, query=n, duration=d, requested_by=who)
 
-fails = []
-def check(label, ok):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok: fails.append(label)
+from _check import check, finish
 
 print("=== is_playlist_url ===")
 for q, want in [
@@ -101,27 +98,16 @@ check("single page hides the hint",
 check("empty queue still renders",
       "Nothing is playing" in music.render_queue(None, deque(), LoopMode.OFF))
 
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails))
-    for f in fails: print("   -", f)
-    sys.exit(1)
-
 # ---- regression: youtu.be share links are single videos, not playlists ----
 print()
 print("=== is_playlist_url: youtu.be short links ===")
-fails2 = []
-def check2(label, ok):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok: fails2.append(label)
-
-check2("youtu.be/VIDEO?list=PL is a single video",
+check("youtu.be/VIDEO?list=PL is a single video",
        music.is_playlist_url("https://youtu.be/dQw4w9WgXcQ?list=PLabc") is False)
-check2("youtu.be/VIDEO is a single video",
+check("youtu.be/VIDEO is a single video",
        music.is_playlist_url("https://youtu.be/dQw4w9WgXcQ") is False)
-check2("youtube.com/playlist?list= is still a playlist",
+check("youtube.com/playlist?list= is still a playlist",
        music.is_playlist_url("https://www.youtube.com/playlist?list=PLabc") is True)
-check2("music.youtube.com playlist still detected",
+check("music.youtube.com playlist still detected",
        music.is_playlist_url("https://music.youtube.com/playlist?list=PLabc") is True)
 
 # ---- regression: an explicit skip must beat TRACK loop ----
@@ -129,29 +115,25 @@ print()
 print("=== advance_queue force_next (explicit skip) ===")
 cur = T("playing")
 q = deque([T("next")])
-check2("TRACK loop replays without force",
+check("TRACK loop replays without force",
        music.advance_queue(cur, deque([T("next")]), LoopMode.TRACK).title == "playing")
-check2("force_next overrides TRACK loop",
+check("force_next overrides TRACK loop",
        music.advance_queue(cur, q, LoopMode.TRACK, force_next=True).title == "next")
 
 # QUEUE rotation is still honoured on a forced skip
 q2 = deque([T("b")])
 nxt = music.advance_queue(T("a"), q2, LoopMode.QUEUE, force_next=True)
-check2("forced skip under QUEUE still rotates", nxt.title == "b" and [t.title for t in q2] == ["a"])
+check("forced skip under QUEUE still rotates", nxt.title == "b" and [t.title for t in q2] == ["a"])
 
 # force_next changes nothing for OFF
 q3 = deque([T("b")])
-check2("force_next is a no-op for OFF",
+check("force_next is a no-op for OFF",
        music.advance_queue(T("a"), q3, LoopMode.OFF, force_next=True).title == "b")
 
 # /skipto under TRACK loop reaches the requested track
 q4 = deque([T("a"), T("b"), T("c"), T("d")])
 music.drop_before(q4, 3)
-check2("skipto+TRACK lands on the requested track",
+check("skipto+TRACK lands on the requested track",
        music.advance_queue(T("playing"), q4, LoopMode.TRACK, force_next=True).title == "c")
 
-if fails2:
-    print("%d REGRESSION CHECK(S) FAILED" % len(fails2))
-    sys.exit(1)
-print()
-print("ALL QUEUE MANAGEMENT TESTS PASSED")
+finish("ALL QUEUE MANAGEMENT TESTS PASSED")

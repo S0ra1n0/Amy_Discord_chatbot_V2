@@ -1,0 +1,38 @@
+# Runs the offline test tier and the type checker on every push and pull request.
+# The network and live-Discord tiers stay local: they need YouTube, Ollama and a bot token.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    # Windows, because that's where Amy runs and where the suites are developed.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            constraints.txt
+
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Offline tests
+        run: python tests/run_tests.py
+
+      - name: Type check
+        run: python -m pyright --pythonpath "$(python -c 'import sys; print(sys.executable)')" *.py

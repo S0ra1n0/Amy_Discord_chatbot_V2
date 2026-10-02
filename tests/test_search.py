@@ -5,11 +5,7 @@ PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJ); os.chdir(PROJ)
 import discord, music, ui
 
-fails = []
-def check(label, ok, got=""):
-    print(("  PASS " if ok else "  FAIL ") + label)
-    if not ok:
-        fails.append(label); print("        got:", str(got)[:130])
+from _check import check, finish
 
 def T(title, dur=200, i=0):
     return music.Track(title=title, query="https://youtu.be/%d" % i,
@@ -112,7 +108,4 @@ async def live():
     check("custom limit honoured", len(short) <= 2, len(short))
 asyncio.run(live())
 
-print()
-if fails:
-    print("%d CHECK(S) FAILED" % len(fails)); sys.exit(1)
-print("ALL SEARCH TESTS PASSED")
+finish("ALL SEARCH TESTS PASSED")

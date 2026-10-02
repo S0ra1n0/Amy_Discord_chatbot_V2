@@ -1,5 +1,9 @@
-python-dotenv==1.2.2
-ollama==0.6.1
+# Indirect dependencies are pinned in constraints.txt, loaded here so this stays the one
+# install command.
+-c constraints.txt
+
+python-dotenv==1.2.4
+ollama==0.6.3
 httpx==0.28.1
 
 # The [voice] extra is required - it pulls PyNaCl (pinned <1.6 by discord.py) and
