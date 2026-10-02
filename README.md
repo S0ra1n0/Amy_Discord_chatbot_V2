@@ -465,6 +465,7 @@ naming it, without printing either value.
 - `HISTORY_LIMIT` is how many messages Amy remembers per channel. Defaults to `10`, minimum `2`. (Before this fix the value in `.env` was silently ignored and Amy always used 10: it was read before `.env` had been loaded.) This is a speed setting as well as a memory one, because every remembered message is replayed to the model on each reply: prompt processing measured 0.15s at 10 messages and 0.95s at 200. Raise it for a longer memory at the cost of slower replies; around `30` is the practical ceiling before the 4096-token context window starts squeezing the reply itself.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
 - `AMY_DB_PATH` is where Amy keeps conversation memory, settings and the saved music queue. Optional; defaults to `amy_memory.db` next to the bot. The test suite points this at a throwaway file for every run, so running the tests never reads or changes your real data.
+- `AMY_LOG_FILE` is Amy's log file, `amy.log` by default. Everything the console shows at INFO and above is also written there with a timestamp, and it rotates at about 1MB, keeping 5 old files (`amy.log.1` … `amy.log.5`), so a problem overnight leaves a trace after the console window has closed. The console's DEBUG lines — which include the text of every chat message — are deliberately **not** written to the file. Set it blank to turn the file off.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
 
@@ -550,6 +551,8 @@ Amy_chatbot_V2/
 ├── websearch.py            # DuckDuckGo search and the web_search tool
 ├── llm.py                  # Reasoning modes, model choice, system prompt (pure helpers)
 ├── config.py               # Reading settings: warns on bad values instead of crashing
+├── models.py               # Which Ollama model is active: /model, probing, warm-up
+├── logs.py                 # Logging: the console, plus a rotating amy.log
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
@@ -557,6 +560,7 @@ Amy_chatbot_V2/
 ├── requirements-dev.txt    # + pyright, for running the checks
 ├── .github/workflows/      # CI: offline tests + type check on every push
 ├── amy_memory.db           # SQLite conversation store, auto-created (Git ignored)
+├── amy.log                 # Rotating log file, auto-created (Git ignored)
 ├── .venv/                  # Virtual environment (Git ignored)
 ├── .vscode/                # Editor settings, points at .venv (Git ignored)
 ├── .env                    # Environment variables (Git ignored)
@@ -576,7 +580,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-21 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+22 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and
@@ -603,6 +607,10 @@ older commit. Amy refuses to touch it rather than read and write tables whose la
 know. Update to the latest code, or point `AMY_DB_PATH` at a different file. Upgrades go the
 other way automatically: on first start, a newer Amy migrates an older database in place, in a
 single transaction, keeping all history and settings.
+
+**Something went wrong while nobody was watching:**
+
+Look in `amy.log` (and `amy.log.1` … for older entries). Every warning and error, with full tracebacks for crashes, is written there with a timestamp — including the errors behind "Something went wrong running that command" replies.
 
 **Bot doesn't respond to chat:**
 

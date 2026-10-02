@@ -139,4 +139,26 @@ check("the file is left at its version", _c.execute("PRAGMA user_version").fetch
 _c.close()
 os.remove(_newer)
 
+print()
+print("=== startup warnings land in the log file, not just the console ===")
+# Everything used to be print()ed, so a bad setting noticed overnight left no trace once the
+# console closed. AMY_LOG_FILE points the bot's rotating log somewhere; check it's written.
+_logfile = tempfile.mktemp(prefix="amy_test_", suffix=".log")
+code, res, out = probe({"WEB_SEARCH": "ture", "DISCORD_TOKEN": "tok-should-never-be-logged"},
+                       extra_env={"AMY_LOG_FILE": _logfile})
+check("the bot imports", code == 0 and res is not None, out[-300:])
+_text = open(_logfile, encoding="utf-8").read() if os.path.exists(_logfile) else ""
+check("the WEB_SEARCH warning is in the file", "WEB_SEARCH" in _text and "WARNING" in _text,
+      _text[-300:])
+check("the console still shows it", any("[WARNING]" in l and "WEB_SEARCH" in l
+                                        for l in out.splitlines()))
+check("the token appears nowhere in the file", "tok-should-never-be-logged" not in _text)
+import logging as _logging
+for _h in _logging.getLogger().handlers:
+    _h.close()
+try:
+    os.remove(_logfile)
+except OSError:
+    pass
+
 finish("ALL CONFIG TESTS PASSED")

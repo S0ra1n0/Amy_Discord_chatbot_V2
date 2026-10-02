@@ -28,8 +28,8 @@ def check(label, ok, detail=""):
     record(label, ok)
 
 print("=== constants: code vs README ===")
-check("model name in README matches code (%s)" % amy.model,
-      amy.model in readme, "README still references an old model")
+check("model name in README matches code (%s)" % amy.model_manager.current,
+      amy.model_manager.current in readme, "README still references an old model")
 check("rate limit %d/hour documented" % amy.RATE_LIMIT_MAX,
       "5 chat messages per hour" in readme or "5 messages per hour" in readme)
 check("voice cooldown %d/min documented" % amy.VOICE_CMD_MAX,

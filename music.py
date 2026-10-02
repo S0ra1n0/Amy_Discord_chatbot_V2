@@ -1,6 +1,7 @@
 # music.py
 """Music playback: track resolution, per-guild queues, and the playback engine."""
 
+import logging
 import asyncio
 import os
 import random
@@ -14,8 +15,7 @@ from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Tuple
 
 import discord
 
-# Set by the bot at startup so this module can log without importing it back
-log: Callable[[str], None] = print
+log = logging.getLogger("amy.music")
 
 #----Configuration------
 # -nostdin stops FFmpeg competing for the console; the reconnect flags keep a stream
@@ -789,7 +789,7 @@ async def build_source(
             )
         except Exception as e:
             # Probing can fail on odd sources; PCM always works
-            log(f"[WARNING] Opus probe failed, using PCM: {e}")
+            log.warning(f"Opus probe failed, using PCM: {e}")
 
     source = discord.FFmpegPCMAudio(
         stream_url,
@@ -828,8 +828,8 @@ def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
     player.cancel_idle()
     voice_client.play(source, after=on_finished)
     player.mark_started(start_at)
-    log(f"[INFO] Now playing: {track.title}"
-        + (f" (from {format_duration(int(start_at))})" if start_at else ""))
+    log.info(f"Now playing: {track.title}"
+             + (f" (from {format_duration(int(start_at))})" if start_at else ""))
 
 
 async def play_track(
@@ -850,7 +850,7 @@ async def play_track(
     source = await prepare_source(track, player.volume, start_at)
     if player.generation != generation:
         _discard(source)
-        log(f"[INFO] Not starting {track.title}: playback was stopped while it loaded")
+        log.info(f"Not starting {track.title}: playback was stopped while it loaded")
         return False
     _start(voice_client, player, track, source, on_finished, start_at)
     return True
@@ -883,7 +883,7 @@ async def restart_at(
     source = await prepare_source(track, player.volume, position)   # raises: nothing changed
     if player.generation != generation:
         _discard(source)
-        log(f"[INFO] Not seeking {track.title}: playback was stopped while it loaded")
+        log.info(f"Not seeking {track.title}: playback was stopped while it loaded")
         return False
     voice_client.stop()
     _start(voice_client, player, track, source, on_finished, position)
@@ -906,10 +906,10 @@ def make_after_callback(
     """
     def _after(error: Optional[Exception]) -> None:
         if error:
-            log(f"[ERROR] Playback error: {error}")
+            log.error(f"Playback error: {error}")
         try:
             asyncio.run_coroutine_threadsafe(advance(), loop)
         except Exception as e:  # loop already closed during shutdown
-            log(f"[WARNING] Could not schedule next track: {e}")
+            log.warning(f"Could not schedule next track: {e}")
 
     return _after

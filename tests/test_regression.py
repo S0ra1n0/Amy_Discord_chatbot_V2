@@ -110,7 +110,7 @@ def _fake_chat(*a, **kw):
 
 amy.ollama.chat = _fake_chat
 try:
-    _asyncio.run(amy.warm_model())
+    _asyncio.run(amy.model_manager.warm())
     assert len(_calls) == 1, "warm_model should issue exactly one request"
     assert _calls[0].get("messages") == [],         "preload must send no messages, or it generates a throwaway reply"
     assert _calls[0].get("keep_alive") == amy.OLLAMA_KEEP_ALIVE,         "the preload must carry keep_alive, else it unloads again in 5 minutes"
@@ -118,7 +118,7 @@ try:
     def _boom(*a, **kw):
         raise ConnectionError("Ollama is not running")
     amy.ollama.chat = _boom
-    _asyncio.run(amy.warm_model())          # must log and return, not raise
+    _asyncio.run(amy.model_manager.warm())          # must log and return, not raise
     print("model warm-up: OK (empty preload, carries keep_alive, survives a dead Ollama)")
 finally:
     amy.ollama.chat = _real_chat
@@ -270,9 +270,9 @@ print("snapshot task: OK (every %ds)" % amy.SNAPSHOT_INTERVAL)
 assert amy.OLLAMA_THINK in amy.THINK_MODES, "the configured default must be a valid mode"
 print("configured think mode is valid: OK (%s)" % amy.OLLAMA_THINK)
 
-assert 0 < amy.PROBE_MAX_TOKENS <= 1024, "the probe must stay cheap"
-assert 0 < amy.PROBE_TIMEOUT <= 120, "the probe must stay bounded - /model used to be instant"
-print("probe bounds: OK (<=%d tokens, <=%.0fs)" % (amy.PROBE_MAX_TOKENS, amy.PROBE_TIMEOUT))
+assert 0 < amy.models.PROBE_MAX_TOKENS <= 1024, "the probe must stay cheap"
+assert 0 < amy.models.PROBE_TIMEOUT <= 120, "the probe must stay bounded - /model used to be instant"
+print("probe bounds: OK (<=%d tokens, <=%.0fs)" % (amy.models.PROBE_MAX_TOKENS, amy.models.PROBE_TIMEOUT))
 
 # ---- The prompt must not promise tools that aren't offered -----------------------------
 # With search off, the old prompt still said she had a working search tool - and she acted
@@ -299,7 +299,7 @@ print("system prompt: OK (claims match the tools actually offered)")
 D = amy.DEFAULT_MODEL
 
 _real_chat, _real_list = amy.ollama.chat, amy.ollama.list
-_real_model = amy.model
+_real_model = amy.model_manager.current
 
 
 def _dead_chat(*a, **kw):
@@ -309,7 +309,7 @@ def _dead_chat(*a, **kw):
 def _scenario(installed, label):
     """Run startup verification for a saved non-default model; return (active, stored)."""
     amy.db.set_setting("model", "big:7b")
-    amy.model = "big:7b"
+    amy.model_manager.current = "big:7b"
     amy.ollama.chat = _dead_chat
 
     def _list(*a, **kw):
@@ -318,8 +318,8 @@ def _scenario(installed, label):
         return {"models": [{"model": m} for m in installed]}
 
     amy.ollama.list = _list
-    _asyncio.run(amy.verify_restored_model())
-    return amy.model, amy.db.get_setting("model")
+    _asyncio.run(amy.model_manager.verify_restored())
+    return amy.model_manager.current, amy.db.get_setting("model")
 
 
 try:
@@ -336,30 +336,36 @@ try:
     assert stored == "big:7b", \
         "the fallback is in memory only - reinstalling the model must bring the choice back"
 
-    # warm_model is a plain preload now: whatever happens, it never changes the active model.
-    amy.model = "chosen:1"
+    # warm is a plain preload now: whatever happens, it never changes the active model.
+    # Warm a DIFFERENT model than the active one - warming the active one can't reveal a
+    # warm() that quietly sets current = target, because nothing would visibly change.
+    amy.model_manager.current = "chosen:1"
     amy.ollama.chat = _dead_chat
-    ok = _asyncio.run(amy.warm_model("chosen:1"))
+    ok = _asyncio.run(amy.model_manager.warm("other:2"))
     assert ok is False, "a failed preload reports failure"
-    assert amy.model == "chosen:1", "warm_model must never switch models: %s" % amy.model
+    assert amy.model_manager.current == "chosen:1",         "warm must never switch models (failed load): %s" % amy.model_manager.current
+    amy.ollama.chat = lambda **kw: {"done": True}
+    assert _asyncio.run(amy.model_manager.warm("other:2")) is True
+    assert amy.model_manager.current == "chosen:1",         "warm must never switch models (successful load): %s" % amy.model_manager.current
+    amy.ollama.chat = _dead_chat                # the next scenario needs loads to fail
 
     # An admin who switches while startup verification is still running must win. Simulate
     # it by switching from inside the (slow) Ollama listing call.
     amy.db.set_setting("model", "big:7b")
-    amy.model = "big:7b"
+    amy.model_manager.current = "big:7b"
 
     def _list_while_admin_switches(*a, **kw):
-        amy.model = "admins:pick"
+        amy.model_manager.current = "admins:pick"
         return {"models": [{"model": D}]}
 
     amy.ollama.list = _list_while_admin_switches
-    _asyncio.run(amy.verify_restored_model())
-    assert amy.model == "admins:pick", \
-        "startup fallback must not overwrite a /model made meanwhile: %s" % amy.model
+    _asyncio.run(amy.model_manager.verify_restored())
+    assert amy.model_manager.current == "admins:pick", \
+        "startup fallback must not overwrite a /model made meanwhile: %s" % amy.model_manager.current
     print("verify_restored_model: OK (keeps the choice unless Ollama confirms it is gone)")
 finally:
     amy.ollama.chat, amy.ollama.list = _real_chat, _real_list
-    amy.model = _real_model
+    amy.model_manager.current = _real_model
 
 # ---- Review M8: the /model probe's decisions, offline -----------------------------------
 # These used to be reachable only through a live Ollama, in a network-tier suite that
@@ -367,7 +373,8 @@ finally:
 LEAK = "Okay, the user wants to know what 2 + 2 is. Let me think about that."
 # judge_probe_reply itself is tested in test_llm.py; this drives the probe end to end.
 
-_m8_saved = (amy.ollama.chat, amy.ollama.list, amy.OLLAMA_THINK, amy.model)
+_m8_saved = (amy.ollama.chat, amy.ollama.list, amy.model_manager.think_default,
+             amy.model_manager.current)
 
 
 def _scripted(replies, calls):
@@ -384,7 +391,7 @@ def _scripted(replies, calls):
 
 
 try:
-    amy.OLLAMA_THINK = "false"
+    amy.model_manager.think_default = "false"
     for replies, want, want_calls, label in [
         ({False: ("2 + 2 = 4.", "")}, "false", [False], "clean under the default"),
         ({False: (LEAK, ""), None: ("4", "")}, "auto", [False, None], "leaks, then clean"),
@@ -395,33 +402,33 @@ try:
     ]:
         calls = []
         amy.ollama.chat = _scripted(replies, calls)
-        got = _asyncio.run(amy.probe_think_mode("m:1"))
+        got = _asyncio.run(amy.model_manager.probe_think_mode("m:1"))
         assert got == want, "%s: probe returned %r, wanted %r" % (label, got, want)
         assert [c["think"] for c in calls] == want_calls, \
             "%s: tried %r" % (label, [c["think"] for c in calls])
-        assert all(c["keep_alive"] == amy.PROBE_KEEP_ALIVE for c in calls), \
+        assert all(c["keep_alive"] == amy.models.PROBE_KEEP_ALIVE for c in calls), \
             "the probe must not hold a rejected candidate for the long keep-alive"
 
     # With OLLAMA_THINK already "auto", the probe used to try "auto" twice - wasting up to a
     # full timeout on a model that fails it.
-    amy.OLLAMA_THINK = "auto"
+    amy.model_manager.think_default = "auto"
     calls = []
     amy.ollama.chat = _scripted({None: (LEAK, "")}, calls)
-    assert _asyncio.run(amy.probe_think_mode("m:1")) is None
+    assert _asyncio.run(amy.model_manager.probe_think_mode("m:1")) is None
     assert len(calls) == 1, "each mode is tried once, not %d times" % len(calls)
     print("probe_think_mode: OK (accepts, falls back, gives up, never repeats a mode)")
 
     # switch_model: release the outgoing model FIRST, then probe, then record the result.
-    amy.OLLAMA_THINK = "false"
-    amy.model = amy.DEFAULT_MODEL
+    amy.model_manager.think_default = "false"
+    amy.model_manager.current = amy.DEFAULT_MODEL
     calls = []
     amy.ollama.chat = _scripted({False: (LEAK, ""), None: ("4", "")}, calls)
     amy.ollama.list = lambda: {"models": [{"model": amy.DEFAULT_MODEL}, {"model": "big:4b"}]}
 
     async def _switch():
-        out = await amy.switch_model("big:4b")
-        if amy._warmup_task is not None:
-            await amy._warmup_task           # let the post-switch warm-up finish here
+        out = await amy.model_manager.switch("big:4b")
+        if amy.model_manager.warmup_task is not None:
+            await amy.model_manager.warmup_task           # let the post-switch warm-up finish here
         return out
 
     out = _asyncio.run(_switch())
@@ -431,20 +438,66 @@ try:
         "the old model must be released before anything else loads: %r" % first
     probes = [c for c in calls[1:] if c["messages"]]
     assert probes and all(c["model"] == "big:4b" for c in probes), probes
-    assert amy.model == "big:4b"
+    assert amy.model_manager.current == "big:4b"
     assert amy.db.get_setting("model") == "big:4b", "the switch must persist"
     assert amy.db.get_setting("think_mode:big:4b") == "auto", "the probed mode must persist"
-    assert amy.think_mode_for("big:4b") == "auto"
+    assert amy.model_manager.think_mode_for("big:4b") == "auto"
     assert "auto" in out, "the admin is told this model needs a different mode: %r" % out
 
     calls.clear()
-    out = _asyncio.run(amy.switch_model("not:installed"))
+    out = _asyncio.run(amy.model_manager.switch("not:installed"))
     assert "not found" in out and calls == [], \
         "an unknown model is refused before anything is loaded or released"
-    assert amy.model == "big:4b", "a refused switch changes nothing"
+    assert amy.model_manager.current == "big:4b", "a refused switch changes nothing"
     print("switch_model: OK (releases first, probes, persists, refuses unknown models)")
 finally:
-    amy.ollama.chat, amy.ollama.list, amy.OLLAMA_THINK, amy.model = _m8_saved
+    (amy.ollama.chat, amy.ollama.list, amy.model_manager.think_default,
+     amy.model_manager.current) = _m8_saved
+
+# ---- a chat reply uses the ACTIVE model and that model's reasoning mode ----------------
+# The per-model think setting is the rule that keeps qwen3:4b from pasting its reasoning into
+# Discord, but nothing exercised the one place it's applied: chat_streaming's call to
+# ollama.chat. Drive a whole reply against a fake stream and look at what was sent.
+class _FakeMsg:
+    def __init__(self):
+        self.edits = []
+        self.channel = self
+
+    async def edit(self, content=None, **kw):
+        self.edits.append(content)
+
+    async def send(self, content=None, **kw):
+        return self
+
+
+_chat_calls = []
+
+
+def _fake_stream(**kw):
+    _chat_calls.append(kw)
+    return iter([{"message": {"content": "Four."}, "done": True, "done_reason": "stop"}])
+
+
+_saved_chat = (amy.ollama.chat, amy.model_manager.current, amy.WEB_SEARCH)
+amy.ollama.chat = _fake_stream
+amy.WEB_SEARCH = False                      # no tool pass; this is about the plain reply
+try:
+    amy.db.set_setting("think_mode:needs:auto", "auto")
+    amy.model_manager.current = "needs:auto"
+    _msg = _FakeMsg()
+    _asyncio.run(amy.chat_streaming("what is 2+2", "srv", 4242, _msg))
+    assert _chat_calls and _chat_calls[-1]["model"] == "needs:auto",         "the reply must use the active model: %r" % (_chat_calls[-1:],)
+    assert _chat_calls[-1]["think"] is None,         "a model recorded as 'auto' must be sent think=None, not the global default: %r"         % _chat_calls[-1]["think"]
+    assert _chat_calls[-1]["keep_alive"] == amy.OLLAMA_KEEP_ALIVE
+    assert _msg.edits[-1] == "Four.", "the reply reaches the message: %r" % _msg.edits[-1:]
+
+    amy.model_manager.current = "never:probed"      # nothing recorded -> configured default
+    _asyncio.run(amy.chat_streaming("again", "srv", 4242, _FakeMsg()))
+    assert _chat_calls[-1]["model"] == "never:probed"
+    assert _chat_calls[-1]["think"] is amy.think_value(amy.OLLAMA_THINK),         "an unprobed model falls back to OLLAMA_THINK: %r" % _chat_calls[-1]["think"]
+    print("chat_streaming: OK (active model, its own reasoning mode, reply delivered)")
+finally:
+    amy.ollama.chat, amy.model_manager.current, amy.WEB_SEARCH = _saved_chat
 
 print()
 print("ALL REGRESSION TESTS PASSED")

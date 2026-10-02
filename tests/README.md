@@ -57,6 +57,7 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | `test_config.py` | parsing settings (bad values warn and fall back), and loading them end to end in a fresh process per scenario: `.env` values actually take effect, and a setting shadowed by the system environment is reported without leaking its value |
 | `test_llm.py` | `llm.py` on its own, with no bot, client or database: reasoning modes, leak detection, probe judging, startup model choice, system prompt assembly. Fails if importing `llm` pulls in Discord or Ollama |
 | `test_schema.py` | schema migrations on throwaway files: an unversioned database upgrades without losing rows, a failed migration changes nothing, a database from a newer Amy is refused (and its file released), and no shipped migration has been edited |
+| `test_logs.py` | `logs.py` alone: console format, DEBUG kept out of the file, tracebacks recorded, rotation, re-setup never doubles lines, an unopenable file reported not raised, a console that can't encode emoji |
 | `test_docs_audit.py` | every command appears in both the help text and the README; every helper `ARCHITECTURE.md` names still exists, and every module is in its table |
 
 **Network** — needs internet; slower and can fail if YouTube changes.
@@ -99,6 +100,7 @@ Several were written *after* a bug reached the running bot, and now stop it recu
   verified by appending a failing check after `finish` in four suites — each exits 1.
 - `test_schema.py` — `ConversationDB` leaked its SQLite connection when opening failed: the error raised out of `__init__` and nothing ever closed it, so on Windows the database file stayed locked until garbage collection. Found while writing the schema tests, when the temp directory couldn't be deleted.
 - `test_queue_cmds.py` — `/play` squashed runs of spaces in the query, so a local file named `My  Song.mp3` could never be found: the old string dispatcher split every argument on whitespace and joined it back. The typed handlers pass the query through; the test drives the real slash callbacks (`slash(...)`), which also covers the argument wiring and the commands that had no direct test until then (pause, resume, skip, nowplaying, volume, loop). Writing it showed `/volume <level>` had never run in a test: the fake voice client lacked `source`.
+- `test_regression.py` — moving model management into `models.py` showed two gaps by mutation: nothing tested which model and reasoning mode a chat reply actually sends to Ollama (the per-model rule's one point of use, in `chat_streaming`), and the "warm never switches models" check warmed the model that was already active, so a `warm` that set `current = target` passed. Both are covered now.
 - **Every suite that imports the bot** — failed on a fresh clone. With no `.env` the bot exits
   at import for want of a `DISCORD_TOKEN`, so 8 of the 14 offline suites failed, though both
   READMEs said they needed no token. Found by running them from a clean `git clone` before

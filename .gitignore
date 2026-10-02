@@ -47,6 +47,7 @@ Thumbs.db
 
 # Project specific
 *.log
+*.log.*          # rotated logs: amy.log.1 ... amy.log.5
 amy_memory.db
 
 # Agent working notes - local only, not for people pulling the repo

@@ -4,8 +4,8 @@
 import os
 import re
 import time
-import traceback
 import asyncio
+import logging
 import random
 import httpx
 from collections import defaultdict
@@ -30,6 +30,9 @@ import music
 from music import LoopMode, MusicManager
 import websearch
 import llm
+import logs
+import models
+from models import ModelManager
 # Re-exported so the rest of this file - and tests reaching in as amy.<name> - keep working.
 from llm import (  # noqa: F401
     _REASONING_OPENERS,
@@ -51,20 +54,6 @@ from ui import Reply
 #----------------------------------
 
 #----Utility Functions------
-def safe_print(message: str) -> None:
-    """
-    Safe print function that handles Unicode encoding errors on Windows.
-    Writes directly to stdout buffer to bypass cp1252 encoding.
-    """
-    try:
-        print(message)
-    except UnicodeEncodeError:
-        import sys
-        sys.stdout.buffer.write(message.encode('utf-8', errors='replace'))
-        sys.stdout.buffer.write(b'\n')
-        sys.stdout.buffer.flush()
-
-
 MAX_DICE_SIDES: int = 1000     # Guard rails for /dice - the roll runs on the
 MAX_DICE_AMOUNT: int = 100     # event loop, so an unbounded amount freezes the bot
 MAX_DISCORD_LEN: int = 2000
@@ -88,10 +77,16 @@ def find_split_index(text: str, limit: int) -> int:
 # setting defined both system-wide and in .env silently takes the system value. Report any.
 _env_before_dotenv = dict(os.environ)
 load_dotenv()
+# Console as it always looked, plus a rotating file (logs.py). Set up before anything
+# below can warn. AMY_LOG_FILE blank turns the file off; the tests point it at a temp file.
+log = logging.getLogger("amy")
+_log_problem = logs.setup_logging(os.getenv("AMY_LOG_FILE", "amy.log").strip())
+if _log_problem:
+    log.warning(_log_problem)
 for _name in config.shadowed_settings(_env_before_dotenv, dotenv_values()):
     # Names only - the values may be secrets.
-    safe_print(f"[WARNING] {_name} is set both in your system environment and in .env, "
-               f"with different values. The system value wins; the .env line is ignored.")
+    log.warning(f"{_name} is set both in your system environment and in .env, "
+                f"with different values. The system value wins; the .env line is ignored.")
 del _env_before_dotenv
 
 
@@ -99,7 +94,7 @@ def _setting(parsed):
     """Unpack a config.parse_* result, logging the problem if the raw value was unusable."""
     value, problem = parsed
     if problem:
-        safe_print("[WARNING] " + problem)
+        log.warning(problem)
     return value
 
 
@@ -121,8 +116,8 @@ _raw_think = os.getenv("OLLAMA_THINK")
 OLLAMA_THINK: str = normalise_think_mode(_raw_think, fallback="")
 if not OLLAMA_THINK:
     if _raw_think and _raw_think.strip():
-        safe_print(f"[WARNING] OLLAMA_THINK={_raw_think.strip()!r} isn't false, true or auto; "
-                   f"using false.")
+        log.warning(f"OLLAMA_THINK={_raw_think.strip()!r} isn't false, true or auto; "
+                    f"using false.")
     OLLAMA_THINK = "false"
 # Web search is on by default. Turn it off if DuckDuckGo starts refusing requests -
 # it scrapes their HTML page, so it can break the way yt-dlp does.
@@ -137,14 +132,6 @@ WEB_SEARCH: bool = _setting(config.parse_bool("WEB_SEARCH", os.getenv("WEB_SEARC
 # for this long after the last message. Set "0" to restore the old unload-immediately
 # behaviour, or a longer window like "2h" on a dedicated machine.
 OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "30m").strip() or "30m"
-# Bounds on the /model reasoning probe. Switching models forces Ollama to load the new one,
-# so an unbounded probe can take minutes - one measured run sat at 337s. A leaking model
-# gives itself away in its first few words, so a short generation is enough.
-PROBE_MAX_TOKENS: int = 256
-PROBE_TIMEOUT: float = 60.0
-# Long enough that the second probe attempt reuses the loaded model, short enough that a
-# rejected candidate does not sit in VRAM.
-PROBE_KEEP_ALIVE: str = "2m"
 # How far back Amy remembers, and how much is replayed to the model each reply. The cap
 # itself lives in database.py because storage enforces it too; this is the single source of
 # truth for both. It is a speed knob as well as a memory one - every stored message is sent
@@ -157,7 +144,7 @@ _raw_guild = os.getenv("GUILD_ID", "").strip()
 GUILD_ID: Optional[int] = int(_raw_guild) if _raw_guild.isdigit() else None
 
 if not discord_token:
-    safe_print("[ERROR] DISCORD_TOKEN not found in .env file. Please add it and try again.")
+    log.error("DISCORD_TOKEN not found in .env file. Please add it and try again.")
     exit(1)
 
 intents = discord.Intents.default()
@@ -181,7 +168,6 @@ bot = discord.Client(intents=intents, allowed_mentions=NO_MASS_PINGS)
 # This is the fallback: the value actually used is restored from saved settings below, and
 # comes back to this if nothing was saved or the saved model is no longer installed.
 DEFAULT_MODEL: str = os.getenv("OLLAMA_MODEL", "").strip() or "qwen3.5:2b"
-model = DEFAULT_MODEL
 BASE_SYSTEM_PROMPT = '''You are Amy, a sophisticated and helpful personal assistant with the demeanor of a professional secretary.
 
 Personality Traits:
@@ -215,28 +201,26 @@ try:
     db = ConversationDB(DB_PATH, max_messages=HISTORY_LIMIT)
 except SchemaTooNewError as e:
     # Written by a newer Amy (an older checkout is running). Refusing beats corrupting.
-    safe_print(f"[ERROR] {DB_PATH}: {e}")
+    log.error(f"{DB_PATH}: {e}")
     exit(1)
 #----------------------------------------------
 
 #----Voice & Music------
 voice_manager = VoiceManager(db)
 music_manager = MusicManager()
-music.log = safe_print  # let music.py log through the Windows-safe printer
-websearch.log = safe_print
 #----------------------------------------------
 
 #----Bot State------
 # /toggle and /model are persisted. As plain globals they reset on every restart, so an
 # admin could switch to a bigger model, restart, and be silently back on the default - with
 # nothing but /status to reveal it. The saved model is verified against Ollama at startup
-# (see warm_model), because checking it needs a network call this module-level code can't make.
-model = db.get_setting("model") or DEFAULT_MODEL
+# (ModelManager.verify_restored), because checking needs a network call this code can't make.
+model_manager = ModelManager(db, DEFAULT_MODEL, OLLAMA_THINK, OLLAMA_KEEP_ALIVE)
 bot_enabled: bool = db.get_bool_setting("bot_enabled", True)
-if model != DEFAULT_MODEL:
-    safe_print(f"[INFO] Restored saved model: {model}")
+if model_manager.current != DEFAULT_MODEL:
+    log.info(f"Restored saved model: {model_manager.current}")
 if not bot_enabled:
-    safe_print("[INFO] Restored saved state: responses are OFF (use /toggle to enable)")
+    log.info("Restored saved state: responses are OFF (use /toggle to enable)")
 #----------------------------------------------
 
 #----Slash Command Tree------
@@ -399,11 +383,11 @@ async def prune_old_messages_task() -> None:
     loop = asyncio.get_running_loop()
     deleted = await loop.run_in_executor(None, db.prune_old_messages, DB_PRUNE_DAYS)
     if deleted:
-        safe_print(f"[INFO] Pruned {deleted} message(s) older than {DB_PRUNE_DAYS} days")
+        log.info(f"Pruned {deleted} message(s) older than {DB_PRUNE_DAYS} days")
 
     dropped = prune_rate_limit_stores()
     if dropped:
-        safe_print(f"[INFO] Dropped {dropped} expired rate-limit entr(ies)")
+        log.info(f"Dropped {dropped} expired rate-limit entr(ies)")
 
 
 #----Queue Persistence------
@@ -445,7 +429,7 @@ def snapshot_player(guild_id: int) -> None:
             resume_position=player.position() if player.current is not None else 0.0,
         )
     except Exception as e:
-        safe_print(f"[WARNING] Could not save the queue for guild {guild_id}: {e}")
+        log.warning(f"Could not save the queue for guild {guild_id}: {e}")
 
 
 @tasks.loop(seconds=SNAPSHOT_INTERVAL)
@@ -501,7 +485,7 @@ async def restore_player(guild: discord.Guild) -> bool:
 
     if action is voice.RestoreAction.NOTHING:
         if player_active:
-            safe_print(f"[INFO] Guild {guild.id} is already playing - saved queue discarded")
+            log.info(f"Guild {guild.id} is already playing - saved queue discarded")
         db.clear_player_state(guild.id)
         return False
 
@@ -513,11 +497,11 @@ async def restore_player(guild: discord.Guild) -> bool:
     # Kept for whichever starts it - an immediate resume below, or a later /play or /join
     player.resume_position = max(0.0, float(state["resume_position"]))
     db.clear_player_state(guild.id)             # consumed; the snapshot task rewrites it
-    safe_print(f"[INFO] Restored {len(tracks)} track(s) for guild {guild.id}")
+    log.info(f"Restored {len(tracks)} track(s) for guild {guild.id}")
 
     if action is voice.RestoreAction.QUEUE_ONLY:
         where = f"{channel.name} is empty" if channel else "the channel is gone"
-        safe_print(f"[INFO] {where} - queue restored but not resumed")
+        log.info(f"{where} - queue restored but not resumed")
         return True
 
     assert channel is not None                  # RESUME implies a channel with people in it
@@ -528,11 +512,11 @@ async def restore_player(guild: discord.Guild) -> bool:
             try:
                 await voice.connect_to(channel)
             except Exception as e:
-                safe_print(f"[WARNING] Could not rejoin {channel.name} to resume: {e}")
+                log.warning(f"Could not rejoin {channel.name} to resume: {e}")
                 return True
 
     await advance_playback(guild)               # no-op if a command already started playback
-    safe_print(f"[INFO] Resumed playback in {channel.name}")
+    log.info(f"Resumed playback in {channel.name}")
     return True
 
 
@@ -559,7 +543,7 @@ async def restore_saved_queues() -> int:
             if await restore_player(saved_guild):
                 restored += 1
         except Exception as e:
-            safe_print(f"[WARNING] Could not restore the queue for {saved_id}: {e}")
+            log.warning(f"Could not restore the queue for {saved_id}: {e}")
     return restored
 
 
@@ -592,7 +576,7 @@ def cleanup_guild_music(guild_id: int) -> None:
     try:
         db.clear_player_state(guild_id)
     except Exception as e:                      # never let persistence break leaving voice
-        safe_print(f"[WARNING] Could not clear the saved queue for {guild_id}: {e}")
+        log.warning(f"Could not clear the saved queue for {guild_id}: {e}")
 #----------------------------------------------
 
 #----Streaming Chat------
@@ -630,14 +614,15 @@ async def chat_streaming(
             # Passed explicitly rather than via **kwargs: the ollama stubs are overloaded
             # and a kwargs dict defeats overload matching. The mode is looked up per model,
             # because think=False is right for one model and ruinous for another.
-            thinking = think_value(think_mode_for(model))
+            active = model_manager.current     # once, so the name and its mode agree
+            thinking = think_value(model_manager.think_mode_for(active))
             if offer_tools:
-                stream = ollama.chat(model=model, messages=convo, stream=True,
+                stream = ollama.chat(model=active, messages=convo, stream=True,
                                      think=thinking,
                                      keep_alive=OLLAMA_KEEP_ALIVE,
                                      tools=[websearch.WEB_SEARCH_TOOL])
             else:
-                stream = ollama.chat(model=model, messages=convo, stream=True,
+                stream = ollama.chat(model=active, messages=convo, stream=True,
                                      think=thinking,
                                      keep_alive=OLLAMA_KEEP_ALIVE)
             for chunk in stream:
@@ -652,10 +637,10 @@ async def chat_streaming(
                     error_flag["done_reason"] = reason
                 loop.call_soon_threadsafe(chunk_queue.put_nowait, content)
         except httpx.ConnectError as e:
-            safe_print(f"[WARNING] Ollama unavailable during stream: {e}")
+            log.warning(f"Ollama unavailable during stream: {e}")
             error_flag["occurred"] = True
         except Exception as e:
-            safe_print(f"[ERROR] Streaming error: {e}")
+            log.error(f"Streaming error: {e}")
             error_flag["occurred"] = True
         finally:
             loop.call_soon_threadsafe(chunk_queue.put_nowait, None)  # Sentinel: stream done
@@ -717,7 +702,7 @@ async def chat_streaming(
         # Freshness is inferred from the query wording rather than asked of the model - a
         # second tool parameter measurably cost search decisions (see websearch.py).
         recency = websearch.infer_recency(query)
-        safe_print(f"[INFO] Web search requested: {query!r} (recency={recency or 'any'})")
+        log.info(f"Web search requested: {query!r} (recency={recency or 'any'})")
 
         try:
             await active_msg.edit(content=f"🔍 Searching the web for **{query[:80]}**...")
@@ -764,7 +749,7 @@ async def chat_streaming(
         # Empty output almost always means the model hit its token ceiling rather than
         # having nothing to say, so don't tell the user to rephrase - it won't help.
         if error_flag.get("done_reason") == "length":
-            safe_print("[WARNING] Model hit its token limit before producing an answer")
+            log.warning("Model hit its token limit before producing an answer")
             final_response = (
                 "I ran out of room before I could finish that answer. "
                 "Try asking for something shorter, or ask an admin to raise my limit."
@@ -782,7 +767,7 @@ async def chat_streaming(
     try:
         await active_msg.edit(content=pending if pending else "✅ Done.")
     except discord.HTTPException as e:
-        safe_print(f"[ERROR] Failed to edit final message: {e}")
+        log.error(f"Failed to edit final message: {e}")
 #----------------------------------------------
 
 #----Voice Command Handlers------
@@ -837,13 +822,13 @@ async def execute_voice_command(
             except RuntimeError as e:
                 # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
                 # Report what it actually said rather than guessing which one.
-                safe_print(f"[ERROR] Voice connect failed: {e}")
+                log.error(f"Voice connect failed: {e}")
                 return Reply(embed=ui.error_embed(
                     f"Voice support isn't fully installed on my host: {e}\n"
                     "Fix: `pip install \"discord.py[voice]\"`"
                 ))
             except (discord.ClientException, asyncio.TimeoutError) as e:
-                safe_print(f"[ERROR] Voice connect failed: {e}")
+                log.error(f"Voice connect failed: {e}")
                 return Reply(embed=ui.error_embed(f"I couldn't connect to **{target.name}**. Please try again."))
 
         # A queue may be waiting with nothing playing - typically one restored quietly after
@@ -876,7 +861,7 @@ async def execute_voice_command(
             except discord.Forbidden:
                 return Reply(embed=ui.error_embed("Discord refused that. Check my **Manage Channels** permission."))
             except discord.HTTPException as e:
-                safe_print(f"[ERROR] Channel creation failed: {e}")
+                log.error(f"Channel creation failed: {e}")
                 return Reply(embed=ui.error_embed("I couldn't create that channel. Please try again."))
 
             try:
@@ -886,7 +871,7 @@ async def execute_voice_command(
                 else:
                     await voice.connect_to(channel)
             except Exception as e:
-                safe_print(f"[ERROR] Could not join newly created channel: {e}")
+                log.error(f"Could not join newly created channel: {e}")
                 # Channel exists but Amy couldn't join - don't orphan it
                 try:
                     await channel.delete(reason="Amy could not join the channel she created")
@@ -1146,7 +1131,7 @@ class SearchResults(discord.ui.View):
                 async with voice_manager.lock_for(guild.id):
                     await voice.connect_to(state.channel)
             except Exception as e:
-                safe_print(f"[ERROR] Voice connect failed during search pick: {e}")
+                log.error(f"Voice connect failed during search pick: {e}")
                 await interaction.response.edit_message(
                     embed=ui.error_embed("I couldn't join your voice channel."), view=None)
                 return
@@ -1209,7 +1194,7 @@ async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
         player.now_playing_msg = await channel.send(
             embed=embed, view=view or discord.utils.MISSING)
     except discord.HTTPException as e:
-        safe_print(f"[WARNING] Could not post now-playing message: {e}")
+        log.warning(f"Could not post now-playing message: {e}")
 #--------------------------------------
 
 #----Music Playback Engine------
@@ -1221,7 +1206,7 @@ async def finish_playback(guild: discord.Guild, player: music.GuildPlayer) -> No
     player.mark_stopped()      # nothing playing, so the position clock resets
     snapshot_player(guild.id)  # nothing left to restore; drops the saved snapshot
     await refresh_now_playing(guild, stopped=True)
-    safe_print("[INFO] Queue empty - starting idle timer")
+    log.info("Queue empty - starting idle timer")
     player.cancel_idle()  # never stack timers; a stale one could disconnect later
     player.idle_task = asyncio.create_task(idle_disconnect(guild))
 
@@ -1269,7 +1254,7 @@ async def advance_playback(guild: discord.Guild) -> None:
             await refresh_now_playing(guild)
             snapshot_player(guild.id)   # record the new track and a fresh position
         except Exception as e:
-            safe_print(f"[ERROR] Could not play '{next_track.title}': {e}")
+            log.error(f"Could not play '{next_track.title}': {e}")
             # Skip the bad track rather than stalling the whole queue
             player.current = None
             asyncio.create_task(advance_playback(guild))
@@ -1292,7 +1277,7 @@ async def idle_disconnect(guild: discord.Guild) -> None:
     async with voice_manager.lock_for(guild.id):
         left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
     if left:
-        safe_print(f"[INFO] Left {left} after being idle")
+        log.info(f"Left {left} after being idle")
 #--------------------------------------
 
 #----Music Command Handlers------
@@ -1383,7 +1368,7 @@ async def music_search(ctx: MusicContext, query: str) -> MusicResult:
     try:
         results = await music.search_tracks(query, requested_by=str(ctx.interaction.user))
     except Exception as e:
-        safe_print("[ERROR] Search failed: " + str(e))
+        log.error("Search failed: " + str(e))
         await status_msg.edit(content=None,
                               embed=ui.error_embed("That search went wrong. Try again."))
         return ""
@@ -1434,11 +1419,11 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
                 await voice.connect_to(state.channel)
             vc = ctx.vc = voice.get_voice_client(guild)
         except RuntimeError as e:
-            safe_print(f"[ERROR] Voice connect failed: {e}")
+            log.error(f"Voice connect failed: {e}")
             return _error(f"Voice support isn't fully installed on my host: {e}\n"
                           "Fix: `pip install \"discord.py[voice]\"`")
         except Exception as e:
-            safe_print(f"[ERROR] Voice connect failed: {e}")
+            log.error(f"Voice connect failed: {e}")
             return _error("I couldn't join your voice channel. Please try again.")
     elif not ctx.may_control():
         return _error("You need to be in my voice channel to queue tracks.")
@@ -1460,7 +1445,7 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
         try:
             title, tracks, skipped = await music.resolve_playlist(query, author)
         except Exception as e:
-            safe_print("[ERROR] Could not load playlist: " + str(e))
+            log.error("Could not load playlist: " + str(e))
             await status_msg.edit(content=DENY + " I couldn't load that playlist.")
             return ""
 
@@ -1487,7 +1472,7 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
     try:
         track = await music.resolve_metadata(query, requested_by=author)
     except Exception as e:
-        safe_print("[ERROR] Could not resolve query: " + str(e))
+        log.error("Could not resolve query: " + str(e))
         await status_msg.edit(content=DENY + " I couldn't find anything for `" + shown + "`.")
         return ""
 
@@ -1605,7 +1590,7 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
     except Exception as e:
         # The new source is built before the old one is touched, so a failure here
         # leaves the track playing where it was - and the message says exactly that.
-        safe_print(f"[ERROR] Seek failed on '{track.title}': {e}")
+        log.error(f"Seek failed on '{track.title}': {e}")
         return _error(f"I couldn't jump there, so **{track.title}** is still playing where it was.")
     if not moved:
         return _info("Playback was stopped, so I didn't jump.")
@@ -1728,7 +1713,7 @@ async def music_skipto(ctx: MusicContext, position: int) -> MusicResult:
     return reply + "."
 #--------------------------------------
 
-#----Status and Model------
+#----Status------
 async def build_status(interaction: discord.Interaction) -> str:
     """Assemble the /status report. Kept out of the command so it stays readable."""
     bot_state = "Enabled ✅" if bot_enabled else "Disabled ❌"
@@ -1760,127 +1745,12 @@ async def build_status(interaction: discord.Interaction) -> str:
     return (
         f"\U0001F4CA **Amy Status**\n"
         f"Bot: {bot_state}\n"
-        f"Ollama: {ollama_state} | Model: `{model}`\n"
+        f"Ollama: {ollama_state} | Model: `{model_manager.current}`\n"
         f"Voice: {voice_state}\n"
         f"Music: {music_state} | FFmpeg: {ffmpeg_state}\n"
         f"Memory: {stats['total_messages']} messages across {stats['active_channels']} channel(s)\n"
         f"Rate limits: {throttled} user(s) currently throttled"
     )
-
-
-def think_mode_for(model_name: str) -> str:
-    """
-    The reasoning mode to use with `model_name`.
-
-    Per-model, because the correct setting is not the same for every model: think=False
-    suits qwen3.5:2b but makes qwen3:4b write its reasoning into the reply. /model records
-    what it found for each one; anything unrecorded falls back to the configured default.
-    """
-    return normalise_think_mode(
-        db.get_setting(f"think_mode:{model_name}"), fallback=OLLAMA_THINK)
-
-
-async def probe_think_mode(model_name: str) -> Optional[str]:
-    """
-    Work out which reasoning mode keeps `model_name`'s replies clean.
-
-    Tries the configured default first, then "auto". Returns the winning mode, or None if
-    neither worked or Ollama could not be reached - the caller then leaves the per-model
-    setting alone rather than recording a guess.
-    """
-    probe = [{"role": "user", "content": "What is 2 + 2? Answer in one short sentence."}]
-
-    def ask(mode: str) -> Tuple[str, str]:
-        # num_predict keeps this cheap: only the opening words are needed to tell an answer
-        # from a model narrating its own reasoning, and a leaking model would otherwise run
-        # to thousands of tokens. Switching models also forces a load, so the whole thing is
-        # bounded by PROBE_TIMEOUT below - /model used to be instant and must stay quick.
-        # A short keep_alive, not OLLAMA_KEEP_ALIVE: long enough that the second attempt
-        # doesn't reload the model, short enough that a rejected candidate isn't squatting
-        # in VRAM for half an hour. On an 8GB GPU holding two models leaves ~300MB free and
-        # everything crawls - one measured switch took 337s that way.
-        reply = ollama.chat(model=model_name, messages=probe,
-                            think=think_value(mode), keep_alive=PROBE_KEEP_ALIVE,
-                            options={"num_predict": PROBE_MAX_TOKENS})
-        message = reply["message"]
-        return ((message.get("content") or "").strip(),
-                (message.get("thinking") or "").strip())
-
-    loop = asyncio.get_running_loop()
-    # Each mode once: with OLLAMA_THINK already "auto" this used to probe "auto" twice,
-    # spending up to a second full timeout on a model that had just failed it.
-    for mode in dict.fromkeys((OLLAMA_THINK, "auto")):
-        try:
-            content, thinking = await asyncio.wait_for(
-                loop.run_in_executor(None, ask, mode), timeout=PROBE_TIMEOUT)
-        except asyncio.TimeoutError:
-            safe_print(f"[WARNING] Probing {model_name} in '{mode}' mode timed out "
-                       f"after {PROBE_TIMEOUT}s")
-            return None
-        except Exception as e:
-            safe_print(f"[WARNING] Could not probe {model_name} in '{mode}' mode: {e}")
-            return None
-
-        if judge_probe_reply(content, thinking):
-            return mode
-        safe_print(f"[INFO] {model_name} gave no usable reply in '{mode}' mode")
-    return None
-
-
-async def switch_model(name: str) -> str:
-    """Show the active Ollama model, or switch to another installed one."""
-    global model, _warmup_task
-    if not name:
-        return (f"\U0001F9E0 Current model: `{model}` (reasoning: {think_mode_for(model)})"
-                f"\nPass a name to switch.")
-
-    loop = asyncio.get_running_loop()
-    try:
-        available = await loop.run_in_executor(None, ollama.list)
-    except Exception as e:
-        return f"\U0001F6AB Could not reach Ollama to verify the model: {e}"
-
-    model_names = extract_model_names(available)
-    if name not in model_names:
-        names_list = ", ".join(f"`{n}`" for n in model_names) or "none installed"
-        return f"\U0001F6AB Model `{name}` not found. Installed models: {names_list}"
-
-    # Release the outgoing model FIRST. OLLAMA_KEEP_ALIVE would otherwise hold it for half
-    # an hour after nothing can use it, and the replacement then has to load alongside it -
-    # on an 8GB GPU that leaves ~300MB free, and the probe below timed out at 45s purely
-    # from the contention. Freeing first makes the load fast.
-    previous = model
-    if previous and previous != name:
-        try:
-            await loop.run_in_executor(
-                None, set_model_residency, previous, 0)
-            safe_print(f"[INFO] Released {previous} from memory")
-        except Exception as e:
-            safe_print(f"[WARNING] Could not release {previous}: {e}")
-
-    # Establish how this model handles reasoning before committing to it. Without this,
-    # switching to a model that ignores think=False silently fills Discord with the model's
-    # internal monologue, several times slower, and nothing says why.
-    working = await probe_think_mode(name)
-
-    model = name
-    db.set_setting("model", model)                    # survives a restart
-    if working:
-        db.set_setting(f"think_mode:{model}", working)
-    safe_print(f"[INFO] Model switched to {model} (reasoning: {working or 'unverified'})")
-
-    # Load the new one properly now, so the first real message doesn't pay for it. Held in
-    # the same global as the startup warm-up so the task isn't garbage collected mid-flight.
-    _warmup_task = asyncio.create_task(warm_model(model))
-
-    note = ""
-    if working is None:
-        note = ("\n⚠️ I couldn't confirm how it handles reasoning. If replies come out "
-                "rambling or very slow, switch back.")
-    elif working != OLLAMA_THINK:
-        note = (f"\nℹ️ This one needs `{working}` reasoning mode rather than the usual "
-                f"`{OLLAMA_THINK}`, so I've set that for it.")
-    return f"\U0001F9E0 Model switched to `{model}`{note}"
 #--------------------------------------
 
 #----Forget Confirmation------
@@ -2254,7 +2124,7 @@ async def slash_toggle(interaction: discord.Interaction) -> None:
     bot_enabled = not bot_enabled
     db.set_bool_setting("bot_enabled", bot_enabled)   # survives a restart
     state = "enabled" if bot_enabled else "disabled"
-    safe_print("[INFO] Bot is now " + state)
+    log.info("Bot is now " + state)
     await interaction.response.send_message("\U0001F916 Bot is now **%s**" % state)
 
 
@@ -2270,7 +2140,7 @@ async def slash_status(interaction: discord.Interaction) -> None:
 @admin_only()
 async def slash_model(interaction: discord.Interaction, name: str = "") -> None:
     await interaction.response.defer()
-    await send_reply(interaction, await switch_model(name))
+    await send_reply(interaction, await model_manager.switch(name))
 
 
 @tree.command(name="forget", description="Wipe Amy's conversation memory for this channel")
@@ -2315,9 +2185,9 @@ async def on_app_command_error(interaction: discord.Interaction,
     original = getattr(error, "original", error)
     command = interaction.command.name if interaction.command else "unknown"
     where = interaction.guild.name if interaction.guild else "a DM"
-    safe_print(f"[ERROR] /{command} raised for {interaction.user} in {where}: "
-               f"{type(original).__name__}: {original}")
-    traceback.print_exception(type(original), original, original.__traceback__)
+    log.error(f"/{command} raised for {interaction.user} in {where}: "
+              f"{type(original).__name__}: {original}",
+              exc_info=(type(original), original, original.__traceback__))
 
     try:
         await deny(interaction, "Something went wrong running that command. "
@@ -2330,94 +2200,12 @@ async def on_app_command_error(interaction: discord.Interaction,
 #--------------------------------------
 
 #----Event Handlers for Discord Bot------
-def set_model_residency(name: str, keep_alive: Union[str, int]) -> None:
-    """
-    Load `name` and hold it for `keep_alive`, or unload it at once with keep_alive=0.
-    Blocking - run in a thread.
-
-    An empty message list is Ollama's way of asking for exactly this and nothing else: it
-    returns done=True with zero characters generated. The one place both preloading and
-    releasing a model go through.
-    """
-    ollama.chat(model=name, messages=[], keep_alive=keep_alive)
-
-
-def preload_model(name: str) -> None:
-    """Load `name` and keep it resident for OLLAMA_KEEP_ALIVE."""
-    set_model_residency(name, OLLAMA_KEEP_ALIVE)
-
-
-# Held so the warm-up task isn't garbage collected mid-flight
-_warmup_task: Optional[asyncio.Task] = None
-
-
-async def warm_model(name: Optional[str] = None) -> bool:
-    """
-    Take the model load off the first real message. Returns whether it loaded.
-
-    OLLAMA_KEEP_ALIVE keeps the model resident between conversations, but a restart always
-    starts cold, and that first reply pays ~4.3s before a single character appears. Doing it
-    here moves the wait to startup, where nobody is watching a "Thinking..." message.
-
-    A plain preload: it never changes which model is active. It used to double as the
-    startup check below, so /model - which re-runs it - could have a fresh choice reverted
-    by a load that merely failed. Failures are logged and swallowed: Ollama being slow or
-    absent must not stop the bot, and the first chat loads the model itself if need be.
-    """
-    target = name or model
-    started = time.monotonic()
-    try:
-        await asyncio.get_running_loop().run_in_executor(None, preload_model, target)
-    except Exception as e:
-        safe_print(f"[WARNING] Could not warm '{target}', the first reply will be slower: {e}")
-        return False
-    safe_print(f"[INFO] Model '{target}' warmed in {time.monotonic() - started:.1f}s "
-               f"(stays loaded for {OLLAMA_KEEP_ALIVE})")
-    return True
-
-
-async def verify_restored_model() -> None:
-    """
-    Startup only: warm the model restored from settings, and fall back if it's really gone.
-
-    A model saved by /model can be uninstalled between runs, and every reply would then fail.
-    But the fallback is deliberately narrow (see startup_model_choice) and lives in memory
-    only - the saved setting is left alone, so reinstalling the model, or simply starting
-    once Ollama is up, brings the admin's choice back.
-    """
-    global model
-    saved = model
-    loaded = await warm_model(saved)
-    if loaded or saved == DEFAULT_MODEL:
-        return
-
-    try:
-        listing = await asyncio.get_running_loop().run_in_executor(None, ollama.list)
-        installed: Optional[List[str]] = extract_model_names(listing)
-    except Exception:
-        installed = None                        # can't tell - so don't conclude anything
-
-    chosen = startup_model_choice(saved, DEFAULT_MODEL, loaded, installed)
-    if chosen == saved:
-        reason = "Ollama isn't reachable yet" if installed is None else "it's installed"
-        safe_print(f"[WARNING] Couldn't load saved model '{saved}' right now; keeping it "
-                   f"because {reason}. The first reply will load it.")
-        return
-    if model != saved:
-        return                                  # an admin ran /model meanwhile - theirs wins
-    safe_print(f"[WARNING] Saved model '{saved}' is no longer installed; using "
-               f"'{chosen}' for this run. The saved choice is kept, so reinstalling "
-               f"'{saved}' brings it back.")
-    model = chosen
-    await warm_model(model)
-
-
 @bot.event
 async def on_ready() -> None:
-    safe_print(f'{bot.user} is online!')
+    log.info(f"{bot.user} is online!")
     activity = discord.Activity(type=discord.ActivityType.watching, name="conversations")
     await bot.change_presence(activity=activity, status=discord.Status.online)
-    safe_print("[INFO] Bot status set to: Watching conversations")
+    log.info("Bot status set to: Watching conversations")
 
     # Register commands with Discord. Guild-scoped so they appear immediately;
     # a global sync can take up to an hour to propagate.
@@ -2426,7 +2214,7 @@ async def on_ready() -> None:
             scope = discord.Object(id=GUILD_ID)
             tree.copy_global_to(guild=scope)
             synced = await tree.sync(guild=scope)
-            safe_print(f"[INFO] Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
+            log.info(f"Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
 
             # Discord merges the global and guild scopes, so anything left registered
             # globally (e.g. from a run before GUILD_ID was set) makes every command
@@ -2435,48 +2223,46 @@ async def on_ready() -> None:
             if stale:
                 tree.clear_commands(guild=None)
                 await tree.sync()
-                safe_print(f"[INFO] Removed {len(stale)} duplicate global command(s)")
+                log.info(f"Removed {len(stale)} duplicate global command(s)")
         else:
             synced = await tree.sync()
-            safe_print(f"[INFO] Synced {len(synced)} slash command(s) globally "
-                       "(may take up to an hour to appear - set GUILD_ID for instant sync)")
+            log.info(f"Synced {len(synced)} slash command(s) globally "
+                     "(may take up to an hour to appear - set GUILD_ID for instant sync)")
     except Exception as e:
-        safe_print(f"[ERROR] Could not sync slash commands: {e}")
+        log.error(f"Could not sync slash commands: {e}")
 
     if not prune_old_messages_task.is_running():
         prune_old_messages_task.start()
-        safe_print(f"[INFO] Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
+        log.info(f"Auto-prune task started (prunes messages older than {DB_PRUNE_DAYS} days, every 24h)")
 
     if not snapshot_queues_task.is_running():
         snapshot_queues_task.start()
-        safe_print(f"[INFO] Queue snapshots every {SNAPSHOT_INTERVAL}s")
+        log.info(f"Queue snapshots every {SNAPSHOT_INTERVAL}s")
 
     # Register the persistent player buttons so they keep working across restarts
     bot.add_view(PlayerControls())
-    safe_print("[INFO] Player controls registered")
+    log.info("Player controls registered")
 
     # Load the opus encoder up front so the first track doesn't stall while it loads
     if not discord.opus.is_loaded():
         try:
             discord.opus._load_default()
-            safe_print("[INFO] Opus encoder loaded")
+            log.info("Opus encoder loaded")
         except Exception as e:
-            safe_print(f"[WARNING] Could not preload opus: {e}")
+            log.warning(f"Could not preload opus: {e}")
 
     # Warm the model in the background so the first real message doesn't pay the load cost.
     # Backgrounded rather than awaited: it takes a few seconds, and nothing else here needs
     # to wait for it.
-    global _warmup_task
-    if _warmup_task is None or _warmup_task.done():
-        _warmup_task = asyncio.create_task(verify_restored_model())
+    model_manager.start_startup_check()
 
     # Clean up voice channels Amy created before a restart
     try:
         removed = await voice.sweep_orphan_channels(bot, db, voice_manager)
         if removed:
-            safe_print(f"[INFO] Cleaned up {removed} orphaned voice channel(s) from a previous run")
+            log.info(f"Cleaned up {removed} orphaned voice channel(s) from a previous run")
     except Exception as e:
-        safe_print(f"[WARNING] Orphan voice channel sweep failed: {e}")
+        log.warning(f"Orphan voice channel sweep failed: {e}")
 
     # Put back any queue that was playing when Amy last stopped. Done after the orphan
     # sweep so a channel she created and is about to delete isn't rejoined. Guarded to run
@@ -2485,11 +2271,11 @@ async def on_ready() -> None:
 
 @bot.event
 async def on_connect() -> None:
-    safe_print("[INFO] Bot connected to Discord")
+    log.info("Bot connected to Discord")
 
 @bot.event
 async def on_disconnect() -> None:
-    safe_print("[WARNING] Bot disconnected from Discord, attempting to reconnect...")
+    log.warning("Bot disconnected from Discord, attempting to reconnect...")
 
 last_processed_id: Union[int, None] = None
 
@@ -2502,21 +2288,21 @@ async def on_message(msg: discord.Message) -> None:
         return
     last_processed_id = msg.id
 
-    safe_print(f"[DEBUG] Message received from {msg.author}: {msg.content}")
+    log.debug(f"Message received from {msg.author}: {msg.content}")
 
     if msg.author == bot.user:
-        safe_print("[DEBUG] Ignoring bot's own message")
+        log.debug("Ignoring bot's own message")
         return
 
     try:
         server_id = msg.guild.id if msg.guild else "DM"
         channel_id = msg.channel.id
-        safe_print(f"[DEBUG] Server ID: {server_id}, Channel ID: {channel_id}")
+        log.debug(f"Server ID: {server_id}, Channel ID: {channel_id}")
 
         # Commands are slash commands now and arrive as interactions, not messages.
         # Anything reaching here is conversation.
         if not bot_enabled:
-            safe_print("[DEBUG] Bot is disabled, ignoring chat message")
+            log.debug("Bot is disabled, ignoring chat message")
             return
 
         if not is_admin(msg):
@@ -2530,19 +2316,17 @@ async def on_message(msg: discord.Message) -> None:
                 )
                 return
 
-        safe_print("[DEBUG] Processing as streaming chat...")
+        log.debug("Processing as streaming chat...")
         thinking_msg = await msg.reply("⏳ Thinking...")
         await chat_streaming(msg.content, server_id, channel_id, thinking_msg)
-        safe_print("[DEBUG] Streaming response complete")
+        log.debug("Streaming response complete")
 
     except Exception as e:
-        import traceback
-        safe_print(f"[ERROR] Error processing message: {e}")
-        safe_print(traceback.format_exc())
+        log.exception(f"Error processing message: {e}")
         try:
             await msg.reply("Sorry, I encountered an unexpected error. Please try again.")
         except Exception:
-            safe_print("[ERROR] Failed to send error message to Discord")
+            log.error("Failed to send error message to Discord")
 
 @bot.event
 async def on_voice_state_update(
@@ -2556,7 +2340,7 @@ async def on_voice_state_update(
     # Amy herself was moved or disconnected by someone else
     if bot.user and member.id == bot.user.id:
         if after.channel is None and before.channel is not None:
-            safe_print(f"[INFO] Amy was disconnected from voice channel: {before.channel.name}")
+            log.info(f"Amy was disconnected from voice channel: {before.channel.name}")
             voice_manager.unmark_created(before.channel.id)
         return
 
@@ -2575,18 +2359,17 @@ async def on_voice_state_update(
     async with voice_manager.lock_for(guild.id):
         left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
     if left:
-        safe_print(f"[INFO] Left empty voice channel: {left}")
+        log.info(f"Left empty voice channel: {left}")
 
 #--------------------------------------
 
 if __name__ == "__main__":
     try:
-        safe_print("[INFO] Starting Amy Chatbot...")
-        bot.run(discord_token)
+        log.info("Starting Amy Chatbot...")
+        # log_handler=None: discord.py's records already reach the handlers logs.py set up
+        bot.run(discord_token, log_handler=None)
     except KeyboardInterrupt:
-        safe_print("[INFO] Bot interrupted by user (Ctrl+C)")
+        log.info("Bot interrupted by user (Ctrl+C)")
     except Exception as e:
-        safe_print(f"[ERROR] Fatal error: {e}")
-        import traceback
-        safe_print(traceback.format_exc())
+        log.exception(f"Fatal error: {e}")
         exit(1)

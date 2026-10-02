@@ -18,6 +18,8 @@ one guards against.
 | `websearch.py` | DuckDuckGo search, page fetching, the `web_search` tool definition | httpx |
 | `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
+| `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
+| `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
 | `database.py` | SQLite: history, settings, voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
 
@@ -28,6 +30,20 @@ Discord connection. `llm.py` must never import Discord or Ollama (`test_llm.py` 
 **Decisions that are hard to reach go in a pure function.** `voice.decide_join_action` and
 `voice.decide_restore_action` take plain values; the caller resolves the Discord objects. The
 whole truth table is then tested offline. Try this before writing "needs manual testing".
+
+## Logging
+
+- **Log with `logging.getLogger("amy.<area>")`, never `print`.** `logs.setup_logging` sends
+  every record to the console and to the rotating `AMY_LOG_FILE`. Anything printed
+  bypasses the file, which is the whole point of having one.
+- **DEBUG never reaches the file.** Those lines carry the full text of chat messages; a
+  live console is fine, a file that accumulates for weeks is not.
+- **The console format `[LEVEL] message` is load-bearing**: `smoke_start.py` waits for
+  "is online!" and `test_config.py` reads `[WARNING]`/`[ERROR]` lines.
+- `bot.run(..., log_handler=None)` stops discord.py installing its own handler; its
+  records reach ours. Chatty libraries are capped in `logs.QUIET` (discord.py at DEBUG logs
+  raw gateway payloads, httpx at INFO logs every request).
+- Exceptions go through `log.exception` or `exc_info=`, so the traceback lands in the file.
 
 ## Settings
 
@@ -171,7 +187,7 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   qwen3:4b, which pastes 3,800 characters of its own reasoning into the reply and takes 27.8s.
   `auto` (sent as `think=None`) routes reasoning to a separate `thinking` field that never
   reaches Discord. `true` is almost never right: on qwen3.5:2b it returned nothing. `/model`
-  probes and stores `think_mode:<model>`; `think_mode_for()` reads it.
+  probes and stores `think_mode:<model>`; `ModelManager.think_mode_for()` reads it.
 - **Release the old model before loading the new one.** `OLLAMA_KEEP_ALIVE` (default `30m`)
   holds it resident, so switching loaded both at once; on an 8GB GPU one `/model` took 337s.
   Freeing first: 14s. The probe uses a short `PROBE_KEEP_ALIVE` so a rejected candidate
@@ -179,8 +195,8 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **The probe needs about 256 tokens.** In `auto` mode the reasoning uses the budget first, so
   a small cap returns empty content. Empty content with a filled `thinking` field means the
   mode works.
-- **A failed load is not evidence a model is gone.** `warm_model` only preloads and never
-  changes the active model. At startup `verify_restored_model` falls back only when
+- **A failed load is not evidence a model is gone.** `ModelManager.warm` only preloads and
+  never changes the active model. At startup `verify_restored` falls back only when
   `ollama.list()` confirms the model is absent, in memory only, and not if a `/model` happened
   meanwhile.
 - The model is preloaded at startup in the background (`ollama.chat(messages=[])` loads

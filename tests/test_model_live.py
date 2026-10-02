@@ -16,7 +16,6 @@ import io
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -26,10 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.chdir(PROJ)
 
 from _fakes import load_bot
-from database import ConversationDB
 
 amy = load_bot()
-amy.db = ConversationDB(tempfile.mktemp(suffix=".db"))   # never touch the real settings
+# The loader points AMY_DB_PATH at a temp file, so /model here never touches real settings.
 
 from _check import check, finish
 
@@ -41,9 +39,9 @@ async def _switch_and_settle(name):
     asyncio.run() cancels tasks still pending when it returns, so without waiting the
     warm-up was cancelled and "one model resident" passed with nothing loaded at all.
     """
-    out = await amy.switch_model(name)
-    if amy._warmup_task is not None:
-        await amy._warmup_task
+    out = await amy.model_manager.switch(name)
+    if amy.model_manager.warmup_task is not None:
+        await amy.model_manager.warmup_task
     return out
 
 
@@ -74,12 +72,12 @@ print("=== the default model probes to a usable mode ===")
 # Load the model first so the timing below measures the probe rather than Ollama's load,
 # which depends entirely on what happens to be resident: the same probe measured 149s cold
 # and 0.3s warm on the same machine.
-asyncio.run(amy.warm_model())
+asyncio.run(amy.model_manager.warm())
 
 # If this fails, every reply Amy sends is suspect - it means the shipped default doesn't
 # have a reasoning mode that produces a clean answer.
 t0 = time.time()
-mode = asyncio.run(amy.probe_think_mode(default))
+mode = asyncio.run(amy.model_manager.probe_think_mode(default))
 probe_seconds = time.time() - t0
 print("        probed in %.1fs -> %r" % (probe_seconds, mode))
 check("a mode was found", mode is not None, mode)
@@ -90,9 +88,9 @@ print("=== the chosen mode actually produces a clean reply ===")
 reply = amy.ollama.chat(
     model=default,
     messages=[{"role": "user", "content": "What is 2 + 2? Answer in one short sentence."}],
-    think=amy.think_value(mode or amy.OLLAMA_THINK),
-    keep_alive=amy.PROBE_KEEP_ALIVE,
-    options={"num_predict": amy.PROBE_MAX_TOKENS},
+    think=amy.think_value(mode or amy.model_manager.think_default),
+    keep_alive=amy.models.PROBE_KEEP_ALIVE,
+    options={"num_predict": amy.models.PROBE_MAX_TOKENS},
 )
 content = (reply["message"].get("content") or "").strip()
 thinking = (reply["message"].get("thinking") or "").strip()
@@ -107,8 +105,8 @@ print("=== the probe stays cheap ===")
 # times a warm model on purpose; a cold load is Ollama's cost, not the probe's.
 check("probing a warm model is quick", probe_seconds < 30.0, "%.1fs" % probe_seconds)
 check("the probe is bounded by its own timeout",
-      probe_seconds <= amy.PROBE_TIMEOUT * 2 + 5,
-      "%.1fs against a %.0fs per-attempt limit" % (probe_seconds, amy.PROBE_TIMEOUT))
+      probe_seconds <= amy.models.PROBE_TIMEOUT * 2 + 5,
+      "%.1fs against a %.0fs per-attempt limit" % (probe_seconds, amy.models.PROBE_TIMEOUT))
 
 others = [m for m in installed if m != default]
 if not others:
@@ -123,7 +121,7 @@ else:
     elapsed = time.time() - t0
     print("        /model %s took %.1fs" % (other, elapsed))
     print("        %s" % out.splitlines()[0])
-    check("switched to the requested model", amy.model == other, amy.model)
+    check("switched to the requested model", amy.model_manager.current == other, amy.model_manager.current)
     check("the switch was not pathologically slow", elapsed < 120.0, "%.1fs" % elapsed)
 
     time.sleep(3)                      # let the release and warm-up settle
@@ -136,12 +134,12 @@ else:
     check("a mode was recorded for it", stored in amy.THINK_MODES, stored)
     if stored:
         check("the recorded mode is what think_mode_for returns",
-              amy.think_mode_for(other) == stored, amy.think_mode_for(other))
+              amy.model_manager.think_mode_for(other) == stored, amy.model_manager.think_mode_for(other))
 
     print()
     print("=== switching back leaves the default in place ===")
     asyncio.run(_switch_and_settle(default))
-    check("back on the default", amy.model == default, amy.model)
+    check("back on the default", amy.model_manager.current == default, amy.model_manager.current)
     time.sleep(3)
     resident = loaded_models()
     check("exactly the default is resident again", resident == [default], resident)
@@ -149,11 +147,11 @@ else:
 print()
 print("=== an unknown model is refused before any probing ===")
 t0 = time.time()
-out = asyncio.run(amy.switch_model("definitely-not-a-real-model"))
+out = asyncio.run(amy.model_manager.switch("definitely-not-a-real-model"))
 check("refused", "not found" in out, out[:120])
 check("refused instantly, without loading anything", time.time() - t0 < 5.0,
       "%.1fs" % (time.time() - t0))
-check("the active model is unchanged", amy.model == default, amy.model)
+check("the active model is unchanged", amy.model_manager.current == default, amy.model_manager.current)
 
 amy.db.conn.close()
 finish("ALL MODEL TESTS PASSED")

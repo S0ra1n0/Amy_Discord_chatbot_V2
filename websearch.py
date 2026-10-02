@@ -24,6 +24,7 @@ Network lives in `search()` and `fetch_page()`; everything else is pure and unit
 offline.
 """
 
+import logging
 import asyncio
 import html
 import ipaddress
@@ -36,8 +37,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
-# Set by the bot at startup so this module can log without importing it back
-log: Callable[[str], None] = print
+log = logging.getLogger("amy.websearch")
 
 #----Configuration------
 DDG_HTML_URL: str = "https://html.duckduckgo.com/html/"
@@ -479,7 +479,7 @@ async def fetch_page(client: httpx.AsyncClient, url: str) -> str:
     try:
         return await asyncio.wait_for(_fetch_page(client, url), timeout=PAGE_DEADLINE)
     except asyncio.TimeoutError:
-        log(f"[INFO] Gave up on a page after {PAGE_DEADLINE}s: {url[:80]}")
+        log.info(f"Gave up on a page after {PAGE_DEADLINE}s: {url[:80]}")
         return ""
 
 
@@ -499,7 +499,7 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
             if not url.lower().startswith(("http://", "https://")):
                 return ""
             if not await host_is_public(host_of(url)):
-                log(f"[WARNING] Refused to fetch a non-public address: {url[:80]}")
+                log.warning(f"Refused to fetch a non-public address: {url[:80]}")
                 return ""
 
             async with client.stream("GET", url) as resp:
@@ -550,7 +550,7 @@ async def enrich(results: List[SearchResult], count: int = ENRICH_COUNT) -> List
                                      headers=BROWSER_HEADERS) as client:
             bodies = await asyncio.gather(*(fetch_page(client, r.url) for r in targets))
     except Exception as e:
-        log(f"[WARNING] Page fetch failed: {e}")
+        log.warning(f"Page fetch failed: {e}")
         return results
 
     got = 0
@@ -558,7 +558,7 @@ async def enrich(results: List[SearchResult], count: int = ENRICH_COUNT) -> List
         if body:
             result.content = body
             got += 1
-    log(f"[INFO] Read {got}/{len(targets)} result page(s) in full")
+    log.info(f"Read {got}/{len(targets)} result page(s) in full")
     return results
 
 
@@ -589,7 +589,7 @@ async def search(query: str, limit: int = DEFAULT_LIMIT,
             # transient - the same burst that produced three 202s succeeded on a retry -
             # so give it one more attempt before telling the user we found nothing.
             if resp.status_code != 200:
-                log(f"[INFO] Web search got HTTP {resp.status_code}, retrying once")
+                log.info(f"Web search got HTTP {resp.status_code}, retrying once")
                 await asyncio.sleep(RETRY_DELAY)
                 resp = await client.post(
                     DDG_HTML_URL,
@@ -597,25 +597,25 @@ async def search(query: str, limit: int = DEFAULT_LIMIT,
                     headers={"User-Agent": USER_AGENT},
                 )
         if resp.status_code != 200:
-            log(f"[WARNING] Web search returned HTTP {resp.status_code}")
+            log.warning(f"Web search returned HTTP {resp.status_code}")
             return []
         # Over-fetch, then drop duplicate domains down to the limit the caller asked for.
         results = dedupe_by_domain(parse_results(resp.text, SEARCH_POOL), limit)
         if not results:
-            log(f"[WARNING] Web search parsed 0 results for {query!r} "
-                "(DuckDuckGo may have changed their markup)")
+            log.warning(f"Web search parsed 0 results for {query!r} "
+                        "(DuckDuckGo may have changed their markup)")
             return []
     except (httpx.HTTPError, asyncio.TimeoutError) as e:
-        log(f"[WARNING] Web search failed: {e}")
+        log.warning(f"Web search failed: {e}")
         return []
     except Exception as e:                      # never let search break a conversation
-        log(f"[ERROR] Unexpected web search error: {e}")
+        log.error(f"Unexpected web search error: {e}")
         return []
 
     if with_content:
         try:
             await enrich(results)
         except Exception as e:                  # enrichment is a bonus, never a failure
-            log(f"[WARNING] Page enrichment failed: {e}")
+            log.warning(f"Page enrichment failed: {e}")
     return results
 #--------------------------------------

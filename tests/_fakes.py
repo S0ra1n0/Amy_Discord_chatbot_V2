@@ -33,6 +33,13 @@ def ensure_token():
         os.environ["DISCORD_TOKEN"] = "dummy-not-a-real-token"
 
 
+def _isolate_log():
+    """Send the bot's log file to a temp file, so a test run never writes amy.log here."""
+    current = os.environ.get("AMY_LOG_FILE", "")
+    if not (current and os.path.abspath(current).startswith(os.path.abspath(tempfile.gettempdir()))):
+        os.environ["AMY_LOG_FILE"] = tempfile.mktemp(prefix="amy_test_", suffix=".log")
+
+
 def isolate_db():
     """
     Point the bot at a throwaway database. Must run BEFORE the bot is imported.
@@ -45,6 +52,7 @@ def isolate_db():
     (say, an AMY_DB_PATH in the user's own shell pointing at a real database) is replaced.
     """
     ensure_token()   # every bot import starts here, so this is the one place to do it
+    _isolate_log()
     current = os.environ.get("AMY_DB_PATH", "")
     temp_root = os.path.abspath(tempfile.gettempdir())
     if current and os.path.abspath(current).startswith(temp_root):
