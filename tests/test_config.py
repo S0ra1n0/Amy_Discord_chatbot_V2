@@ -119,4 +119,24 @@ code, res, out = probe({"OLLAMA_KEEP_ALIVE": "30m"})
 check("no warning when nothing is shadowed",
       not any("[WARNING]" in l and "OLLAMA_KEEP_ALIVE" in l for l in out.splitlines()))
 
+print()
+print("=== a database from a newer Amy stops startup with a clear message ===")
+# An older checkout must refuse a database a newer one migrated, not read and write tables
+# whose shape it doesn't know - and say so in one line, not a traceback.
+import sqlite3
+import tempfile
+_newer = tempfile.mktemp(prefix="amy_test_newer_", suffix=".db")
+_c = sqlite3.connect(_newer)
+_c.execute("PRAGMA user_version = 99")
+_c.close()
+code, res, out = probe({}, extra_env={"AMY_DB_PATH": _newer})
+check("the bot exits non-zero", code != 0 and res is None, (code, out[-300:]))
+check("with one [ERROR] line naming the version",
+      any("[ERROR]" in l and "schema version 99" in l for l in out.splitlines()), out[-400:])
+check("and no traceback", "Traceback" not in out, out[-400:])
+_c = sqlite3.connect(_newer)
+check("the file is left at its version", _c.execute("PRAGMA user_version").fetchone()[0] == 99)
+_c.close()
+os.remove(_newer)
+
 finish("ALL CONFIG TESTS PASSED")

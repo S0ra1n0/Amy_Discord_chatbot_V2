@@ -95,4 +95,27 @@ check("intents.members enabled", amy.intents.members)
 check("intents.message_content enabled", amy.intents.message_content)
 
 print()
+print("=== ARCHITECTURE.md still describes the code ===")
+# The design rules used to live in a gitignored notes file. Now they're committed, they can
+# rot instead: a renamed helper leaves a rule pointing at nothing. Every snake_case or
+# CamelCase name in backticks must still exist somewhere in the source.
+import glob
+arch = open("ARCHITECTURE.md", encoding="utf-8").read()
+all_src = "".join(open(f, encoding="utf-8").read()
+                  for f in glob.glob("*.py") + glob.glob(os.path.join("tests", "*.py")))
+named = set()
+for tok in re.findall(r"`([^`\n]+)`", arch):
+    for part in re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", tok):
+        last = part.split(".")[-1]
+        if "_" in last or re.match(r"^[A-Z][a-z]+[A-Z]", last):
+            named.add(last)
+gone = sorted(n for n in named if not re.search(r"\b%s\b" % re.escape(n), all_src))
+check("every code name it mentions exists (%d checked)" % len(named), not gone,
+      "no longer in the source: %s" % gone)
+check("the scan found names at all", len(named) > 50, "found %d" % len(named))
+for mod in sorted(glob.glob("*.py")):
+    check("module %s is in its table" % mod, "| `%s` |" % mod in arch)
+check("README links to it", "ARCHITECTURE.md" in readme)
+
+print()
 finish("ALL AUDIT CHECKS PASSED")

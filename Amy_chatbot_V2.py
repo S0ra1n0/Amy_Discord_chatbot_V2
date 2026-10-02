@@ -19,7 +19,8 @@ from discord.ext import tasks
 from discord import app_commands
 
 from commands_help import HELP_EVERYONE, HELP_ADMIN
-from database import DEFAULT_MAX_MESSAGES, MIN_MAX_MESSAGES, ConversationDB
+from database import (DEFAULT_MAX_MESSAGES, MIN_MAX_MESSAGES, ConversationDB,
+                      SchemaTooNewError)
 import config
 import voice
 from voice import VoiceManager
@@ -208,7 +209,12 @@ system_prompt = build_system_prompt(BASE_SYSTEM_PROMPT, WEB_SEARCH)
 # the bot: settings are read from the database at import time, so swapping `db` afterwards
 # is too late, and the suite used to run against the operator's real file.
 DB_PATH: str = os.getenv("AMY_DB_PATH", "").strip() or "amy_memory.db"
-db = ConversationDB(DB_PATH, max_messages=HISTORY_LIMIT)
+try:
+    db = ConversationDB(DB_PATH, max_messages=HISTORY_LIMIT)
+except SchemaTooNewError as e:
+    # Written by a newer Amy (an older checkout is running). Refusing beats corrupting.
+    safe_print(f"[ERROR] {DB_PATH}: {e}")
+    exit(1)
 #----------------------------------------------
 
 #----Voice & Music------

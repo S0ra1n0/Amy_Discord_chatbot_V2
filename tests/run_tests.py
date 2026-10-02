@@ -36,6 +36,7 @@ OFFLINE = [
     "test_websearch.py",
     "test_llm.py",
     "test_config.py",
+    "test_schema.py",
     "test_docs_audit.py",
 ]
 NETWORK = [

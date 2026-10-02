@@ -16,16 +16,22 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 DEFAULT_MAX_MESSAGES: int = 10
 MIN_MAX_MESSAGES: int = 2       # fewer can't hold a single question-and-answer exchange
 
-class ConversationDB:
-    def __init__(self, db_path: str = "amy_memory.db",
-                 max_messages: int = DEFAULT_MAX_MESSAGES) -> None:
-        self.path = db_path
-        self.max_messages = max(MIN_MAX_MESSAGES, max_messages)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._create_tables()
-
-    def _create_tables(self) -> None:
-        self.conn.executescript("""
+# ---- Schema versioning ----
+# The schema version lives in SQLite's own header field, PRAGMA user_version (0 on a database
+# that has never been versioned). MIGRATIONS[i] upgrades a database from version i to i+1, so
+# the current version is len(MIGRATIONS).
+#
+# To change the schema: APPEND a migration - never edit one that has shipped, because
+# operators' databases have already run it. Each runs in one transaction together with its
+# version bump, so a failure leaves the database exactly as it was.
+#
+# Version 1 is the schema as it stood before versioning existed. It uses IF NOT EXISTS
+# throughout, so an existing unversioned amy_memory.db (version 0, tables already present)
+# passes through it untouched and is simply stamped as version 1. Every table was introduced
+# whole - no column was ever added later - so there is no older shape to account for.
+MIGRATIONS: List[str] = [
+    # 1: baseline
+    """
             CREATE TABLE IF NOT EXISTS messages (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 server    TEXT NOT NULL,
@@ -71,8 +77,67 @@ class ConversationDB:
                 resume_position  REAL    NOT NULL DEFAULT 0,
                 saved_at         DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-        """)
-        self.conn.commit()
+""",
+]
+SCHEMA_VERSION: int = len(MIGRATIONS)
+
+
+class SchemaTooNewError(RuntimeError):
+    """The database was written by a newer Amy than this one."""
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def apply_migrations(conn: sqlite3.Connection, migrations: List[str]) -> int:
+    """
+    Bring `conn` up to len(migrations), applying only the ones it hasn't had. Returns the
+    resulting version.
+
+    Refuses a database whose version is AHEAD of this code: that happens after running a
+    newer checkout and then an older one, and the older code would read and write tables
+    whose shape it doesn't know.
+    """
+    current = schema_version(conn)
+    target = len(migrations)
+    if current > target:
+        raise SchemaTooNewError(
+            f"This database is at schema version {current}, but this version of Amy only "
+            f"understands up to {target}. It was written by a newer Amy - update the code, "
+            f"or point AMY_DB_PATH at a different file."
+        )
+    for version in range(current, target):
+        try:
+            # executescript commits anything pending first, then runs the script as given,
+            # so the explicit BEGIN/COMMIT makes the migration and its version bump atomic.
+            conn.executescript(
+                "BEGIN;\n" + migrations[version]
+                + f"\nPRAGMA user_version = {version + 1};\nCOMMIT;"
+            )
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+    return target
+
+
+class ConversationDB:
+    def __init__(self, db_path: str = "amy_memory.db",
+                 max_messages: int = DEFAULT_MAX_MESSAGES) -> None:
+        self.path = db_path
+        self.max_messages = max(MIN_MAX_MESSAGES, max_messages)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            self._create_tables()
+        except Exception:
+            # A refused or failed migration raises out of __init__, so nothing else will
+            # ever close this connection - and on Windows it keeps the file locked.
+            self.conn.close()
+            raise
+
+    def _create_tables(self) -> None:
+        apply_migrations(self.conn, MIGRATIONS)
 
     #----Queue persistence------
     # The queue lives in memory, so a restart used to lose it entirely - including a long

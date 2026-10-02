@@ -543,7 +543,7 @@ The bot should now be online and ready to respond in your Discord server!
 ```
 Amy_chatbot_V2/
 ├── Amy_chatbot_V2.py       # Main bot file
-├── database.py             # SQLite conversation memory layer
+├── database.py             # SQLite store and its versioned schema migrations
 ├── voice.py                # Voice channel connection management
 ├── music.py                # Track resolution, queues, and playback engine
 ├── ui.py                   # Embed builders and the reply wrapper
@@ -562,8 +562,12 @@ Amy_chatbot_V2/
 ├── .env                    # Environment variables (Git ignored)
 ├── .env.example            # Template for environment variables
 ├── .gitignore              # Git ignore rules
+├── ARCHITECTURE.md         # How the modules fit together, and the rules the code relies on
 └── README.md               # This file
 ```
+
+Working on the code? Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it lists the rules the
+code depends on (threading, playback state, Discord limits, model quirks) and why each exists.
 
 ## Testing
 
@@ -572,7 +576,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-20 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
+21 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and
@@ -591,6 +595,14 @@ the limit with a larger model. Rephrasing the question usually won't help.
 
 Almost always the reasoning phase. Set `OLLAMA_THINK=false` in `.env`. In testing this took a
 question from 33s down to 4s and turned an empty answer into a complete one.
+
+**Startup fails with "This database is at schema version N, but this version of Amy only understands up to M":**
+
+`amy_memory.db` was last opened by a newer version of Amy - typically after checking out an
+older commit. Amy refuses to touch it rather than read and write tables whose layout it doesn't
+know. Update to the latest code, or point `AMY_DB_PATH` at a different file. Upgrades go the
+other way automatically: on first start, a newer Amy migrates an older database in place, in a
+single transaction, keeping all history and settings.
 
 **Bot doesn't respond to chat:**
 

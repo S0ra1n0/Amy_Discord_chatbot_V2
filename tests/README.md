@@ -56,7 +56,8 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | `test_websearch.py` | result parsing, page-text extraction, domain dedup, recency inference, the tool contract |
 | `test_config.py` | parsing settings (bad values warn and fall back), and loading them end to end in a fresh process per scenario: `.env` values actually take effect, and a setting shadowed by the system environment is reported without leaking its value |
 | `test_llm.py` | `llm.py` on its own, with no bot, client or database: reasoning modes, leak detection, probe judging, startup model choice, system prompt assembly. Fails if importing `llm` pulls in Discord or Ollama |
-| `test_docs_audit.py` | every command appears in both the help text and the README |
+| `test_schema.py` | schema migrations on throwaway files: an unversioned database upgrades without losing rows, a failed migration changes nothing, a database from a newer Amy is refused (and its file released), and no shipped migration has been edited |
+| `test_docs_audit.py` | every command appears in both the help text and the README; every helper `ARCHITECTURE.md` names still exists, and every module is in its table |
 
 **Network** — needs internet; slower and can fail if YouTube changes.
 
@@ -96,6 +97,7 @@ Several were written *after* a bug reached the running bot, and now stop it recu
   fixes below was then mutation-checked: undo it, and the suite fails. Every check-based suite
   now records through `_check.py`, whose gate runs at exit, so this can't recur by placement;
   verified by appending a failing check after `finish` in four suites — each exits 1.
+- `test_schema.py` — `ConversationDB` leaked its SQLite connection when opening failed: the error raised out of `__init__` and nothing ever closed it, so on Windows the database file stayed locked until garbage collection. Found while writing the schema tests, when the temp directory couldn't be deleted.
 - **Every suite that imports the bot** — failed on a fresh clone. With no `.env` the bot exits
   at import for want of a `DISCORD_TOKEN`, so 8 of the 14 offline suites failed, though both
   READMEs said they needed no token. Found by running them from a clean `git clone` before
