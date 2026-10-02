@@ -136,4 +136,67 @@ music.drop_before(q4, 3)
 check("skipto+TRACK lands on the requested track",
        music.advance_queue(T("playing"), q4, LoopMode.TRACK, force_next=True).title == "c")
 
+# ---- /previous: history and stepping back ----
+print()
+print("=== advance_with_history ===")
+A, B, C, D = T("A"), T("B"), T("C"), T("D")
+h, q = deque(), deque([B])
+check("moving on records the track left behind",
+      music.advance_with_history(A, q, h, LoopMode.OFF) is B and list(h) == [A], list(h))
+h, q = deque(), deque([B])
+check("TRACK loop replaying a song records nothing",
+      music.advance_with_history(A, q, h, LoopMode.TRACK) is A and not h, list(h))
+h, q = deque(), deque([B])
+check("a skip out of TRACK loop is recorded",
+      music.advance_with_history(A, q, h, LoopMode.TRACK, force_next=True) is B and list(h) == [A])
+h, q = deque(), deque([B])
+check("QUEUE loop records it and still rotates it to the back",
+      music.advance_with_history(A, q, h, LoopMode.QUEUE) is B and list(h) == [A]
+      and list(q) == [A], (list(h), [t.title for t in q]))
+h, q = deque(), deque()
+check("the last track finishing is recorded too (so /previous works once the queue ends)",
+      music.advance_with_history(A, q, h, LoopMode.OFF) is None and list(h) == [A])
+
+print()
+print("=== step_back ===")
+h, q = deque([A, B]), deque([D])
+prev = music.step_back(C, q, h)
+check("goes to the most recent track", prev is B)
+check("the interrupted track plays straight after it", list(q) == [B, C, D],
+      [t.title for t in q])
+# What advance_playback then does: take the front, record nothing
+nxt = music.advance_with_history(C, q, h, LoopMode.OFF, going_back=True)
+check("the going-back advance takes the front", nxt is B, nxt and nxt.title)
+check("and records nothing - the interrupted track is already queued", list(h) == [A],
+      [t.title for t in h])
+prev = music.step_back(B, q, h)
+check("a second /previous walks further back instead of bouncing", prev is A
+      and [t.title for t in q] == ["A", "B", "C", "D"], [t.title for t in q])
+check("no history -> None, queue untouched",
+      music.step_back(A, q, deque()) is None and [t.title for t in q] == ["A", "B", "C", "D"])
+h, q = deque([A]), deque()
+check("with nothing playing it just queues the last track",
+      music.step_back(None, q, h) is A and list(q) == [A])
+# QUEUE loop: A was rotated to the back when it finished, so it's in the queue AND history
+h, q = deque([A]), deque([C, A])
+music.step_back(B, q, h)
+check("QUEUE loop doesn't end up with the track twice", [t.title for t in q] == ["A", "B", "C"],
+      [t.title for t in q])
+check("...but a different queued copy of the same song is left alone",
+      (lambda h2, q2: (music.step_back(B, q2, h2), [t.title for t in q2])[1])(
+          deque([A]), deque([C, T("A")])) == ["A", "B", "C", "A"])
+
+print()
+print("=== GuildPlayer history ===")
+p = music.GuildPlayer(1)
+check("bounded at MAX_HISTORY", p.history.maxlen == music.MAX_HISTORY, p.history.maxlen)
+p.current = A
+p.stop_all()
+check("/stop keeps what was playing reachable", list(p.history) == [A])
+p.back_requested = True
+p.stop_all()
+check("/stop clears a pending go-back", p.back_requested is False)
+p.reset()
+check("leaving voice clears the history", not p.history)
+
 finish("ALL QUEUE MANAGEMENT TESTS PASSED")

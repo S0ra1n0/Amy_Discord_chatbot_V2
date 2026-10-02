@@ -89,17 +89,19 @@ assert_isolated_db(amy)
 v = amy.PlayerControls()
 check("timeout is None (required for add_view)", v.timeout is None, v.timeout)
 items = list(v.children)
-check("exactly three buttons", len(items) == 3, len(items))
+check("four buttons", len(items) == 4, len(items))
 check("every button has a custom_id",
       all(getattr(i, "custom_id", None) for i in items),
       [getattr(i, "custom_id", None) for i in items])
 check("custom_ids are unique",
-      len({i.custom_id for i in items}) == 3)
+      len({i.custom_id for i in items}) == len(items))
 labels = [i.label for i in items]
-check("default label is Pause", labels[0] == "Pause", labels)
-check("paused=True flips the label to Resume",
-      amy.PlayerControls(paused=True).children[0].label == "Resume")
-check("Skip and Stop present", labels[1] == "Skip" and labels[2] == "Stop", labels)
+check("in order Previous, Pause, Skip, Stop", labels == ["Previous", "Pause", "Skip", "Stop"],
+      labels)
+check("Previous keeps its custom_id (persistent buttons are matched by it)",
+      items[0].custom_id == "amy:previous", items[0].custom_id)
+check("paused=True flips the Pause label to Resume",
+      [i.label for i in amy.PlayerControls(paused=True).children][1] == "Resume")
 
 print()
 # The progress bar replaces the Duration field only while something is actually playing.

@@ -743,6 +743,91 @@ finally:
     amy.music.resolve_metadata, amy.advance_playback, amy.music.find_ffmpeg = (
         _real_resolve, _real_advance, _real_ffmpeg)
 
+# ---- /previous and the Previous button, end to end ------------------------------------
+print()
+print("=== /previous ===")
+_started = []
+_real_play, _real_refresh = amy.music.play_track, amy.refresh_now_playing
+
+
+async def _fake_play(vc, player, track, after, start_at=0.0):
+    _started.append(track.title)
+    player.current = track
+    vc.stopped = False                      # the new source is playing
+    return True
+
+
+async def _quiet(*a, **kw):
+    return None
+
+
+def _drive(coro_fn):
+    """Run a callback, then let the background advance it spawned finish."""
+    async def go():
+        await coro_fn()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+    asyncio.run(go())
+
+
+amy.music.play_track = _fake_play
+amy.refresh_now_playing = _quiet
+try:
+    # Going back while a song plays: the previous one starts, the interrupted one is next.
+    p, it = setup(USER, "userA", ["next up"])
+    earlier = make_track(amy, "earlier song")
+    p.history.append(earlier)
+    out = slash("previous", it)
+    check("/previous names the track it goes back to", "Going back to **earlier song**" in out, out)
+    check("/previous stops the current source so the queue advances",
+          it.guild.voice_client.stopped and p.back_requested)
+    check("/previous queues it first, then the interrupted track",
+          [t.title for t in p.queue] == ["earlier song", "playing", "next up"],
+          [t.title for t in p.queue])
+    _started.clear()
+    asyncio.run(amy.advance_playback(it.guild))       # what vc.stop()'s callback does
+    check("the advance plays the previous track", _started == ["earlier song"], _started)
+    check("and doesn't record the interrupted one (it's queued, not done)",
+          list(p.history) == [], [t.title for t in p.history])
+    check("the go-back flag is consumed", p.back_requested is False)
+
+    # Nothing playing - the queue ran out - replays the last track, in the background.
+    p, it = setup(USER, "userA", [])
+    p.current = None
+    it.guild.voice_client.stopped = True
+    p.history.append(make_track(amy, "last one"))
+    _started.clear()
+    _drive(lambda: amy.tree.get_command("previous").callback(it))
+    check("with nothing playing, /previous replays the last track", _started == ["last one"],
+          _started)
+
+    p, it = setup(USER, "userA", ["t1"])
+    check("no history says so",
+          "There's no previous track" in slash("previous", it))
+    check("and stops nothing", not it.guild.voice_client.stopped)
+
+    stranger = Member(56, VoiceChannel(12, "elsewhere"), name="stranger")
+    p, it = setup(USER, "userA", ["t1"])
+    p.history.append(make_track(amy, "x"))
+    it_far = Interaction(stranger, Guild(OWNER, stranger, it.guild.voice_client, guild_id=GUILD))
+    check("someone outside Amy's channel can't go back",
+          "You need to be in my voice channel" in slash("previous", it_far))
+    check("...and the history is untouched", len(p.history) == 1)
+
+    # The button shares go_back with the command.
+    p, it = setup(USER, "userA", [])
+    p.history.append(make_track(amy, "via button"))
+    asyncio.run(amy.PlayerControls().previous_button.callback(it))
+    check("the Previous button goes back too",
+          [t.title for t in p.queue][:2] == ["via button", "playing"] and p.back_requested,
+          [t.title for t in p.queue])
+    p, it = setup(USER, "userA", [])
+    asyncio.run(amy.PlayerControls().previous_button.callback(it))
+    check("the button with no history explains itself",
+          "There's no previous track" in text_of(None, it), text_of(None, it))
+finally:
+    amy.music.play_track, amy.refresh_now_playing = _real_play, _real_refresh
+
 # The exit code is set by _check's gate, wherever a failure happens. It used to be one
 # `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could
 # print FAIL while the script exited 0 - the restore path looked covered and wasn't.

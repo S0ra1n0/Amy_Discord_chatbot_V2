@@ -98,6 +98,16 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   playing, `advance_playback` calls `finish_playback` itself, since no after-callback will.
 - **`player.resume_position` is one-shot**, consumed by the next `advance_playback` like
   `skip_requested`. Otherwise a later track would also start partway through.
+- **History for `/previous` is recorded in one place**, `music.advance_with_history`: a track
+  goes on `player.history` only when playback moves past it (not when TRACK loop replays it),
+  and `stop_all` adds what was playing. `step_back` puts the previous track first and the
+  interrupted one right after it, then sets `back_requested` (one-shot) so that advance takes
+  the front and records nothing - recording the interrupted track would make a second
+  `/previous` bounce back to it instead of walking further back. Bounded by `MAX_HISTORY`,
+  in memory only, cleared by `reset` when Amy leaves voice.
+- **Fire-and-forget tasks go through `spawn()`**, which holds a reference until they finish.
+  asyncio keeps only a weak one, so a bare `asyncio.create_task` can be garbage collected
+  mid-flight and a track would silently never start.
 - **The periodic snapshot skips a player whose lock is held.** Mid-advance, the next track
   exists only in a local variable.
 - **Stream URLs expire** (about 6 hours). Metadata is resolved when a track is queued; the

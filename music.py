@@ -33,6 +33,7 @@ FFMPEG_RECONNECT_OPTIONS: str = (
 FFMPEG_OPTIONS: str = "-vn"
 
 IDLE_DISCONNECT_DELAY: int = 300  # Leave 5 minutes after the queue runs dry
+MAX_HISTORY: int = 20   # how far /previous can walk back; in memory, so a restart clears it
 MAX_QUEUE_SIZE: int = 100
 MAX_PLAYLIST_TRACKS: int = 50  # Cap one playlist so it can't monopolise the queue
 SEARCH_RESULTS: int = 5        # Options offered by /search (Discord allows 25 max)
@@ -154,6 +155,52 @@ def advance_queue(
     if mode is LoopMode.QUEUE and current is not None:
         queue.append(current)
     return queue.popleft() if queue else None
+
+
+def advance_with_history(
+    current: Optional[Track],
+    queue: Deque[Track],
+    history: Deque[Track],
+    mode: LoopMode,
+    force_next: bool = False,
+    going_back: bool = False,
+) -> Optional[Track]:
+    """
+    advance_queue, plus remembering what was left behind for /previous.
+
+    The track being left goes on `history` only when playback actually moves on - not when
+    TRACK loop replays it. When `going_back`, step_back has already arranged the queue
+    (previous track first, the interrupted one right after), so the front is simply taken:
+    recording `current` then would make a second /previous bounce back to it instead of
+    walking further back, and QUEUE loop would add a duplicate of it to the rotation.
+    """
+    if going_back:
+        return queue.popleft() if queue else None
+    nxt = advance_queue(current, queue, mode, force_next=force_next)
+    if current is not None and nxt is not current:
+        history.append(current)
+    return nxt
+
+
+def step_back(current: Optional[Track], queue: Deque[Track],
+              history: Deque[Track]) -> Optional[Track]:
+    """
+    Arrange the queue so the previous track plays next. Returns it, or None if there's none.
+
+    `current` (what's playing now, or None if nothing is) goes back to the front, right after
+    the previous track, so going back never loses the song that was interrupted. In QUEUE loop
+    the previous track was also rotated to the back of the queue when it finished; that copy
+    is removed so going back doesn't leave it in the rotation twice.
+    """
+    if not history:
+        return None
+    prev = history.pop()
+    if queue and queue[-1] is prev:
+        queue.pop()
+    if current is not None:
+        queue.appendleft(current)
+    queue.appendleft(prev)
+    return prev
 
 
 def total_pages(queue_len: int, page_size: int = QUEUE_PAGE_SIZE) -> int:
@@ -561,6 +608,11 @@ class GuildPlayer:
         # Set by /skip and /skipto, consumed by the next advance so an explicit skip
         # isn't swallowed by TRACK loop mode
         self.skip_requested: bool = False
+        # Tracks that finished or were skipped, newest last, for /previous. Bounded so a long
+        # session can't grow it forever.
+        self.history: Deque[Track] = deque(maxlen=MAX_HISTORY)
+        # Set by /previous, consumed by the next advance, like skip_requested
+        self.back_requested: bool = False
         # Where to post the now-playing card, and the live message itself. advance_playback
         # runs from the audio thread's callback and has no message context of its own.
         self.text_channel_id: Optional[int] = None
@@ -627,9 +679,13 @@ class GuildPlayer:
         these lines separately, and the generation bump is what stops an in-flight start
         from bringing the music back.
         """
+        # What was playing stays reachable: /previous after an accidental /stop brings it back.
+        if self.current is not None:
+            self.history.append(self.current)
         self.queue.clear()
         self.loop_mode = LoopMode.OFF
         self.skip_requested = False
+        self.back_requested = False
         self.current = None
         self.resume_position = 0.0
         self.generation += 1
@@ -639,6 +695,7 @@ class GuildPlayer:
         self.stop_all()
         self.now_playing_msg = None
         self.last_played = None
+        self.history.clear()      # leaving voice ends the session
         self.mark_stopped()
 
 

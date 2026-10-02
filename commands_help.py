@@ -18,6 +18,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/search [song]` - Show the top 5 matches and pick one
 `/pause` / `/resume` - Pause or resume playback
 `/skip` - Skip the current track
+`/previous` - Go back to the previous track
 `/seek [position]` - Jump to a spot (`1:30`, `1:02:03` or `90`)
 `/replay` - Restart the current track from the beginning
 `/stop` - Stop playback and clear the queue (I stay in the channel)

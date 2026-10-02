@@ -45,8 +45,8 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | ----- | ------ |
 | `test_music.py` | duration/volume parsing, loop modes, queue advance, `MusicManager` |
 | `test_voice.py` | channel-name sanitising, the `decide_join_action` and `decide_restore_action` truth tables, voice-channel DB |
-| `test_ui.py` | every embed builder, Discord's length limits, `PlayerControls` persistence rules |
-| `test_queue_mgmt.py` | playlist-URL detection, pagination, remove/shuffle/skipto helpers |
+| `test_ui.py` | every embed builder, Discord's length limits, `PlayerControls` persistence rules and button order (Previous, Pause, Skip, Stop) |
+| `test_queue_mgmt.py` | playlist-URL detection, pagination, remove/shuffle/skipto helpers, `/previous` history (recorded only when playback moves on, walks back without bouncing, no QUEUE-loop duplicates, bounded) |
 | `test_queue_cmds.py` | queue commands end-to-end through mocked Discord objects |
 | `test_voice_cmds.py` | voice command permissions and cooldowns |
 | `test_regression.py` | rate limiters, message splitting, `<think>`-tag stripping, history window, model warm-up, settings persistence, the slash error handler |

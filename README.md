@@ -14,7 +14,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - **Music playback** — queue tracks from YouTube (search, URL, or whole playlists), direct audio URLs, or local files
 - **Queue management** — paginated listing, remove, shuffle, skip-to, and clear
 - **`/search` picker** — choose from the top 5 matches instead of accepting the first hit
-- **Rich embeds and player buttons** — now-playing card with thumbnail, plus Pause/Skip/Stop buttons that survive a bot restart
+- **Rich embeds and player buttons** — now-playing card with thumbnail, plus Previous/Pause/Skip/Stop buttons that survive a bot restart
 - Runtime model switching — swap the active Ollama model without restarting the bot
 - Long responses/replies automatically split across multiple Discord messages instead of being truncated
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
@@ -51,6 +51,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/search [song]`         | Show the top 5 matches and pick one from a menu                           | In-channel |
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
 | `/skip`                  | Skip the current track                                                    | In-channel |
+| `/previous`               | Go back to the previous track                                             | In-channel |
 | `/seek [position]`       | Jump to a spot in the current track (`1:30`, `1:02:03` or `90`)           | In-channel |
 | `/replay`                | Restart the current track from the beginning                              | In-channel |
 | `/stop`                  | Stop playback and clear the queue (Amy stays in the channel)              | In-channel or admin |
@@ -342,7 +343,7 @@ whose saved row can't be read is skipped individually rather than failing the wh
 
 ### Player controls
 
-The now-playing card carries three buttons — **Pause/Resume**, **Skip** and **Stop**.
+The now-playing card carries four buttons — **Previous**, **Pause/Resume**, **Skip** and **Stop**. **Previous** (and `/previous`) plays the last track again and puts the interrupted one straight after it; repeating it walks further back, up to 20 tracks. History is kept in memory, so a restart clears it.
 
 They follow exactly the same permission rule as the equivalent commands: you must be in Amy's
 voice channel, or be an admin. Pressing one without permission gets a private (ephemeral)
