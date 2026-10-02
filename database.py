@@ -1,5 +1,7 @@
 # database.py
 import sqlite3
+
+import config
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # How many messages are kept per channel by default, and therefore how far back Amy can
@@ -170,10 +172,10 @@ class ConversationDB:
 
     def get_bool_setting(self, key: str, default: bool) -> bool:
         """Boolean form of get_setting. Anything unrecognised falls back to `default`."""
-        raw = self.get_setting(key)
-        if raw is None:
-            return default
-        return raw.strip().lower() in ("1", "true", "yes", "on")
+        # Same vocabulary as the .env parser. This used to read anything unrecognised as
+        # False, contradicting the docstring - a hand-edited "enabled" turned Amy off.
+        value, _ = config.parse_bool(key, self.get_setting(key), default)
+        return value
 
     def set_bool_setting(self, key: str, value: bool) -> None:
         self.set_setting(key, "true" if value else "false")

@@ -43,7 +43,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/forget`                | Wipe conversation memory for the current channel (asks for confirmation)  | Admin only |
 | `/dice [sides] [amount]` | Roll dice — defaults to one 6-sided; shows each roll when rolling several | Everyone   |
 | `/rng [min] [max]`       | Generate a random number between min and max (e.g., `/rng 0 999`)         | Everyone   |
-| `/websearch [query] [recency]` | Search the web and show the results, optionally limited to the past day/week/month/year | Everyone   |
+| `/websearch [query] [recency]` | Search the web and show the results, optionally limited to the past day/week/month/year (blank = no date filter) | Everyone   |
 | `/join`                  | Bring Amy into the voice channel you're currently in                      | Everyone   |
 | `/leave`                 | Make Amy leave her voice channel                                          | In-channel or admin |
 | `/create [name]`         | Create a new voice channel and have Amy join it (e.g., `/create Music Room`) | Admin only |
@@ -126,10 +126,16 @@ Reading result pages means making requests to arbitrary URLs, so two limits appl
 - **At most 2MB per page**, streamed and abandoned past that. `httpx` timeouts are
   per-operation rather than total elapsed, so a server that dribbles bytes can otherwise
   outlast the 5-second budget — a 40MB page measured 5.7s and 120MB of memory before this cap.
+- **At most 8 seconds per page, start to finish.** The 2MB cap bounds size, not time: a
+  server sending one byte every few seconds never trips a per-read timeout and would take
+  millions of reads to fill 2MB, leaving the reply stuck on "Reading sources…". A page
+  that runs out of time simply falls back to its search snippet.
 
-Page text is still untrusted input. Amy was tested against three injection styles planted in
-page bodies — a direct "ignore all previous instructions", a fake `[SYSTEM]` directive, and a
-persona swap — and ignored all three, answering the actual question instead.
+Page text is still untrusted input. In a one-off manual check during development, Amy
+ignored three injection styles planted in page bodies — a direct "ignore all previous
+instructions", a fake `[SYSTEM]` directive, and a persona swap — and answered the actual
+question. Treat that as an observation about one small model on one day, not a guarantee:
+there is no automated test for it, which is why the protections below don't rely on it.
 
 #### Amy can't be made to mass-ping the server
 
@@ -241,7 +247,7 @@ If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tra
 
 **Playlists.** Pasting a playlist URL queues up to **50** tracks at once; Amy reports how many loaded and how many were skipped as unavailable or over the cap. Share links that name a single video (`watch?v=VIDEO&list=PLAYLIST` and `youtu.be/VIDEO?list=PLAYLIST`) queue **only that one video**, so an ordinary YouTube link can't dump hundreds of tracks into the queue. Unavailable entries (private, deleted, age-restricted) are skipped rather than failing the whole request.
 
-Local files play from `.mp3`, `.m4a`, `.opus`, `.wav` and `.flac`, and `/seek` works on them too.
+Local files play from `.mp3`, `.m4a`, `.opus`, `.wav` and `.flac`, and `/seek` works on them too. Every local track is re-checked against `MUSIC_DIR` at the moment it plays — not just when it was queued — so a track restored from a saved queue won't play if `MUSIC_DIR` has since been unset or moved.
 
 **Local files are off by default.** Set `MUSIC_DIR` in `.env` to a folder to enable them, and `/play` will only read files inside it — `..`, symlinks, and absolute paths pointing elsewhere are all rejected. Without this restriction, any server member could name any path on the host and confirm whether it exists.
 

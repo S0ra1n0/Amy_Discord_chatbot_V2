@@ -615,6 +615,31 @@ finally:
     amy.music.restart_at, amy.music.play_track, amy.refresh_now_playing = _m7_saved
     amy.music_manager.cleanup(GUILD)
 
+# ---- /websearch with no recency chosen does not filter (review L5) ----------------------
+_ws_seen = []
+_ws_real = amy.websearch.search
+
+
+async def _record_search(query, limit=5, recency=None, with_content=True):
+    _ws_seen.append(recency)
+    return []
+
+amy.websearch.search = _record_search
+try:
+    _cmd = amy.tree.get_command("websearch")
+    _p, _it = setup(OWNER, "owner", [])
+    asyncio.run(_cmd.callback(_it, "latest iphone", None))
+    check("L5: /websearch with no recency asks for no filter", _ws_seen == ["any"], _ws_seen)
+
+    class _Choice:
+        value = "week"
+    _ws_seen.clear()
+    _p, _it = setup(OWNER, "owner", [])
+    asyncio.run(_cmd.callback(_it, "latest iphone", _Choice()))
+    check("L5: /websearch with a recency passes it through", _ws_seen == ["week"], _ws_seen)
+finally:
+    amy.websearch.search = _ws_real
+
 # One gate, at the very end. It used to sit above the snapshot/restore section, so ~30
 # checks there could print FAIL while the script still exited 0 and reported success -
 # the restore path looked covered and wasn't.

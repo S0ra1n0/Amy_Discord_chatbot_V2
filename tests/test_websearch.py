@@ -249,6 +249,64 @@ check("nothing mention-shaped reaches the model's context",
       all(m not in _msg for m in ("@everyone", "@here", "<@&", "<@")), _msg[:160])
 
 print()
+print("=== an explicit 'any' recency means no date filter at all (review L5) ===")
+# /websearch's recency option reads "only show results from this recently", so leaving it
+# blank should mean no filter. It used to fall through to inference, so "/websearch latest
+# iphone" was silently limited to the past week, with no way to ask for everything.
+_p = websearch.search_params("latest iphone", recency=None)
+check("Amy's own searches still infer a window from the wording", _p.get("df") == "w", _p)
+_p = websearch.search_params("latest iphone", recency="any")
+check("'any' sends no date filter", "df" not in _p, _p)
+_p = websearch.search_params("latest iphone", recency="day")
+check("an explicit window is used as given", _p.get("df") == "d", _p)
+check("the region is always pinned", websearch.search_params("x", None).get("kl") == "us-en")
+
+print()
+print("=== a page that drips bytes slowly cannot hold a reply hostage (review L7) ===")
+# httpx timeouts are per read, so a server sending one byte just inside the read timeout,
+# forever, never trips it. The byte cap would take ~2 million reads to reach. fetch_page
+# now has an overall deadline.
+import time as _time2
+import httpx
+
+
+async def _drip():
+    yield b"<html><body><p>"
+    for _ in range(10000):
+        await asyncio.sleep(0.05)
+        yield b"x"
+
+
+def _drip_handler(request):
+    return httpx.Response(200, headers={"content-type": "text/html"}, content=_drip())
+
+
+_real_public, _real_deadline = websearch.host_is_public, websearch.PAGE_DEADLINE
+
+
+async def _yes(host):
+    return True
+
+
+websearch.host_is_public, websearch.PAGE_DEADLINE = _yes, 0.5
+try:
+    async def _fetch_slow():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_drip_handler)) as c:
+            return await websearch.fetch_page(c, "http://slow.test/page")
+    _t0 = _time2.time()
+    try:
+        # Bound the test itself: if the deadline ever regresses, fail in 5s, don't hang.
+        _slow = asyncio.run(asyncio.wait_for(_fetch_slow(), timeout=5))
+    except asyncio.TimeoutError:
+        _slow = "<still fetching after 5s>"
+    _took = _time2.time() - _t0
+    check("a slow-drip page gives up instead of hanging", _slow == "", _slow[:60])
+    check("within its overall deadline (took %.1fs, deadline 0.5s)" % _took, _took < 3.0, _took)
+finally:
+    websearch.host_is_public, websearch.PAGE_DEADLINE = _real_public, _real_deadline
+check("the real deadline is short enough for a chat reply",
+      0 < websearch.PAGE_DEADLINE <= 15, websearch.PAGE_DEADLINE)
+print()
 print("=== the tool stays single-parameter ===")
 # A second parameter (a recency enum for the model to fill in) measurably cost search
 # decisions: 12/12 correct searches fell to 7/12 on the same questions with the same

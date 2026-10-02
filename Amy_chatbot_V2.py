@@ -1986,7 +1986,8 @@ async def slash_websearch(interaction: discord.Interaction, query: str,
     await interaction.response.defer()
     # This view is about the raw sources, so skip fetching page bodies - they cost several
     # seconds and never reach the embed. Amy's own searches during conversation do fetch them.
-    results = await websearch.search(query, recency=recency.value if recency else None,
+    # Blank recency means no filter, as the option's wording says - not "infer one".
+    results = await websearch.search(query, recency=recency.value if recency else "any",
                                      with_content=False)
     await send_reply(interaction, Reply(embed=ui.search_web_embed(query, results)))
 
@@ -2235,7 +2236,7 @@ async def on_app_command_error(interaction: discord.Interaction,
     """
     Catch anything a slash command didn't handle itself.
 
-    None of the 25 command callbacks wrap their own body, so without this an unexpected
+    None of the command callbacks wrap their own body, so without this an unexpected
     exception - yt-dlp changing, Ollama dying mid-reply, Discord refusing an edit - reaches
     discord.py's default handler, which logs to stderr and leaves the interaction unanswered.
     The user sees "The application did not respond", or nothing at all if the command had

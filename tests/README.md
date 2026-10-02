@@ -59,6 +59,9 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
 - `test_ui.py` — a long track title exceeded Discord's limit and rejected the whole message
+- `test_security.py` — a local track restored from the saved queue played its stored path without re-checking `MUSIC_DIR`, so unsetting `MUSIC_DIR` didn't stop it. The sandbox is now re-checked at play time.
+- `test_websearch.py` — a page dripping one byte at a time never tripped the per-read timeout, hanging the reply. `fetch_page` has an overall deadline; the test bounds itself so a regression fails in seconds instead of hanging the suite. `/websearch` with no recency chosen also no longer applies an inferred date filter.
+- `test_regression.py` — `get_bool_setting` read any unrecognised stored value as False, contradicting its docstring; a hand-edited `enabled` turned Amy off.
 - `test_config.py` — `HISTORY_LIMIT` in `.env` never worked: `database.py` read it at import, before the bot had loaded `.env`, so Amy always used 10. Also `HISTORY_LIMIT=abc` crashed startup with a bare traceback, and `WEB_SEARCH=ture` silently turned search off.
 - `test_websearch.py` — the SSRF redirect check. The old test redirected from a URL that was itself loopback, so it was refused on the first hop and the redirect was never read; with the per-hop check deleted, it still passed. It now uses `httpx.MockTransport` so a genuinely public page redirects to `192.168.1.1`, with a public-to-public redirect as a control so a broken redirect loop can't pass by accident.
 - `test_queue_cmds.py` — `/seek` and `/replay` end to end, including the lock: the test fires the old track's after-callback mid-seek, exactly as discord.py does, and without the lock the next song is popped and played instead.

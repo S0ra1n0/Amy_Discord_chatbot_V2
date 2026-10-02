@@ -460,7 +460,13 @@ async def search_tracks(
 async def resolve_stream_url(track: Track) -> str:
     """Resolve the actual playable URL. Called immediately before playback."""
     if track.is_local:
-        return track.query
+        # Re-check the sandbox now, not just when the track was queued. A track restored
+        # from the saved queue carries an absolute path from a previous run; if MUSIC_DIR
+        # has since been unset or moved, that path must not reach FFmpeg.
+        path = resolve_local_path(track.query)
+        if path is None:
+            raise ValueError("local playback is off, or this file is outside MUSIC_DIR")
+        return path
 
     loop = asyncio.get_running_loop()
     info = await loop.run_in_executor(None, _ytdl_extract, track.query)

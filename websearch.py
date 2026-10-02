@@ -14,7 +14,8 @@ Precision comes from four things, each measured rather than assumed:
     Fetching the page itself yields thousands of characters of real prose, so the top few
     results are fetched and their body text handed to the model alongside the snippet.
   * **Recency.** DuckDuckGo's `df` filter genuinely re-ranks: on a sample query the filtered
-    results overlapped the unfiltered ones in 0 of 6 URLs. The model picks the window.
+    results overlapped the unfiltered ones in 0 of 6 URLs. The window is inferred from
+    the query's wording (infer_recency) - the model is not asked to choose it.
   * **Region.** Without `kl` the endpoint geolocates - "hot news today" from Vietnam returned
     five Vietnamese-language sites. Pinning `us-en` returns CNN, BBC and Google News.
   * **Deduplication.** The same domain routinely appears twice in one result page.
@@ -55,8 +56,8 @@ SEARCH_POOL: int = 10
 # Vietnam comes back with Vietnamese-language sources the model then has to guess at.
 DDG_REGION: str = "us-en"
 
-# DuckDuckGo's date filter. The model chooses the window through the tool call; anything
-# else (including "any") means no filter at all.
+# DuckDuckGo's date filter. The window comes from infer_recency (Amy's own searches) or the
+# /websearch option; anything else (including "any") means no filter at all.
 RECENCY_CODES: Dict[str, str] = {"day": "d", "week": "w", "month": "m", "year": "y"}
 
 #----Page fetching------
@@ -72,6 +73,10 @@ BROWSER_HEADERS: Dict[str, str] = {
 }
 ENRICH_COUNT: int = 4       # fetched concurrently, so this costs one slow page, not four
 PAGE_TIMEOUT: float = 5.0   # a slow page must not hold up the whole answer
+# The whole fetch of one page, start to finish. PAGE_TIMEOUT is per network read, so a
+# server dripping one byte just inside it, forever, never tripped it - the reply sat on
+# "Reading sources..." indefinitely. This bounds the total.
+PAGE_DEADLINE: float = 8.0
 MIN_PAGE_CHARS: int = 400   # below this it's a cookie banner or a JS shell, not content
 MAX_PAGE_CHARS: int = 1200  # per page, to keep the tool message bounded for a small model
 
@@ -253,6 +258,24 @@ def dedupe_by_domain(results: List[SearchResult],
         if len(kept) >= limit:
             break
     return kept
+
+
+def search_params(query: str, recency: Optional[str]) -> Dict[str, str]:
+    """
+    The form fields for one DuckDuckGo request.
+
+    `recency` None means "infer it from the wording" (Amy's own searches). An explicit
+    "any" means no date filter at all - which is what /websearch sends when its recency
+    option is left blank. It used to send None, so leaving the option blank still got an
+    inferred filter: "/websearch latest iphone" was silently limited to the past week.
+    """
+    params: Dict[str, str] = {"q": query, "kl": DDG_REGION}
+    if recency is None:
+        recency = infer_recency(query)
+    code = recency_code(recency)
+    if code:
+        params["df"] = code
+    return params
 
 
 def recency_code(recency: Optional[str]) -> Optional[str]:
@@ -449,6 +472,19 @@ async def host_is_public(host: str) -> bool:
 
 async def fetch_page(client: httpx.AsyncClient, url: str) -> str:
     """
+    Fetch one result page and return its body text, or "" if it can't be read in time.
+
+    Bounded by PAGE_DEADLINE overall. Never raises.
+    """
+    try:
+        return await asyncio.wait_for(_fetch_page(client, url), timeout=PAGE_DEADLINE)
+    except asyncio.TimeoutError:
+        log(f"[INFO] Gave up on a page after {PAGE_DEADLINE}s: {url[:80]}")
+        return ""
+
+
+async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
+    """
     Fetch one result page and return its body text, or "" if it can't be read.
 
     Redirects are followed by hand rather than by httpx, so that every hop gets the same
@@ -540,12 +576,7 @@ async def search(query: str, limit: int = DEFAULT_LIMIT,
     if not query:
         return []
 
-    params: Dict[str, str] = {"q": query, "kl": DDG_REGION}
-    if recency is None:
-        recency = infer_recency(query)
-    code = recency_code(recency)
-    if code:
-        params["df"] = code
+    params = search_params(query, recency)
 
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:

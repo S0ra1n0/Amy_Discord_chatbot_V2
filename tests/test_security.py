@@ -74,6 +74,32 @@ os.environ.pop("MUSIC_DIR", None)
 shutil.rmtree(base, ignore_errors=True)
 shutil.rmtree(sibling, ignore_errors=True)
 
+# --- review L8: a local track is re-checked against the sandbox when it PLAYS ---
+# A track saved in the queue snapshot is rebuilt at startup and handed to FFmpeg. If
+# MUSIC_DIR had since been unset or moved, the stored absolute path still played - the
+# check only happened when the track was first queued.
+print()
+print("=== local tracks are re-checked at play time ===")
+_play_dir = tempfile.mkdtemp(prefix="amy_play_")
+_song = os.path.join(_play_dir, "song.mp3")
+open(_song, "wb").close()
+os.environ["MUSIC_DIR"] = _play_dir
+_inside = music.Track(title="song.mp3", query=os.path.realpath(_song), is_local=True)
+check("a track inside MUSIC_DIR still plays",
+      asyncio.run(music.resolve_stream_url(_inside)) == os.path.realpath(_song))
+_forged = music.Track(title=".env", query=os.path.join(PROJ, ".env"), is_local=True)
+try:
+    asyncio.run(music.resolve_stream_url(_forged))
+    check("a stored path outside MUSIC_DIR is refused", False)
+except Exception:
+    check("a stored path outside MUSIC_DIR is refused", True)
+os.environ.pop("MUSIC_DIR", None)
+try:
+    asyncio.run(music.resolve_stream_url(_inside))
+    check("with MUSIC_DIR unset, a previously valid local track is refused", False)
+except Exception:
+    check("with MUSIC_DIR unset, a previously valid local track is refused", True)
+
 # --- review M10: nothing Amy sends may ping @everyone, a role, or an arbitrary user ---
 # discord.py sends no mention restriction unless the client sets one, and Discord then
 # parses everything. Amy repeats text she doesn't control - model replies, which can be

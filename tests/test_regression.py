@@ -139,13 +139,21 @@ assert _sdb.get_setting("model") == "llama3:8b", "second write must overwrite"
 assert _sdb.conn.execute("SELECT COUNT(*) FROM settings WHERE key='model'").fetchone()[0] == 1,     "upsert must not leave duplicate rows"
 
 for stored, expected in [("true", True), ("True", True), ("1", True), ("yes", True),
-                         ("on", True), ("false", False), ("0", False), ("", False),
-                         ("nonsense", False)]:
+                         ("on", True), ("false", False), ("0", False)]:
     _sdb.set_setting("flag", stored)
     assert _sdb.get_bool_setting("flag", True) is expected,         "%r should read back as %s" % (stored, expected)
 
 _sdb.set_bool_setting("bot_enabled", False)
 assert _sdb.get_bool_setting("bot_enabled", True) is False
+
+# Review L6: the docstring promised unrecognised values fall back to the default, but the
+# code read anything unrecognised as False - a hand-edited "enabled" turned Amy OFF.
+for stored, default, expected in [("enabled", True, True), ("maybe", True, True),
+                                  ("maybe", False, False), ("on", False, True),
+                                  ("off", True, False), ("", True, True)]:
+    _sdb.set_setting("flag", stored)
+    assert _sdb.get_bool_setting("flag", default) is expected, \
+        "%r with default %s should read as %s" % (stored, default, expected)
 
 # Reopening is what a restart actually does.
 _sdb.conn.close()
@@ -158,7 +166,7 @@ print("settings persistence: OK (upsert, bool parsing, survives reopen)")
 assert amy.DEFAULT_MODEL, "a fallback model must exist for when a saved one is uninstalled"
 
 # ---- Slash command errors reach the user ----------------------------------------------
-# All 25 command callbacks are unguarded, so without tree.error an unexpected exception
+# The command callbacks are unguarded, so without tree.error an unexpected exception
 # leaves the interaction unanswered and the user sees "application did not respond".
 from discord import app_commands as _ac
 import discord as _dc
