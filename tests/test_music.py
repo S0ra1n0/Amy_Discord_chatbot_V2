@@ -7,7 +7,7 @@ sys.path.insert(0, PROJ)
 os.chdir(PROJ)
 
 import music
-from music import LoopMode, Track, advance_queue, format_duration, parse_volume
+from music import LoopMode, Track, advance_queue, format_duration
 
 def T(name, dur=None):
     return Track(title=name, query=name, duration=dur, requested_by="tester")
@@ -23,16 +23,6 @@ assert format_duration(None) == "?:??"
 assert format_duration(-1) == "?:??"
 print("format_duration: OK (8 cases)")
 
-# ---- parse_volume ----
-assert parse_volume("0") == 0
-assert parse_volume("50") == 50
-assert parse_volume("100") == 100
-assert parse_volume("101") is None
-assert parse_volume("-1") is None
-assert parse_volume("abc") is None
-assert parse_volume("") is None
-assert parse_volume("5.5") is None
-print("parse_volume: OK (8 cases)")
 
 # ---- advance_queue: LoopMode.OFF ----
 q = deque([T("b"), T("c")])

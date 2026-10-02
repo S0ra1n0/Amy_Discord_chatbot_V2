@@ -98,6 +98,7 @@ Several were written *after* a bug reached the running bot, and now stop it recu
   now records through `_check.py`, whose gate runs at exit, so this can't recur by placement;
   verified by appending a failing check after `finish` in four suites — each exits 1.
 - `test_schema.py` — `ConversationDB` leaked its SQLite connection when opening failed: the error raised out of `__init__` and nothing ever closed it, so on Windows the database file stayed locked until garbage collection. Found while writing the schema tests, when the temp directory couldn't be deleted.
+- `test_queue_cmds.py` — `/play` squashed runs of spaces in the query, so a local file named `My  Song.mp3` could never be found: the old string dispatcher split every argument on whitespace and joined it back. The typed handlers pass the query through; the test drives the real slash callbacks (`slash(...)`), which also covers the argument wiring and the commands that had no direct test until then (pause, resume, skip, nowplaying, volume, loop). Writing it showed `/volume <level>` had never run in a test: the fake voice client lacked `source`.
 - **Every suite that imports the bot** — failed on a fresh clone. With no `.env` the bot exits
   at import for want of a `DISCORD_TOKEN`, so 8 of the 14 offline suites failed, though both
   READMEs said they needed no token. Found by running them from a clean `git clone` before

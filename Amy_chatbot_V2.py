@@ -10,7 +10,9 @@ import random
 import httpx
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 from dotenv import dotenv_values, load_dotenv
 import ollama
@@ -935,14 +937,14 @@ NEXT: str = "⏭"           # next track
 
 #----Command Groups------
 # Harmless reads - exempt from the voice cooldown so checking the queue never costs a slot
-MUSIC_READONLY_COMMANDS = ("queue", "nowplaying")
 #--------------------------------------
 
 #----Player Buttons------
 def may_control_playback(guild: Optional[discord.Guild], user_id: int) -> bool:
     """
-    Same rule the text commands use: you must be in Amy's voice channel, or be an admin.
-    Shared so a button can never become a way around a command's permission check.
+    The one playback-permission rule: you must be in Amy's voice channel, or be an admin.
+    Used by both the music commands (MusicContext.may_control) and the player buttons, so
+    neither can become a way around the other.
     """
     if guild is None:
         return False
@@ -1294,383 +1296,436 @@ async def idle_disconnect(guild: discord.Guild) -> None:
 #--------------------------------------
 
 #----Music Command Handlers------
-async def execute_music_command(
-    command: str,
-    parts: List[str],
-    interaction: discord.Interaction,
-    guild: discord.Guild,
-) -> Union[str, Reply]:
-    """Handle the music commands. `guild` is already narrowed to non-optional."""
-    player = music_manager.player_for(guild.id)
-    vc = voice.get_voice_client(guild)
-    member = guild.get_member(interaction.user.id)
+# One typed function per command. The slash layer converts and bounds every argument through
+# Discord's own typing (ranges, choices), so these receive ints and enums, never raw text.
+# They used to share a ~380-line dispatcher keyed on the command name, which turned typed
+# slash arguments back into strings and parsed them again - a holdover from prefix commands,
+# whose "must be a number" checks could no longer fire.
 
-    def in_voice_with_amy() -> bool:
-        current = voice.active_channel(vc)
-        return bool(
-            current and member and member.voice and member.voice.channel
-            and member.voice.channel.id == current.id
-        )
+NOT_CONNECTED = "I'm not in a voice channel."
+NOT_WITH_AMY = "You need to be in my voice channel to do that."
+ADMIN_ONLY_MSG = "You don't have permission to use this command. (Admin only)"
+MusicResult = Union[str, Reply]
 
-    # --- read-only commands, no connection required ---
-    if command == "queue":
-        page = 1
-        if len(parts) > 1:
-            try:
-                page = int(parts[1])
-            except ValueError:
-                return Reply(embed=ui.error_embed("Page must be a number. Usage: `/queue` or `/queue 2`"))
-        return Reply(embed=ui.queue_embed(player.current, player.queue,
-                                          player.loop_mode, page=page))
 
-    if command in ("nowplaying", "np"):
-        if player.current is None:
-            return Reply(embed=ui.info_embed("Nothing is playing right now."))
-        paused = bool(vc and vc.is_paused())
-        return Reply(
-            embed=ui.now_playing_embed(player.current, len(player.queue),
-                                       player.loop_mode, player.volume, paused=paused,
-                                       elapsed=player.position()),
-            view=PlayerControls(paused=paused),
-        )
+def _error(text: str) -> Reply:
+    return Reply(embed=ui.error_embed(text))
 
-    if command == "search":
-        if len(parts) < 2:
-            return Reply(embed=ui.error_embed(
-                "What should I search for? Usage: `/search <song name>`"))
-        if music.find_ffmpeg() is None:
-            return Reply(embed=ui.error_embed(
-                "FFmpeg isn't available on my host, so I can't play audio."))
 
-        query = " ".join(parts[1:])
-        shown = query if len(query) <= 100 else query[:100] + "..."
-        status_msg = await interaction.followup.send(SEARCH + " Searching for **" + shown + "**...", wait=True)
-        try:
-            results = await music.search_tracks(query, requested_by=str(interaction.user))
-        except Exception as e:
-            safe_print("[ERROR] Search failed: " + str(e))
-            await status_msg.edit(content=None,
-                                  embed=ui.error_embed("That search went wrong. Try again."))
-            return ""
+def _info(text: str) -> Reply:
+    return Reply(embed=ui.info_embed(text))
 
-        if not results:
-            await status_msg.edit(content=None, embed=ui.error_embed(
-                "Nothing found for `" + shown + "`."))
-            return ""
 
-        view = SearchResults(results, interaction.user.id, guild, query=query)
+@dataclass
+class MusicContext:
+    """What every music command needs, resolved once per invocation."""
+    interaction: discord.Interaction
+    guild: discord.Guild
+    player: music.GuildPlayer
+    vc: Optional[discord.VoiceClient]
+    member: Optional[discord.Member]
+
+    @classmethod
+    def build(cls, interaction: discord.Interaction, guild: discord.Guild) -> "MusicContext":
+        return cls(interaction, guild, music_manager.player_for(guild.id),
+                   voice.get_voice_client(guild), guild.get_member(interaction.user.id))
+
+    @property
+    def user_id(self) -> int:
+        return self.interaction.user.id
+
+    def is_admin(self) -> bool:
+        return is_admin_member(self.guild, self.user_id)
+
+    def may_control(self) -> bool:
+        # The same rule the player buttons use, so neither can become a way around the other.
+        return may_control_playback(self.guild, self.user_id)
+
+    def connected(self) -> Optional[discord.VoiceClient]:
+        """The voice client if Amy is connected, else None - narrows for the type checker."""
+        return self.vc if self.vc is not None and self.vc.is_connected() else None
+
+
+# --- read-only, no connection needed ---
+
+async def music_queue(ctx: MusicContext, page: int = 1) -> MusicResult:
+    p = ctx.player
+    return Reply(embed=ui.queue_embed(p.current, p.queue, p.loop_mode, page=page))
+
+
+async def music_nowplaying(ctx: MusicContext) -> MusicResult:
+    p = ctx.player
+    if p.current is None:
+        return _info("Nothing is playing right now.")
+    paused = bool(ctx.vc and ctx.vc.is_paused())
+    return Reply(
+        embed=ui.now_playing_embed(p.current, len(p.queue), p.loop_mode, p.volume,
+                                   paused=paused, elapsed=p.position()),
+        view=PlayerControls(paused=paused),
+    )
+
+
+def _shown(query: str) -> str:
+    # Echoed back into a Discord message, so keep it well under the 2000-char limit
+    return query if len(query) <= 100 else query[:100] + "..."
+
+
+async def music_search(ctx: MusicContext, query: str) -> MusicResult:
+    query = query.strip()
+    if not query:
+        return _error("What should I search for? Usage: `/search <song name>`")
+    if music.find_ffmpeg() is None:
+        return _error("FFmpeg isn't available on my host, so I can't play audio.")
+
+    shown = _shown(query)
+    status_msg = await ctx.interaction.followup.send(
+        SEARCH + " Searching for **" + shown + "**...", wait=True)
+    try:
+        results = await music.search_tracks(query, requested_by=str(ctx.interaction.user))
+    except Exception as e:
+        safe_print("[ERROR] Search failed: " + str(e))
         await status_msg.edit(content=None,
-                              embed=ui.search_results_embed(query, results), view=view)
-        view.message = status_msg   # so on_timeout can grey out the menu
+                              embed=ui.error_embed("That search went wrong. Try again."))
         return ""
 
-    # --- /play: joins if needed, then queues ---
-    if command == "play":
-        if len(parts) < 2:
-            return Reply(embed=ui.error_embed("What should I play? Usage: `/play <song name, URL, or file path>`"))
+    if not results:
+        await status_msg.edit(content=None, embed=ui.error_embed(
+            "Nothing found for `" + shown + "`."))
+        return ""
 
-        if music.find_ffmpeg() is None:
-            return Reply(embed=ui.error_embed(
-                "FFmpeg isn't available on my host, so I can't play audio.\n"
-                "Install it, or set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe`."
-            ))
+    view = SearchResults(results, ctx.user_id, ctx.guild, query=query)
+    await status_msg.edit(content=None,
+                          embed=ui.search_results_embed(query, results), view=view)
+    view.message = status_msg   # so on_timeout can grey out the menu
+    return ""
 
-        # Checked before joining, so Amy doesn't connect only to refuse the track
-        if len(player.queue) >= music.MAX_QUEUE_SIZE:
-            return Reply(embed=ui.error_embed(f"The queue is full ({music.MAX_QUEUE_SIZE} tracks). Try again once it drains."))
 
-        # Join the requester's channel if not already connected
-        if voice.active_channel(vc) is None:
-            state = member.voice if member else None
-            if state is None or state.channel is None:
-                return Reply(embed=ui.error_embed("You're not in a voice channel. Join one first, then use `/play`."))
-            perms = state.channel.permissions_for(guild.me)
-            if not perms.connect or not perms.speak:
-                return Reply(embed=ui.error_embed(f"I need Connect and Speak permissions in **{state.channel.name}**."))
-            try:
-                async with voice_manager.lock_for(guild.id):
-                    await voice.connect_to(state.channel)
-                vc = voice.get_voice_client(guild)
-            except RuntimeError as e:
-                safe_print(f"[ERROR] Voice connect failed: {e}")
-                return Reply(embed=ui.error_embed(
-                    f"Voice support isn't fully installed on my host: {e}\n"
-                    "Fix: `pip install \"discord.py[voice]\"`"
-                ))
-            except Exception as e:
-                safe_print(f"[ERROR] Voice connect failed: {e}")
-                return Reply(embed=ui.error_embed("I couldn't join your voice channel. Please try again."))
-        elif not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to queue tracks."))
+# --- /play: joins if needed, then queues ---
 
-        # advance_playback has no message context, so remember where to post the card
-        player.text_channel_id = interaction.channel_id
+async def music_play(ctx: MusicContext, query: str) -> MusicResult:
+    # Passed through untouched. The old dispatcher split the query on whitespace and joined
+    # it back with single spaces, so a local file named "My  Song.mp3" could never be found.
+    if not query.strip():
+        return _error("What should I play? Usage: `/play <song name, URL, or file path>`")
+    query = query.strip()
+    guild, player, member = ctx.guild, ctx.player, ctx.member
 
-        query = " ".join(parts[1:])
-        # Echoed back into a Discord message, so keep it well under the 2000-char limit
-        shown = query if len(query) <= 100 else query[:100] + "..."
-        author = str(interaction.user)
+    if music.find_ffmpeg() is None:
+        return _error(
+            "FFmpeg isn't available on my host, so I can't play audio.\n"
+            "Install it, or set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe`.")
 
-        # Resolving hits the network and can take a few seconds, so acknowledge
-        # immediately and edit this message once we know the result.
-        status_msg = await interaction.followup.send(SEARCH + " Searching for **" + shown + "**...", wait=True)
+    # Checked before joining, so Amy doesn't connect only to refuse the track
+    if len(player.queue) >= music.MAX_QUEUE_SIZE:
+        return _error(f"The queue is full ({music.MAX_QUEUE_SIZE} tracks). "
+                      "Try again once it drains.")
 
-        # --- playlist URL: queue many tracks at once ---
-        if music.is_playlist_url(query):
-            await status_msg.edit(content=SEARCH + " Loading playlist...")
-            try:
-                title, tracks, skipped = await music.resolve_playlist(query, author)
-            except Exception as e:
-                safe_print("[ERROR] Could not load playlist: " + str(e))
-                await status_msg.edit(content=DENY + " I couldn't load that playlist.")
-                return ""
-
-            if not tracks:
-                await status_msg.edit(content=DENY + " That playlist had no playable tracks.")
-                return ""
-
-            # Never exceed the overall queue cap, even if the playlist cap allowed more
-            room = music.MAX_QUEUE_SIZE - len(player.queue)
-            if len(tracks) > room:
-                skipped += len(tracks) - room
-                tracks = tracks[:room]
-
-            player.queue.extend(tracks)
-            player.cancel_idle()
-
-            await status_msg.edit(content=None,
-                                  embed=ui.playlist_embed(title, len(tracks), skipped))
-            if vc is None or not (vc.is_playing() or vc.is_paused()):
-                await advance_playback(guild)   # posts its own now-playing card
-            return ""
-
-        # --- single track ---
+    # Join the requester's channel if not already connected
+    vc = ctx.vc
+    if voice.active_channel(vc) is None:
+        state = member.voice if member else None
+        if state is None or state.channel is None:
+            return _error("You're not in a voice channel. Join one first, then use `/play`.")
+        perms = state.channel.permissions_for(guild.me)
+        if not perms.connect or not perms.speak:
+            return _error(f"I need Connect and Speak permissions in **{state.channel.name}**.")
         try:
-            track = await music.resolve_metadata(query, requested_by=author)
+            async with voice_manager.lock_for(guild.id):
+                await voice.connect_to(state.channel)
+            vc = ctx.vc = voice.get_voice_client(guild)
+        except RuntimeError as e:
+            safe_print(f"[ERROR] Voice connect failed: {e}")
+            return _error(f"Voice support isn't fully installed on my host: {e}\n"
+                          "Fix: `pip install \"discord.py[voice]\"`")
         except Exception as e:
-            safe_print("[ERROR] Could not resolve query: " + str(e))
-            await status_msg.edit(content=DENY + " I couldn't find anything for `" + shown + "`.")
+            safe_print(f"[ERROR] Voice connect failed: {e}")
+            return _error("I couldn't join your voice channel. Please try again.")
+    elif not ctx.may_control():
+        return _error("You need to be in my voice channel to queue tracks.")
+
+    # advance_playback has no message context, so remember where to post the card
+    player.text_channel_id = ctx.interaction.channel_id
+
+    shown = _shown(query)
+    author = str(ctx.interaction.user)
+
+    # Resolving hits the network and can take a few seconds, so acknowledge
+    # immediately and edit this message once we know the result.
+    status_msg = await ctx.interaction.followup.send(
+        SEARCH + " Searching for **" + shown + "**...", wait=True)
+
+    # --- playlist URL: queue many tracks at once ---
+    if music.is_playlist_url(query):
+        await status_msg.edit(content=SEARCH + " Loading playlist...")
+        try:
+            title, tracks, skipped = await music.resolve_playlist(query, author)
+        except Exception as e:
+            safe_print("[ERROR] Could not load playlist: " + str(e))
+            await status_msg.edit(content=DENY + " I couldn't load that playlist.")
             return ""
 
-        player.queue.append(track)
+        if not tracks:
+            await status_msg.edit(content=DENY + " That playlist had no playable tracks.")
+            return ""
+
+        # Never exceed the overall queue cap, even if the playlist cap allowed more
+        room = music.MAX_QUEUE_SIZE - len(player.queue)
+        if len(tracks) > room:
+            skipped += len(tracks) - room
+            tracks = tracks[:room]
+
+        player.queue.extend(tracks)
         player.cancel_idle()
-        duration = music.format_duration(track.duration)
 
-        playing = vc is not None and (vc.is_playing() or vc.is_paused())
-        if not music.starts_immediately(len(player.queue), playing):
-            if not playing:
-                # Idle with a backlog in front of this track (e.g. a restored queue): start
-                # the backlog, and say truthfully where the requested track landed.
-                await advance_playback(guild)
-            await status_msg.edit(content=None,
-                                  embed=ui.queued_embed(track, len(player.queue)))
-            return ""
-
-        await status_msg.edit(content=HOURGLASS + " Loading **" + track.title + "**...")
-        await advance_playback(guild)   # posts the now-playing card with controls
-        try:
-            await status_msg.delete()   # the card replaces this status line
-        except discord.HTTPException:
-            pass
+        await status_msg.edit(content=None,
+                              embed=ui.playlist_embed(title, len(tracks), skipped))
+        if vc is None or not (vc.is_playing() or vc.is_paused()):
+            await advance_playback(guild)   # posts its own now-playing card
         return ""
 
-    # --- everything below needs an active connection ---
-    if vc is None or not vc.is_connected():
-        return Reply(embed=ui.error_embed("I'm not in a voice channel."))
+    # --- single track ---
+    try:
+        track = await music.resolve_metadata(query, requested_by=author)
+    except Exception as e:
+        safe_print("[ERROR] Could not resolve query: " + str(e))
+        await status_msg.edit(content=DENY + " I couldn't find anything for `" + shown + "`.")
+        return ""
 
-    if command == "pause":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if not vc.is_playing():
-            return Reply(embed=ui.error_embed("Nothing is playing."))
-        vc.pause()
-        player.mark_paused()           # paused time must not count towards the position
-        await refresh_now_playing(guild, paused=True)
-        return Reply(embed=ui.info_embed("Paused."))
+    player.queue.append(track)
+    player.cancel_idle()
 
-    if command == "resume":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if not vc.is_paused():
-            return Reply(embed=ui.error_embed("Nothing is paused."))
-        vc.resume()
-        player.mark_resumed()
-        await refresh_now_playing(guild, paused=False)
-        return Reply(embed=ui.info_embed("Resumed."))
+    playing = vc is not None and (vc.is_playing() or vc.is_paused())
+    if not music.starts_immediately(len(player.queue), playing):
+        if not playing:
+            # Idle with a backlog in front of this track (e.g. a restored queue): start
+            # the backlog, and say truthfully where the requested track landed.
+            await advance_playback(guild)
+        await status_msg.edit(content=None, embed=ui.queued_embed(track, len(player.queue)))
+        return ""
 
-    if command == "skip":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to skip."))
-        if not (vc.is_playing() or vc.is_paused()):
-            return Reply(embed=ui.error_embed("Nothing is playing."))
-        skipped = player.current.title if player.current else "the current track"
-        player.skip_requested = True
-        vc.stop()  # triggers the after-callback, which advances the queue
-        return Reply(embed=ui.info_embed(f"Skipped **{skipped}**."))
+    await status_msg.edit(content=HOURGLASS + " Loading **" + track.title + "**...")
+    await advance_playback(guild)   # posts the now-playing card with controls
+    try:
+        await status_msg.delete()   # the card replaces this status line
+    except discord.HTTPException:
+        pass
+    return ""
 
-    if command in ("seek", "replay"):
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if not (vc.is_playing() or vc.is_paused()):
-            return Reply(embed=ui.error_embed("Nothing is playing."))
-        track = player.current
-        if track is None:
-            return Reply(embed=ui.error_embed("Nothing is playing."))
-        if track.is_local is False and not track.query.startswith("http"):
-            return Reply(embed=ui.error_embed("I can't seek in this track."))
 
-        if command == "replay":
-            target = 0.0
-        else:
-            raw = parts[1] if len(parts) > 1 else ""
-            seconds = music.parse_timestamp(raw)
-            if seconds is None:
-                return Reply(embed=ui.error_embed(
-                    "I couldn't read that position. Use `1:30`, `1:02:03` or a number of "
-                    "seconds."))
-            if track.duration and seconds >= track.duration:
-                return Reply(embed=ui.error_embed(
-                    f"That's past the end of the track ({music.format_duration(track.duration)}). "
-                    "Use `/skip` to move on."))
-            target = music.clamp_seek(float(seconds), track.duration)
+# --- everything below needs an active connection ---
 
-        loop = asyncio.get_running_loop()
-        after = music.make_after_callback(loop, lambda: advance_playback(guild))
-        try:
-            # The lock is what makes this safe: stopping the old source fires the
-            # after-callback, which calls advance_playback and would otherwise pull the
-            # next track off the queue. Holding the lock keeps that advance waiting until
-            # the new source is playing, at which point its is_playing() guard returns.
-            async with player.lock:
-                moved = await music.restart_at(vc, player, track, after, target)
-        except Exception as e:
-            # The new source is built before the old one is touched, so a failure here
-            # leaves the track playing where it was - and the message says exactly that.
-            safe_print(f"[ERROR] Seek failed on '{track.title}': {e}")
-            return Reply(embed=ui.error_embed(
-                f"I couldn't jump there, so **{track.title}** is still playing where it was."))
-        if not moved:
-            return Reply(embed=ui.info_embed("Playback was stopped, so I didn't jump."))
+async def music_pause(ctx: MusicContext) -> MusicResult:
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    if not vc.is_playing():
+        return _error("Nothing is playing.")
+    vc.pause()
+    ctx.player.mark_paused()           # paused time must not count towards the position
+    await refresh_now_playing(ctx.guild, paused=True)
+    return _info("Paused.")
 
-        await refresh_now_playing(guild, paused=vc.is_paused())
-        if command == "replay":
-            return Reply(embed=ui.info_embed(f"Replaying **{track.title}** from the start."))
-        return Reply(embed=ui.info_embed(
-            f"Jumped to **{music.format_duration(int(target))}** in **{track.title}**."))
 
-    if command == "stop":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel (or be an admin) to stop playback."))
-        player.stop_all()       # also cancels a track that is still being prepared
-        # Stop only. vc.stop() fires the after-callback, which finds an empty queue,
-        # shows the finished card and starts the idle timer - so Amy still leaves on her
-        # own after 5 minutes. /leave is the command for disconnecting straight away.
-        vc.stop()
-        snapshot_player(guild.id)   # a deliberate clear shouldn't come back on restart
-        return Reply(embed=ui.info_embed(
-            "Stopped and cleared the queue. I'll stay here — use `/leave` to send me away."))
+async def music_resume(ctx: MusicContext) -> MusicResult:
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    if not vc.is_paused():
+        return _error("Nothing is paused.")
+    vc.resume()
+    ctx.player.mark_resumed()
+    await refresh_now_playing(ctx.guild, paused=False)
+    return _info("Resumed.")
 
-    if command == "volume":
-        if not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
-        if len(parts) < 2:
-            return Reply(embed=ui.info_embed(
-                f"Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`"))
-        parsed = music.parse_volume(parts[1])
-        if parsed is None:
-            return Reply(embed=ui.error_embed("Volume must be a whole number between 0 and 100."))
-        player.volume = parsed / 100
-        # Applies instantly only on the PCM path; an opus-passthrough track has no
-        # volume stage, so the change lands when the next track starts.
-        if isinstance(vc.source, discord.PCMVolumeTransformer):
-            vc.source.volume = player.volume
-            return Reply(embed=ui.info_embed(f"Volume set to **{parsed}%**."))
 
-        if parsed >= 100:
-            return Reply(embed=ui.info_embed("Volume set to **100%** (full quality, lowest CPU)."))
-        return Reply(embed=ui.info_embed(
-            f"Volume set to **{parsed}%** — applies from the next track.\n"
-            "_Note: below 100% Amy has to decode audio rather than pass it through, "
-            "which costs more CPU and can stutter on a busy machine._"
-        ))
+async def music_skip(ctx: MusicContext) -> MusicResult:
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error("You need to be in my voice channel to skip.")
+    if not (vc.is_playing() or vc.is_paused()):
+        return _error("Nothing is playing.")
+    player = ctx.player
+    skipped = player.current.title if player.current else "the current track"
+    player.skip_requested = True
+    vc.stop()  # triggers the after-callback, which advances the queue
+    return _info(f"Skipped **{skipped}**.")
 
-    if command == "loop":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if len(parts) < 2:
-            return Reply(embed=ui.info_embed(
-                f"Loop is **{player.loop_mode.value}**.\n"
-                "Usage: `/loop off`, `/loop track`, or `/loop queue`"
-            ))
-        try:
-            player.loop_mode = LoopMode(parts[1].lower())
-        except ValueError:
-            return Reply(embed=ui.error_embed("Loop mode must be `off`, `track`, or `queue`."))
-        return Reply(embed=ui.info_embed(f"Loop set to **{player.loop_mode.value}**."))
 
-    if command == "remove":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if len(parts) < 2:
-            return Reply(embed=ui.error_embed("Which one? Usage: `/remove <position>` (see `/queue`)"))
-        try:
-            index = int(parts[1])
-        except ValueError:
-            return Reply(embed=ui.error_embed("Position must be a number. Usage: `/remove <position>`"))
+async def music_seek(ctx: MusicContext, position: str) -> MusicResult:
+    return await _restart_current(ctx, position)
 
-        target = music.peek_at(player.queue, index)
-        if target is None:
-            return Reply(embed=ui.error_embed("There's no track at position " + str(index) + "."))
-        # Users may only remove what they queued; admins may remove anything
-        if target.requested_by != str(interaction.user) and not is_admin_member(interaction.guild, interaction.user.id):
-            return (DENY + " That track was queued by " + target.requested_by
-                    + ". You can only remove your own.")
 
-        music.remove_at(player.queue, index)  # `target` above already proved it exists
-        return Reply(embed=ui.info_embed("Removed **" + target.title + "** from the queue."))
+async def music_replay(ctx: MusicContext) -> MusicResult:
+    return await _restart_current(ctx, None)
 
-    if command == "shuffle":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if len(player.queue) < 2:
-            return Reply(embed=ui.error_embed("Not enough tracks queued to shuffle."))
-        music.shuffle_queue(player.queue)
-        return Reply(embed=ui.info_embed("Shuffled **" + str(len(player.queue)) + "** queued track(s)."))
 
-    if command == "clearqueue":
-        if not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
-        count = len(player.queue)
-        if count == 0:
-            return Reply(embed=ui.error_embed("The queue is already empty."))
-        player.queue.clear()
-        return Reply(embed=ui.info_embed(
-            "Cleared **" + str(count) + "** queued track(s). Current track keeps playing."))
+async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicResult:
+    """/seek to `position`, or /replay from the start when it is None."""
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    if not (vc.is_playing() or vc.is_paused()):
+        return _error("Nothing is playing.")
+    player, guild = ctx.player, ctx.guild
+    track = player.current
+    if track is None:
+        return _error("Nothing is playing.")
+    if track.is_local is False and not track.query.startswith("http"):
+        return _error("I can't seek in this track.")
 
-    if command == "skipto":
-        if not in_voice_with_amy() and not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel to do that."))
-        if len(parts) < 2:
-            return Reply(embed=ui.error_embed("Skip to where? Usage: `/skipto <position>` (see `/queue`)"))
-        try:
-            index = int(parts[1])
-        except ValueError:
-            return Reply(embed=ui.error_embed("Position must be a number. Usage: `/skipto <position>`"))
+    if position is None:
+        target = 0.0
+    else:
+        seconds = music.parse_timestamp(position)
+        if seconds is None:
+            return _error("I couldn't read that position. Use `1:30`, `1:02:03` or a number "
+                          "of seconds.")
+        if track.duration and seconds >= track.duration:
+            return _error(f"That's past the end of the track "
+                          f"({music.format_duration(track.duration)}). Use `/skip` to move on.")
+        target = music.clamp_seek(float(seconds), track.duration)
 
-        target = music.peek_at(player.queue, index)
-        if target is None:
-            return Reply(embed=ui.error_embed("There's no track at position " + str(index) + "."))
+    loop = asyncio.get_running_loop()
+    after = music.make_after_callback(loop, lambda: advance_playback(guild))
+    try:
+        # The lock is what makes this safe: stopping the old source fires the
+        # after-callback, which calls advance_playback and would otherwise pull the
+        # next track off the queue. Holding the lock keeps that advance waiting until
+        # the new source is playing, at which point its is_playing() guard returns.
+        async with player.lock:
+            moved = await music.restart_at(vc, player, track, after, target)
+    except Exception as e:
+        # The new source is built before the old one is touched, so a failure here
+        # leaves the track playing where it was - and the message says exactly that.
+        safe_print(f"[ERROR] Seek failed on '{track.title}': {e}")
+        return _error(f"I couldn't jump there, so **{track.title}** is still playing where it was.")
+    if not moved:
+        return _info("Playback was stopped, so I didn't jump.")
 
-        dropped = music.drop_before(player.queue, index)
-        player.skip_requested = True
-        # stop() fires the after-callback, which pulls the next track off the queue
-        vc.stop()
-        reply = NEXT + " Skipping to **" + target.title + "**"
-        if dropped:
-            reply += " (" + str(dropped) + " track(s) skipped)"
-        return reply + "."
+    await refresh_now_playing(guild, paused=vc.is_paused())
+    if position is None:
+        return _info(f"Replaying **{track.title}** from the start.")
+    return _info(f"Jumped to **{music.format_duration(int(target))}** in **{track.title}**.")
 
-    return f"Unknown music command: `{command}`."
+
+async def music_stop(ctx: MusicContext) -> MusicResult:
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error("You need to be in my voice channel (or be an admin) to stop playback.")
+    ctx.player.stop_all()       # also cancels a track that is still being prepared
+    # Stop only. vc.stop() fires the after-callback, which finds an empty queue,
+    # shows the finished card and starts the idle timer - so Amy still leaves on her
+    # own after 5 minutes. /leave is the command for disconnecting straight away.
+    vc.stop()
+    snapshot_player(ctx.guild.id)   # a deliberate clear shouldn't come back on restart
+    return _info("Stopped and cleared the queue. I'll stay here — use `/leave` to send me away.")
+
+
+async def music_volume(ctx: MusicContext, level: Optional[int] = None) -> MusicResult:
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.is_admin():
+        return _error(ADMIN_ONLY_MSG)
+    player = ctx.player
+    if level is None:
+        return _info(f"Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`")
+    player.volume = level / 100
+    # Applies instantly only on the PCM path; an opus-passthrough track has no
+    # volume stage, so the change lands when the next track starts.
+    if isinstance(vc.source, discord.PCMVolumeTransformer):
+        vc.source.volume = player.volume
+        return _info(f"Volume set to **{level}%**.")
+
+    if level >= 100:
+        return _info("Volume set to **100%** (full quality, lowest CPU).")
+    return _info(
+        f"Volume set to **{level}%** — applies from the next track.\n"
+        "_Note: below 100% Amy has to decode audio rather than pass it through, "
+        "which costs more CPU and can stutter on a busy machine._")
+
+
+async def music_loop(ctx: MusicContext, mode: LoopMode) -> MusicResult:
+    if ctx.connected() is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    ctx.player.loop_mode = mode
+    return _info(f"Loop set to **{mode.value}**.")
+
+
+async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
+    if ctx.connected() is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    queue = ctx.player.queue
+    target = music.peek_at(queue, position)
+    if target is None:
+        return _error("There's no track at position " + str(position) + ".")
+    # Users may only remove what they queued; admins may remove anything
+    if target.requested_by != str(ctx.interaction.user) and not ctx.is_admin():
+        return (DENY + " That track was queued by " + target.requested_by
+                + ". You can only remove your own.")
+
+    music.remove_at(queue, position)  # `target` above already proved it exists
+    return _info("Removed **" + target.title + "** from the queue.")
+
+
+async def music_shuffle(ctx: MusicContext) -> MusicResult:
+    if ctx.connected() is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    queue = ctx.player.queue
+    if len(queue) < 2:
+        return _error("Not enough tracks queued to shuffle.")
+    music.shuffle_queue(queue)
+    return _info("Shuffled **" + str(len(queue)) + "** queued track(s).")
+
+
+async def music_clearqueue(ctx: MusicContext) -> MusicResult:
+    if ctx.connected() is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.is_admin():
+        return _error(ADMIN_ONLY_MSG)
+    queue = ctx.player.queue
+    count = len(queue)
+    if count == 0:
+        return _error("The queue is already empty.")
+    queue.clear()
+    return _info("Cleared **" + str(count) + "** queued track(s). Current track keeps playing.")
+
+
+async def music_skipto(ctx: MusicContext, position: int) -> MusicResult:
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    player = ctx.player
+    target = music.peek_at(player.queue, position)
+    if target is None:
+        return _error("There's no track at position " + str(position) + ".")
+
+    dropped = music.drop_before(player.queue, position)
+    player.skip_requested = True
+    # stop() fires the after-callback, which pulls the next track off the queue
+    vc.stop()
+    reply = NEXT + " Skipping to **" + target.title + "**"
+    if dropped:
+        reply += " (" + str(dropped) + " track(s) skipped)"
+    return reply + "."
 #--------------------------------------
 
 #----Status and Model------
@@ -1909,18 +1964,21 @@ async def require_guild(interaction: discord.Interaction) -> Optional[discord.Gu
 
 
 async def simple_music(
-    interaction: discord.Interaction, command: str, args: Optional[List[str]] = None
+    interaction: discord.Interaction,
+    handler: Callable[..., Awaitable[MusicResult]],
+    *args: Any,
+    cooldown: bool = True,
 ) -> None:
-    """Run a music command that needs no network work, so it can answer immediately."""
+    """
+    Run a music command that needs no network work, so it can answer immediately.
+    Read-only commands pass cooldown=False: looking at the queue costs nothing.
+    """
     guild = await require_guild(interaction)
     if guild is None:
         return
-    if command not in MUSIC_READONLY_COMMANDS and not await voice_gate(interaction):
+    if cooldown and not await voice_gate(interaction):
         return
-    parts = [command] + (args or [])
-    await send_reply(
-        interaction, await execute_music_command(command, parts, interaction, guild)
-    )
+    await send_reply(interaction, await handler(MusicContext.build(interaction, guild), *args))
 #--------------------------------------
 
 #----Slash Commands------
@@ -2048,9 +2106,7 @@ async def slash_play(interaction: discord.Interaction, query: str) -> None:
     if guild is None:
         return
     await interaction.response.defer()   # resolution takes seconds
-    await send_reply(interaction,
-                     await execute_music_command("play", ["play"] + query.split(),
-                                                 interaction, guild))
+    await send_reply(interaction, await music_play(MusicContext.build(interaction, guild), query))
 
 
 @tree.command(name="search", description="Search and pick from the top results")
@@ -2064,26 +2120,25 @@ async def slash_search(interaction: discord.Interaction, query: str) -> None:
         return
     await interaction.response.defer()
     await send_reply(interaction,
-                     await execute_music_command("search", ["search"] + query.split(),
-                                                 interaction, guild))
+                     await music_search(MusicContext.build(interaction, guild), query))
 
 
 @tree.command(name="pause", description="Pause playback")
 @app_commands.guild_only()
 async def slash_pause(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "pause")
+    await simple_music(interaction, music_pause)
 
 
 @tree.command(name="resume", description="Resume playback")
 @app_commands.guild_only()
 async def slash_resume(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "resume")
+    await simple_music(interaction, music_resume)
 
 
 @tree.command(name="skip", description="Skip the current track")
 @app_commands.guild_only()
 async def slash_skip(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "skip")
+    await simple_music(interaction, music_skip)
 
 
 @tree.command(name="seek", description="Jump to a position in the current track")
@@ -2097,8 +2152,8 @@ async def slash_seek(interaction: discord.Interaction, position: str) -> None:
         return
     # Seeking re-resolves the stream URL, which is slow enough to blow Discord's 3s window
     await interaction.response.defer()
-    await send_reply(interaction, await execute_music_command(
-        "seek", ["seek", position], interaction, guild))
+    await send_reply(interaction,
+                     await music_seek(MusicContext.build(interaction, guild), position))
 
 
 @tree.command(name="replay", description="Restart the current track from the beginning")
@@ -2110,14 +2165,13 @@ async def slash_replay(interaction: discord.Interaction) -> None:
     if guild is None:
         return
     await interaction.response.defer()
-    await send_reply(interaction, await execute_music_command(
-        "replay", ["replay"], interaction, guild))
+    await send_reply(interaction, await music_replay(MusicContext.build(interaction, guild)))
 
 
 @tree.command(name="stop", description="Stop playback and clear the queue (Amy stays)")
 @app_commands.guild_only()
 async def slash_stop(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "stop")
+    await simple_music(interaction, music_stop)
 
 
 @tree.command(name="queue", description="Show what's playing and what's queued")
@@ -2127,13 +2181,13 @@ async def slash_queue(
     interaction: discord.Interaction,
     page: app_commands.Range[int, 1, 100] = 1,
 ) -> None:
-    await simple_music(interaction, "queue", [str(page)])
+    await simple_music(interaction, music_queue, page, cooldown=False)
 
 
 @tree.command(name="nowplaying", description="Show the current track")
 @app_commands.guild_only()
 async def slash_nowplaying(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "nowplaying")
+    await simple_music(interaction, music_nowplaying, cooldown=False)
 
 
 @tree.command(name="remove", description="Remove a track you queued")
@@ -2143,7 +2197,7 @@ async def slash_remove(
     interaction: discord.Interaction,
     position: app_commands.Range[int, 1, 100],
 ) -> None:
-    await simple_music(interaction, "remove", [str(position)])
+    await simple_music(interaction, music_remove, position)
 
 
 @tree.command(name="skipto", description="Jump ahead to a queued track")
@@ -2153,13 +2207,13 @@ async def slash_skipto(
     interaction: discord.Interaction,
     position: app_commands.Range[int, 1, 100],
 ) -> None:
-    await simple_music(interaction, "skipto", [str(position)])
+    await simple_music(interaction, music_skipto, position)
 
 
 @tree.command(name="shuffle", description="Shuffle the queued tracks")
 @app_commands.guild_only()
 async def slash_shuffle(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "shuffle")
+    await simple_music(interaction, music_shuffle)
 
 
 @tree.command(name="loop", description="Set repeat mode")
@@ -2172,14 +2226,14 @@ async def slash_shuffle(interaction: discord.Interaction) -> None:
 @app_commands.guild_only()
 async def slash_loop(interaction: discord.Interaction,
                      mode: app_commands.Choice[str]) -> None:
-    await simple_music(interaction, "loop", [mode.value])
+    await simple_music(interaction, music_loop, LoopMode(mode.value))
 
 
 @tree.command(name="clearqueue", description="Empty the queue (current track keeps playing)")
 @app_commands.guild_only()
 @admin_only()
 async def slash_clearqueue(interaction: discord.Interaction) -> None:
-    await simple_music(interaction, "clearqueue")
+    await simple_music(interaction, music_clearqueue)
 
 
 @tree.command(name="volume", description="Show or set playback volume")
@@ -2190,8 +2244,7 @@ async def slash_volume(
     interaction: discord.Interaction,
     level: Optional[app_commands.Range[int, 0, 100]] = None,
 ) -> None:
-    args = [str(level)] if level is not None else []
-    await simple_music(interaction, "volume", args)
+    await simple_music(interaction, music_volume, level)
 
 
 @tree.command(name="toggle", description="Enable or disable Amy's chat replies")

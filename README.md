@@ -247,7 +247,7 @@ If Amy isn't in a voice channel, `/play` pulls her into yours automatically. Tra
 
 **Playlists.** Pasting a playlist URL queues up to **50** tracks at once; Amy reports how many loaded and how many were skipped as unavailable or over the cap. Share links that name a single video (`watch?v=VIDEO&list=PLAYLIST` and `youtu.be/VIDEO?list=PLAYLIST`) queue **only that one video**, so an ordinary YouTube link can't dump hundreds of tracks into the queue. Unavailable entries (private, deleted, age-restricted) are skipped rather than failing the whole request.
 
-Local files play from `.mp3`, `.m4a`, `.opus`, `.wav` and `.flac`, and `/seek` works on them too. Every local track is re-checked against `MUSIC_DIR` at the moment it plays — not just when it was queued — so a track restored from a saved queue won't play if `MUSIC_DIR` has since been unset or moved.
+Local files play from `.mp3`, `.m4a`, `.opus`, `.wav` and `.flac`, and `/seek` works on them too. File names are used exactly as typed, spacing included: `/play` used to squash runs of spaces into one, so a file like `My  Song.mp3` could never be found. Every local track is re-checked against `MUSIC_DIR` at the moment it plays — not just when it was queued — so a track restored from a saved queue won't play if `MUSIC_DIR` has since been unset or moved.
 
 **Local files are off by default.** Set `MUSIC_DIR` in `.env` to a folder to enable them, and `/play` will only read files inside it — `..`, symlinks, and absolute paths pointing elsewhere are all rejected. Without this restriction, any server member could name any path on the host and confirm whether it exists.
 

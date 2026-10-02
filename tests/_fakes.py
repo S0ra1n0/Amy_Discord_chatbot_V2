@@ -138,6 +138,7 @@ class VoiceClient:
         self.disconnected = False
         self.moved_to = None
         self._paused = False
+        self.source = None   # the real one has it; /volume inspects it for a PCM volume stage
 
     def is_connected(self):
         return not self.disconnected
@@ -296,11 +297,15 @@ def text_of(result, interaction=None):
 
 
 def run_music(amy, command, args=None, user=None, guild=None, interaction=None):
-    """Drive a music command the way the slash layer does, returning flattened text."""
+    """
+    Drive a music command the way the slash layer does, returning flattened text.
+    `args` are the typed values the slash command would pass (ints, a LoopMode, one query
+    string) - handed over as-is, never stringified, exactly like Discord's conversion.
+    """
     interaction = interaction or Interaction(user, guild)
-    parts = [command] + [str(a) for a in (args or [])]
-    result = asyncio.run(
-        amy.execute_music_command(command, parts, interaction, interaction.guild))
+    handler = getattr(amy, "music_" + command)
+    ctx = amy.MusicContext.build(interaction, interaction.guild)
+    result = asyncio.run(handler(ctx, *(args or [])))
     return text_of(result, interaction)
 
 

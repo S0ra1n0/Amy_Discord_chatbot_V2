@@ -120,6 +120,23 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **`guild.voice_client` is typed `VoiceProtocol`**, not `VoiceClient`, and `vc.channel` is a
   union. Narrow with `voice.get_voice_client()` / `voice.active_channel()`, or pyright fails.
 
+## Music commands
+
+- **One typed handler per command** (`music_play`, `music_seek`, `music_volume`, ...). The
+  slash command converts and bounds its arguments through Discord's typing (`Range`,
+  `Choice`) and passes ints, a `LoopMode` or the query string straight in. Never turn an
+  argument back into text to parse it again: that's what the old single dispatcher did, and
+  it squashed spaces in `/play` queries and kept validation that could no longer fire.
+- **`MusicContext`** resolves the player, voice client and member once per call.
+  `ctx.connected()` returns the voice client only if it's actually connected, typed so the
+  checker narrows it. Commands that need a connection check that first, then permission.
+- **There is one playback-permission rule**, `may_control_playback`: in Amy's channel, or an
+  admin. Commands use it through `ctx.may_control()` and the player buttons call it directly,
+  so a button can't bypass a command's check or the other way round.
+- Fast commands go through `simple_music(interaction, handler, *args)`; read-only ones pass
+  `cooldown=False`. Slow ones (`/play`, `/search`, `/seek`, `/replay`) gate, defer, then call
+  their handler themselves - `test_slash.py` reads each callback's source for the defer.
+
 ## Discord
 
 - **Slash commands must answer within 3 seconds.** Anything doing network work (`/play`,

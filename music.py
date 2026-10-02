@@ -132,17 +132,6 @@ def format_duration(seconds: Optional[int]) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def parse_volume(raw: str) -> Optional[int]:
-    """Parse a 0-100 volume argument. Returns None if it isn't a valid percentage."""
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if not 0 <= value <= 100:
-        return None
-    return value
-
-
 def advance_queue(
     current: Optional[Track],
     queue: Deque[Track],

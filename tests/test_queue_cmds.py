@@ -18,6 +18,7 @@ GUILD = 500
 CH = VoiceChannel(10, "Chung")
 
 from _check import check, finish
+from discord import app_commands
 
 
 def setup(author_id, name, titles, owners=None):
@@ -341,7 +342,7 @@ try:
     amy.music.resolve_metadata = _fake_resolve
     _advanced.clear()
     it_play = Interaction(asker, g_play)
-    run_music(amy, "play", ["requested", "song"], interaction=it_play)
+    run_music(amy, "play", ["requested song"], interaction=it_play)
     status = it_play.sent[0]
     final_text = text_of(None, it_play)
     check("M3: /play with a backlog starts the backlog", _advanced == [4405], _advanced)
@@ -362,7 +363,7 @@ try:
     amy.music_manager.cleanup(4406)
     _advanced.clear()
     it_play2 = Interaction(asker, g_play2)
-    run_music(amy, "play", ["requested", "song"], interaction=it_play2)
+    run_music(amy, "play", ["requested song"], interaction=it_play2)
     check("M3: /play on an empty queue still starts immediately", _advanced == [4406], _advanced)
     check("M3: and still says it is loading that track",
           "Loading **Requested Song**" in text_of(None, it_play2), text_of(None, it_play2)[:200])
@@ -547,7 +548,7 @@ try:
         p, it = setup(USER, "userA", [])
         p.current = _seekable()
         _targets.clear()
-        out = run_music(amy, "seek", [bad] if bad else [], interaction=it)
+        out = run_music(amy, "seek", [bad], interaction=it)
         check("M7: /seek %r is refused without seeking" % bad,
               _targets == [] and "couldn't read" in out, (out, _targets))
 
@@ -596,7 +597,7 @@ try:
     p.current = _seekable()
 
     async def _drive():
-        await amy.execute_music_command("seek", ["seek", "1:30"], it, it.guild)
+        await amy.music_seek(amy.MusicContext.build(it, it.guild), "1:30")
         await asyncio.sleep(0.05)                           # let the callback finish
     asyncio.run(_drive())
     check("M7: a seek never lets the old track's callback skip ahead",
@@ -633,7 +634,116 @@ try:
 finally:
     amy.websearch.search = _ws_real
 
-# One gate, at the very end. It used to sit above the snapshot/restore section, so ~30
-# checks there could print FAIL while the script still exited 0 and reported success -
-# the restore path looked covered and wasn't.
+# ---- the real slash callbacks, end to end through the typed handlers --------------------
+# The music commands used to share one string dispatcher: slash arguments were turned back
+# into text and re-parsed. Each command now has a typed handler, and the slash layer does the
+# conversion (a Choice to a LoopMode, an optional volume level). These drive the registered
+# callbacks themselves, so the wiring is covered, not just the handlers - and they cover the
+# commands that had no direct test before the split: pause, resume, skip, nowplaying,
+# volume and loop.
+print()
+print("=== slash callbacks -> typed handlers ===")
+
+
+def slash(name, it, *args):
+    asyncio.run(amy.tree.get_command(name).callback(it, *args))
+    return text_of(None, it)
+
+
+p, it = setup(USER, "userA", ["t1", "t2"])
+p.started_at = 1000.0              # the clock only freezes once a track has started
+vc = it.guild.voice_client
+out = slash("pause", it)
+check("/pause pauses and says so", vc.is_paused() and "Paused." in out, out)
+check("/pause stops the position clock", p.paused_at is not None, p.paused_at)
+out = slash("resume", Interaction(it.user, it.guild))
+check("/resume resumes and says so", not vc.is_paused() and "Resumed." in out, out)
+check("/resume restarts the clock", p.paused_at is None, p.paused_at)
+
+p, it = setup(USER, "userA", ["t1"])
+out = slash("skip", it)
+check("/skip names the skipped track", "Skipped **playing**" in out, out)
+check("/skip asks the queue to advance", p.skip_requested and it.guild.voice_client.stopped)
+
+p, it = setup(USER, "userA", ["t1"])
+out = slash("nowplaying", it)
+check("/nowplaying shows the current track", "playing" in out and "Nothing is playing" not in out, out)
+p, it = setup(USER, "userA", [])
+p.current = None
+check("/nowplaying with nothing playing says so",
+      "Nothing is playing right now." in slash("nowplaying", it))
+
+p, it = setup(USER, "userA", ["t1"])
+out = slash("loop", it, app_commands.Choice(name="track", value="track"))
+check("/loop converts the Choice to a LoopMode", p.loop_mode is amy.LoopMode.TRACK, p.loop_mode)
+check("/loop confirms the mode", "Loop set to **track**" in out, out)
+
+p, it = setup(OWNER, "owner", ["t1"])
+out = slash("volume", it, None)
+check("/volume with no level reports the current one", "Current volume: **100%**" in out, out)
+p, it = setup(OWNER, "owner", ["t1"])
+out = slash("volume", it, 40)
+check("/volume 40 sets it", abs(p.volume - 0.4) < 1e-9 and "**40%**" in out, (p.volume, out))
+
+p, it = setup(USER, "userA", ["t%d" % i for i in range(1, 26)])
+check("/queue passes the page through", "`11.`" in slash("queue", it, 2))
+p, it = setup(USER, "userA", ["mine", "also mine"])
+out = slash("remove", it, 2)
+check("/remove passes the position through",
+      "also mine" in out and [t.title for t in p.queue] == ["mine"], out)
+p, it = setup(USER, "userA", ["a", "b", "c"])
+out = slash("skipto", it, 3)
+check("/skipto passes the position through", "Skipping to **c**" in out, out)
+
+# The shared permission rule, through the new context
+stranger = Member(55, VoiceChannel(11, "elsewhere"), name="stranger")
+p, it = setup(USER, "userA", ["t1"])
+it_far = Interaction(stranger, Guild(OWNER, stranger, it.guild.voice_client, guild_id=GUILD))
+check("someone outside Amy's channel can't pause",
+      "You need to be in my voice channel" in slash("pause", it_far))
+p, it = setup(USER, "userA", ["t1"])
+it.guild.voice_client = None
+check("a command needing a connection says Amy isn't in one",
+      "I'm not in a voice channel." in slash("pause", it))
+p, it = setup(USER, "userA", ["t1"])
+it.guild.voice_client.disconnected = True     # a client object that has lost its connection
+check("a disconnected voice client counts as not connected",
+      "I'm not in a voice channel." in slash("pause", it))
+
+# /play passes the query through untouched. The dispatcher split it on whitespace and joined
+# it with single spaces, so a local file named "My  Song.mp3" could never be found.
+_seen_queries = []
+_real_resolve, _real_advance, _real_ffmpeg = (amy.music.resolve_metadata, amy.advance_playback,
+                                               amy.music.find_ffmpeg)
+
+
+async def _record_resolve(query, requested_by="?"):
+    _seen_queries.append(query)
+    return amy.music.Track(title="Found", query="https://youtu.be/f", duration=60,
+                           requested_by=requested_by)
+
+
+async def _no_advance(guild):
+    return None
+
+amy.music.resolve_metadata = _record_resolve
+amy.advance_playback = _no_advance
+amy.music.find_ffmpeg = lambda: "ffmpeg"
+try:
+    p, it = setup(USER, "userA", [])
+    p.current = None
+    it.guild.voice_client.stopped = True
+    slash("play", it, "  My  Song   Name.mp3 ")
+    check("/play keeps inner whitespace in the query",
+          _seen_queries == ["My  Song   Name.mp3"], _seen_queries)
+    p, it = setup(USER, "userA", [])
+    check("/play with a blank query asks what to play",
+          "What should I play?" in slash("play", it, "   "))
+finally:
+    amy.music.resolve_metadata, amy.advance_playback, amy.music.find_ffmpeg = (
+        _real_resolve, _real_advance, _real_ffmpeg)
+
+# The exit code is set by _check's gate, wherever a failure happens. It used to be one
+# `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could
+# print FAIL while the script exited 0 - the restore path looked covered and wasn't.
 finish("ALL QUEUE COMMAND TESTS PASSED")
