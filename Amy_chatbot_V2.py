@@ -12,14 +12,15 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 import ollama
 import discord
 from discord.ext import tasks
 from discord import app_commands
 
 from commands_help import HELP_EVERYONE, HELP_ADMIN
-from database import MAX_MEMORY_MESSAGES, ConversationDB
+from database import DEFAULT_MAX_MESSAGES, MIN_MAX_MESSAGES, ConversationDB
+import config
 import voice
 from voice import VoiceManager
 import music
@@ -80,10 +81,29 @@ def find_split_index(text: str, limit: int) -> int:
 #--------------------------------------
 
 #----Setup Discord Bot and Ollama Model------
+# Snapshot first: python-dotenv never overrides a variable that already exists, so a
+# setting defined both system-wide and in .env silently takes the system value. Report any.
+_env_before_dotenv = dict(os.environ)
 load_dotenv()
+for _name in config.shadowed_settings(_env_before_dotenv, dotenv_values()):
+    # Names only - the values may be secrets.
+    safe_print(f"[WARNING] {_name} is set both in your system environment and in .env, "
+               f"with different values. The system value wins; the .env line is ignored.")
+del _env_before_dotenv
+
+
+def _setting(parsed):
+    """Unpack a config.parse_* result, logging the problem if the raw value was unusable."""
+    value, problem = parsed
+    if problem:
+        safe_print("[WARNING] " + problem)
+    return value
+
+
 discord_token = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE_NAME: str = os.getenv("ADMIN_ROLE_NAME", "Admin")
-DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
+DB_PRUNE_DAYS: int = _setting(config.parse_int("DB_PRUNE_DAYS", os.getenv("DB_PRUNE_DAYS"),
+                                                default=30, minimum=1))
 # Guild-scoped command sync is instant; global sync can take an hour to appear.
 # How the model's reasoning phase is handled. This is NOT one-size-fits-all - the right
 # answer differs per model, which is why it can be overridden per model at runtime:
@@ -94,10 +114,19 @@ DB_PRUNE_DAYS: int = int(os.getenv("DB_PRUNE_DAYS", "30"))
 #   "true"  - force reasoning on. Rarely wanted: on qwen3.5:2b it burned the whole budget
 #             thinking and returned 0 characters of content (done_reason="length").
 # The default suits the default model; /model detects and records the right mode for others.
-OLLAMA_THINK: str = normalise_think_mode(os.getenv("OLLAMA_THINK"), fallback="false")
+_raw_think = os.getenv("OLLAMA_THINK")
+OLLAMA_THINK: str = normalise_think_mode(_raw_think, fallback="")
+if not OLLAMA_THINK:
+    if _raw_think and _raw_think.strip():
+        safe_print(f"[WARNING] OLLAMA_THINK={_raw_think.strip()!r} isn't false, true or auto; "
+                   f"using false.")
+    OLLAMA_THINK = "false"
 # Web search is on by default. Turn it off if DuckDuckGo starts refusing requests -
 # it scrapes their HTML page, so it can break the way yt-dlp does.
-WEB_SEARCH: bool = os.getenv("WEB_SEARCH", "true").strip().lower() in ("1", "true", "yes")
+# An unrecognised word keeps search on and says so. It used to read as "off", so a typo
+# like WEB_SEARCH=ture silently disabled the feature.
+WEB_SEARCH: bool = _setting(config.parse_bool("WEB_SEARCH", os.getenv("WEB_SEARCH"),
+                                              default=True))
 # Ollama unloads an idle model after ~5 minutes, and reloading it costs 4.3 seconds before
 # the first character appears - measured cold 4.31s vs warm 0.03s. For a bot that is used in
 # bursts that penalty lands on almost every conversation, so ask Ollama to keep the model
@@ -117,7 +146,9 @@ PROBE_KEEP_ALIVE: str = "2m"
 # itself lives in database.py because storage enforces it too; this is the single source of
 # truth for both. It is a speed knob as well as a memory one - every stored message is sent
 # on every reply, and prompt processing grew from 0.15s at 10 messages to 0.95s at 200.
-HISTORY_LIMIT: int = MAX_MEMORY_MESSAGES
+HISTORY_LIMIT: int = _setting(config.parse_int("HISTORY_LIMIT", os.getenv("HISTORY_LIMIT"),
+                                                default=DEFAULT_MAX_MESSAGES,
+                                                minimum=MIN_MAX_MESSAGES))
 
 _raw_guild = os.getenv("GUILD_ID", "").strip()
 GUILD_ID: Optional[int] = int(_raw_guild) if _raw_guild.isdigit() else None
@@ -177,7 +208,7 @@ system_prompt = build_system_prompt(BASE_SYSTEM_PROMPT, WEB_SEARCH)
 # the bot: settings are read from the database at import time, so swapping `db` afterwards
 # is too late, and the suite used to run against the operator's real file.
 DB_PATH: str = os.getenv("AMY_DB_PATH", "").strip() or "amy_memory.db"
-db = ConversationDB(DB_PATH)
+db = ConversationDB(DB_PATH, max_messages=HISTORY_LIMIT)
 #----------------------------------------------
 
 #----Voice & Music------

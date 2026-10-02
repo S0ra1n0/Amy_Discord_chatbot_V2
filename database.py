@@ -1,19 +1,24 @@
 # database.py
-import os
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# How many messages are kept per channel, and therefore how far back Amy can remember.
-# Every one of these is replayed to the model on each reply, so it is also a latency knob:
-# a real message averages ~98 tokens against a 4096-token context window, so the default 10
-# costs ~1k tokens and about 0.15s of prompt processing. Raising it lengthens her memory and
-# slows each reply slightly; roughly 30 is the practical ceiling before the context window
-# starts squeezing the reply itself.
-MAX_MEMORY_MESSAGES: int = max(2, int(os.getenv("HISTORY_LIMIT", "10")))
+# How many messages are kept per channel by default, and therefore how far back Amy can
+# remember. Every one of these is replayed to the model on each reply, so it is also a
+# latency knob: a real message averages ~98 tokens against a 4096-token context window, so
+# 10 costs ~1k tokens and about 0.15s of prompt processing. Roughly 30 is the practical
+# ceiling before the context window starts squeezing the reply itself.
+#
+# The bot passes the configured value in (HISTORY_LIMIT). This module deliberately reads no
+# environment variables: it used to read HISTORY_LIMIT itself, at import - which happens
+# before the bot loads .env - so the setting in .env was silently ignored.
+DEFAULT_MAX_MESSAGES: int = 10
+MIN_MAX_MESSAGES: int = 2       # fewer can't hold a single question-and-answer exchange
 
 class ConversationDB:
-    def __init__(self, db_path: str = "amy_memory.db") -> None:
+    def __init__(self, db_path: str = "amy_memory.db",
+                 max_messages: int = DEFAULT_MAX_MESSAGES) -> None:
         self.path = db_path
+        self.max_messages = max(MIN_MAX_MESSAGES, max_messages)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._create_tables()
 
@@ -187,7 +192,7 @@ class ConversationDB:
                 ORDER BY id DESC
                 LIMIT -1 OFFSET ?
             )
-        """, (str(server), str(channel), MAX_MEMORY_MESSAGES))
+        """, (str(server), str(channel), self.max_messages))
         self.conn.commit()
 
     def pop_last_message(self, server: Union[int, str], channel: int) -> None:

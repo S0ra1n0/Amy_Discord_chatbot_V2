@@ -64,7 +64,7 @@ print("earlier helpers (split/model-names/think-tags): OK")
 # oldest-first, which is the easy thing to get backwards - reversed history would make Amy
 # answer the wrong turn.
 import tempfile
-from database import MAX_MEMORY_MESSAGES, ConversationDB
+from database import DEFAULT_MAX_MESSAGES as MAX_MEMORY_MESSAGES, ConversationDB
 
 _tmp = tempfile.mktemp(suffix=".db")
 _db = ConversationDB(_tmp)
@@ -90,7 +90,7 @@ assert _db.get_stats()["total_messages"] >= MAX_MEMORY_MESSAGES
 _db.conn.close(); os.remove(_tmp)
 print("history window: OK (cap=%d, newest kept, chronological)" % MAX_MEMORY_MESSAGES)
 
-assert amy.HISTORY_LIMIT == MAX_MEMORY_MESSAGES,     "one knob only - the bot and the database must not disagree about history depth"
+assert amy.db.max_messages == amy.HISTORY_LIMIT,     "one knob only - the bot and the database must not disagree about history depth"
 assert amy.HISTORY_LIMIT >= 2, "a window below 2 cannot hold one exchange"
 assert isinstance(amy.OLLAMA_KEEP_ALIVE, str) and amy.OLLAMA_KEEP_ALIVE,     "keep_alive must be a non-empty string for the ollama client"
 print("speed settings: history=%d, keep_alive=%r"

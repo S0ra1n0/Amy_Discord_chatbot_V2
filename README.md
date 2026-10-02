@@ -444,13 +444,19 @@ DB_PRUNE_DAYS=30
 FFMPEG_PATH=
 ```
 
+A setting with an unusable value — `HISTORY_LIMIT=abc`, `WEB_SEARCH=ture` — no longer
+crashes Amy or gets silently misread. She logs a `[WARNING]` naming the setting and uses its
+default. If the same setting is also defined in your system environment with a different
+value, the system value wins (that's how `.env` loading works) and Amy logs a warning
+naming it, without printing either value.
+
 - `ADMIN_ROLE_NAME` is the name of the Discord role that grants admin access to bot commands. It defaults to `Admin` if not set.
-- `WEB_SEARCH` enables Amy's web search. On by default; set `false` to disable it entirely.
+- `WEB_SEARCH` enables Amy's web search. On by default; set `false` (or `no`/`off`/`0`) to disable it entirely. An unrecognised value keeps search **on** and logs a warning — it used to be read as off, so a typo like `ture` quietly disabled search.
 - `OLLAMA_MODEL` is the model Amy talks with. Defaults to **`qwen3.5:2b`**. Whatever an admin last chose with `/model` overrides this, and is remembered across restarts.
-- `OLLAMA_THINK` sets the **default** handling of a model's reasoning phase: `false` (the default), `true`, or `auto`. This is not one-size-fits-all — see [Reasoning modes](#reasoning-modes). On `qwen3.5:2b`, `false` answers in 2.3s; `true` made it spend its whole token budget thinking and return an empty answer.
+- `OLLAMA_THINK` sets the **default** handling of a model's reasoning phase: `false` (the default), `true`, or `auto`. This is not one-size-fits-all — see [Reasoning modes](#reasoning-modes). On `qwen3.5:2b`, `false` answers in 2.3s; `true` made it spend its whole token budget thinking and return an empty answer. A mode that `/model` recorded for a particular model takes precedence over this setting for that model — run `/model <name>` again to re-check it. An unrecognised value logs a warning and uses `false`.
 - `GUILD_ID` is your server's ID. Slash commands register to that guild and appear **instantly**; leave it blank to register globally, which can take up to an hour to propagate. Enable Developer Mode in Discord, then right-click your server → Copy Server ID.
 - `OLLAMA_KEEP_ALIVE` is how long Ollama keeps the model loaded after the last message. Defaults to `30m`. Ollama unloads an idle model after about 5 minutes, and reloading it costs roughly **4.3 seconds** before the first character appears — measured 4.31s cold against 0.03s warm. Because the bot is used in bursts, that penalty otherwise lands on nearly every conversation. The trade-off is memory: the model stays resident for this long (2.4 GB for `qwen3.5:2b`). Use `0` to unload immediately, or `2h` on a machine dedicated to Amy. Amy also warms the model at startup, in the background, so the first message after a restart doesn't pay the load cost either — if Ollama isn't running she logs a warning and carries on, without touching your saved `/model` choice.
-- `HISTORY_LIMIT` is how many messages Amy remembers per channel. Defaults to `10`. This is a speed setting as well as a memory one, because every remembered message is replayed to the model on each reply: prompt processing measured 0.15s at 10 messages and 0.95s at 200. Raise it for a longer memory at the cost of slower replies; around `30` is the practical ceiling before the 4096-token context window starts squeezing the reply itself.
+- `HISTORY_LIMIT` is how many messages Amy remembers per channel. Defaults to `10`, minimum `2`. (Before this fix the value in `.env` was silently ignored and Amy always used 10: it was read before `.env` had been loaded.) This is a speed setting as well as a memory one, because every remembered message is replayed to the model on each reply: prompt processing measured 0.15s at 10 messages and 0.95s at 200. Raise it for a longer memory at the cost of slower replies; around `30` is the practical ceiling before the 4096-token context window starts squeezing the reply itself.
 - `DB_PRUNE_DAYS` controls how many days of conversation history are kept before automatic pruning removes them. Defaults to `30` if not set.
 - `AMY_DB_PATH` is where Amy keeps conversation memory, settings and the saved music queue. Optional; defaults to `amy_memory.db` next to the bot. The test suite points this at a throwaway file for every run, so running the tests never reads or changes your real data.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
@@ -537,6 +543,7 @@ Amy_chatbot_V2/
 ├── ui.py                   # Embed builders and the reply wrapper
 ├── websearch.py            # DuckDuckGo search and the web_search tool
 ├── llm.py                  # Reasoning modes, model choice, system prompt (pure helpers)
+├── config.py               # Reading settings: warns on bad values instead of crashing
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
@@ -556,7 +563,7 @@ python tests/run_tests.py             # offline suites only (~8s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-19 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
+20 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network and no Discord token. A suite whose dependency is missing — Ollama not running, say — is reported as **SKIPPED**, never as passed. See [tests/README.md](tests/README.md).
 

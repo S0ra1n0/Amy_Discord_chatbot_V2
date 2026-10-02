@@ -34,6 +34,7 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | `test_commands_audit.py` | `/dice` caps, removed commands, `/stop` staying connected |
 | `test_slash.py` | the slash-command tree: naming rules, descriptions, bounds, admin gating, 3s defers |
 | `test_websearch.py` | result parsing, page-text extraction, domain dedup, recency inference, the tool contract |
+| `test_config.py` | parsing settings (bad values warn and fall back), and loading them end to end in a fresh process per scenario: `.env` values actually take effect, and a setting shadowed by the system environment is reported without leaking its value |
 | `test_llm.py` | `llm.py` on its own, with no bot, client or database: reasoning modes, leak detection, probe judging, startup model choice, system prompt assembly. Fails if importing `llm` pulls in Discord or Ollama |
 | `test_docs_audit.py` | every command appears in both the help text and the README |
 
@@ -58,6 +59,7 @@ Several were written *after* a bug reached the running bot, and now stop it recu
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
 - `test_ui.py` — a long track title exceeded Discord's limit and rejected the whole message
+- `test_config.py` — `HISTORY_LIMIT` in `.env` never worked: `database.py` read it at import, before the bot had loaded `.env`, so Amy always used 10. Also `HISTORY_LIMIT=abc` crashed startup with a bare traceback, and `WEB_SEARCH=ture` silently turned search off.
 - `test_websearch.py` — the SSRF redirect check. The old test redirected from a URL that was itself loopback, so it was refused on the first hop and the redirect was never read; with the per-hop check deleted, it still passed. It now uses `httpx.MockTransport` so a genuinely public page redirects to `192.168.1.1`, with a public-to-public redirect as a control so a broken redirect loop can't pass by accident.
 - `test_queue_cmds.py` — `/seek` and `/replay` end to end, including the lock: the test fires the old track's after-callback mid-seek, exactly as discord.py does, and without the lock the next song is popped and played instead.
 - `test_regression.py` — the `/model` probe offline, via a scripted fake Ollama: which replies count as usable, falling back to `auto`, releasing the old model before probing, and recording the result.

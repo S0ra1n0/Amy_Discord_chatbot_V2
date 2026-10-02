@@ -38,8 +38,8 @@ check("auto-leave %ds documented" % amy.voice.EMPTY_DISCONNECT_DELAY,
 check("prune default %d days documented" % amy.DB_PRUNE_DAYS,
       "30 days" in readme)
 import database
-check("memory depth %d documented" % database.MAX_MEMORY_MESSAGES,
-      "last %d messages" % database.MAX_MEMORY_MESSAGES in readme)
+check("memory depth %d documented" % database.DEFAULT_MAX_MESSAGES,
+      "last %d messages" % database.DEFAULT_MAX_MESSAGES in readme)
 check("Discord 2000-char limit documented",
       str(amy.MAX_DISCORD_LEN) in readme)
 
