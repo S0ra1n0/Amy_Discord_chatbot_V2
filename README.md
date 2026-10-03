@@ -570,6 +570,7 @@ Then set `TTS=on` in `.env` and restart. The voice loads in the background after
 - **English only.** Kokoro is set up for English; replies in other languages won't be read aloud.
 - **Offline after setup.** `speech.py download` fetches one pinned version of the model into `kokoro_model/`; after that Amy never contacts Hugging Face, so an outage or an upstream change can't affect her voice.
 - **The voice** is `AMY_VOICE`: one Kokoro voice, or a weighted blend such as `af_heart:0.6,af_bella:0.4`. After changing it, run `python speech.py download` again to fetch any new voice.
+- **Trying voices:** `python tools/voicelab.py af_heart af_bella af_heart:0.6,af_bella:0.4` has each voice or blend say the same five lines into `voicelab_out/` (one WAV each) and prints each one's average pitch, so you compare like with like. Add `--speed 1.1` to try a speed. Fetch the voices first with `python speech.py download af_bella,...`.
 - **Music keeps playing while she talks.** It fades down to `DUCK_LEVEL` (55% by default) under her voice and back up afterwards, so nobody loses their place in the song. If the music is paused, it stays paused: she's heard, and the song doesn't move on.
 - **Balance:** her voice plays at `VOICE_LEVEL` (0.75, i.e. 25% below full) and the music under her at `DUCK_LEVEL` (55%). Both were tuned in a live test, where the first settings (full voice over 30% music) left the music barely audible. Raise `DUCK_LEVEL` or lower `VOICE_LEVEL` to hear more of the song.
 - **One sentence at a time.** She starts after the first sentence is ready rather than waiting for the whole reply, and a backlog longer than 30 seconds drops its oldest sentences instead of talking for minutes. `/stop`, `/leave` and Amy leaving the call silence her; `/skip`, `/seek` and `/previous` don't, so a sentence carries on over the next song.
@@ -593,6 +594,7 @@ Amy_chatbot_V2/
 ├── mixer.py                # Mixes her voice over the music, lowering it while she talks
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
+├── tools/voicelab.py       # Compare voices and blends for AMY_VOICE, with pitch
 ├── requirements.txt        # Pinned Python dependencies
 ├── constraints.txt         # Pinned indirect dependencies (loaded by requirements.txt)
 ├── requirements-dev.txt    # + pyright, for running the checks

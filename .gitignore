@@ -58,3 +58,6 @@ CLAUDE.md
 TTS_PLAN.md
 AGENTS.md
 .claude/
+
+# Voice lab output (tools/voicelab.py)
+voicelab_out/

@@ -51,7 +51,10 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **A voice failure never stops the bot.** `Speaker.start` catches everything, sets
   `state = "failed"` with the reason in `problem`, and Amy stays text-only.
 - **Blends are weighted here**, not by Kokoro: its own `"a,b"` syntax only averages
-  equally. `AMY_VOICE` weights are normalised to sum to 1.
+  equally. `AMY_VOICE` weights are normalised to sum to 1. A voice is a 510 x 256 block of
+  numbers (a speaking style per input length), so a blend is their weighted sum.
+  `KokoroEngine.set_recipe` swaps it without reloading the model (~0.1s vs ~9s), which is
+  what `tools/voicelab.py` uses to render many voices in one run.
 - **Speech audio is normalised to `PEAK_TARGET`** before it leaves `speech.py`, leaving
   headroom for mixing over music (audio adds saturate rather than wrap).
 - **Speech text is logged at DEBUG only**, like chat, so it never reaches `amy.log`.

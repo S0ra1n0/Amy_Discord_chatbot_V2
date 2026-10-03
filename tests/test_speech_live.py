@@ -74,6 +74,35 @@ async def main():
         blend.close()
     else:
         print("  (blend check skipped: af_bella not downloaded)")
+
+    # The voice lab switches voices without reloading the model
+    if not speech.missing_model_files(speech.MODEL_DIR, ["af_bella"]):
+        eng = sp.engine
+        before = eng.synthesize("Testing one voice.")
+        t0 = time.perf_counter()
+        eng.set_recipe([("af_bella", 1.0)])
+        switch = time.perf_counter() - t0
+        after = eng.synthesize("Testing one voice.")
+        check("set_recipe switches voice in well under a second", switch < 1.0, switch)
+        check("...and the voice really changes", before != after and eng.recipe == [("af_bella", 1.0)])
+        try:
+            eng.set_recipe([("af_zzzz", 1.0)])
+            refused = ""
+        except speech.SpeechUnavailable as e:
+            refused = str(e)
+        check("a voice that isn't downloaded is refused with the command to fetch it",
+              "python speech.py download" in refused, refused)
+
+    # The lab's pitch measurement, against a tone of known pitch
+    sys.path.insert(0, os.path.join(PROJ, "tools"))
+    import math
+    import struct
+    import voicelab
+    tone = b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 220 * i / 24000)))
+                    for i in range(24000))
+    measured = voicelab.median_pitch_hz(tone)
+    check("the voice lab measures a 220 Hz tone as about 220 Hz", abs(measured - 220) < 6, measured)
+    check("silence measures as no pitch", voicelab.median_pitch_hz(b"\x00\x00" * 24000) == 0.0)
     sp.close()
 
 asyncio.run(main())

@@ -303,6 +303,7 @@ class KokoroEngine(SpeechEngine):
         self._pipeline: Any = None
         self._voice: Any = None
         self._np: Any = None
+        self._torch: Any = None
 
     def load(self) -> None:
         missing = missing_model_files(self.model_dir, [n for n, _ in self.recipe])
@@ -328,11 +329,27 @@ class KokoroEngine(SpeechEngine):
                               config=os.path.join(self.model_dir, CONFIG_FILE),
                               model=os.path.join(self.model_dir, MODEL_FILE)).to("cpu").eval()
         self._pipeline = kokoro.KPipeline(lang_code="a", repo_id=KOKORO_REPO, model=model)
-        # A weighted blend, computed here: Kokoro's own "a,b" syntax only takes equal weights.
-        packs = [torch.load(os.path.join(self.model_dir, "voices", f"{n}.pt"),
-                            weights_only=True) * w for n, w in self.recipe]
-        self._voice = torch.stack(packs).sum(dim=0)
+        self._torch = torch
+        self.set_recipe(self.recipe)
         self.synthesize("Ready.")       # the first call is slow; pay it here, not mid-call
+
+    def set_recipe(self, recipe: Recipe) -> None:
+        """
+        Switch voice without reloading the model (~0.1s instead of ~9s). Used by the voice lab
+        to compare blends; the files must already be downloaded.
+
+        A weighted blend, computed here: Kokoro's own "a,b" syntax only takes equal weights.
+        Each voice is a 510 x 256 block of numbers, so a blend is simply the weighted sum.
+        """
+        missing = missing_model_files(self.model_dir, [n for n, _ in recipe])
+        if missing:
+            raise SpeechUnavailable(f"Not downloaded: {', '.join(missing)}. "
+                                    f"Run: python speech.py download {','.join(n for n, _ in recipe)}")
+        torch = self._torch
+        packs = [torch.load(os.path.join(self.model_dir, "voices", f"{n}.pt"),
+                            weights_only=True) * w for n, w in recipe]
+        self._voice = torch.stack(packs).sum(dim=0)
+        self.recipe = recipe
 
     def synthesize(self, text: str) -> bytes:
         if self._pipeline is None:
