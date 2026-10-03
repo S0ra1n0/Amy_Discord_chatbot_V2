@@ -56,7 +56,8 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **Speech text is logged at DEBUG only**, like chat, so it never reaches `amy.log`.
 - **With TTS on, every track plays through a `mixer.Mixer`** (wrapped in `music._start`).
   Quiet, it passes the music through untouched - still opus, no CPU cost. With speech
-  queued it decodes, fades the music to `DUCK_LEVEL` over 200 ms, adds the voice, and fades
+  queued it decodes, fades the music to `DUCK_LEVEL` (55%) over 200 ms, adds the voice (already
+  scaled to `PEAK_TARGET * VOICE_LEVEL` by `Speaker`), and fades
   back. With TTS off nothing is wrapped and playback is exactly as before.
 - **`Mixer.read()` never raises** - discord.py treats an exception as the end of the song
   and the queue advances. After one failure it plays the rest of that song unmixed: a

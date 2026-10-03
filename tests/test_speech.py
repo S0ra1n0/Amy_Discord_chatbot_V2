@@ -7,6 +7,7 @@ import asyncio
 import io
 import os
 import sys
+import struct
 import tempfile
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -227,5 +228,29 @@ check("a failed load never raises - Amy stays text-only", ok is False and sp.sta
 check("...and keeps the reason for /voice and the log", "pip install" in (sp.problem or ""),
       sp.problem)
 check("...and speaks nothing", frames == [])
+
+print()
+print("=== voice level (VOICE_LEVEL) ===")
+
+
+class LoudEngine(speech.FakeEngine):
+    def synthesize(self, text):
+        return struct.pack("<2h", 32767, -32767) * 2400     # full-scale samples, 0.2 s
+
+
+def loudest(level):
+    async def go():
+        sp = speech.Speaker(LoudEngine(), level=level)
+        await sp.start()
+        frames = await sp.frames_for("Loud.")
+        sp.close()
+        return max(audioop.max(f, 2) for f in frames)
+    return asyncio.run(go())
+
+full, quieter = loudest(1.0), loudest(0.75)
+check("level 1.0 puts her peak at PEAK_TARGET",
+      abs(full - speech.PEAK_TARGET * 32767) <= 64, full)
+check("level 0.75 makes her 25% quieter", abs(quieter / full - 0.75) < 0.01, quieter / full)
+check("the shipped default is 25% below full", speech.DEFAULT_VOICE_LEVEL == 0.75)
 
 finish("ALL SPEECH TESTS PASSED")

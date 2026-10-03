@@ -470,7 +470,7 @@ naming it, without printing either value.
 - `AMY_LOG_FILE` is Amy's log file, `amy.log` by default. Everything the console shows at INFO and above is also written there with a timestamp, and it rotates at about 1MB, keeping 5 old files (`amy.log.1` … `amy.log.5`), so a problem overnight leaves a trace after the console window has closed. The console's DEBUG lines — which include the text of every chat message — are deliberately **not** written to the file. Set it blank to turn the file off.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
-- `TTS`, `AMY_VOICE`, `TTS_SPEED`, `TTS_THREADS`, `DUCK_LEVEL` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
+- `TTS`, `AMY_VOICE`, `TTS_SPEED`, `TTS_THREADS`, `DUCK_LEVEL`, `VOICE_LEVEL` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
 
 ### Step 5: Enable the Server Members Intent (required)
 
@@ -560,7 +560,8 @@ Then set `TTS=on` in `.env` and restart. The voice loads in the background after
 - **English only.** Kokoro is set up for English; replies in other languages won't be read aloud.
 - **Offline after setup.** `speech.py download` fetches one pinned version of the model into `kokoro_model/`; after that Amy never contacts Hugging Face, so an outage or an upstream change can't affect her voice.
 - **The voice** is `AMY_VOICE`: one Kokoro voice, or a weighted blend such as `af_heart:0.6,af_bella:0.4`. After changing it, run `python speech.py download` again to fetch any new voice.
-- **Music keeps playing while she talks.** It fades down to `DUCK_LEVEL` (30% by default) under her voice and back up afterwards, so nobody loses their place in the song. If the music is paused, it stays paused: she's heard, and the song doesn't move on.
+- **Music keeps playing while she talks.** It fades down to `DUCK_LEVEL` (55% by default) under her voice and back up afterwards, so nobody loses their place in the song. If the music is paused, it stays paused: she's heard, and the song doesn't move on.
+- **Balance:** her voice plays at `VOICE_LEVEL` (0.75, i.e. 25% below full) and the music under her at `DUCK_LEVEL` (55%). Both were tuned in a live test, where the first settings (full voice over 30% music) left the music barely audible. Raise `DUCK_LEVEL` or lower `VOICE_LEVEL` to hear more of the song.
 - **One sentence at a time.** She starts after the first sentence is ready rather than waiting for the whole reply, and a backlog longer than 30 seconds drops its oldest sentences instead of talking for minutes. `/stop`, `/leave` and Amy leaving the call silence her; `/skip`, `/seek` and `/previous` don't, so a sentence carries on over the next song.
 - **Licences:** Kokoro is Apache-2.0. Its English text handling bundles espeak-ng, which is GPL-3.0 — fine for running your own bot; it would matter only if you distributed the bot as a package.
 

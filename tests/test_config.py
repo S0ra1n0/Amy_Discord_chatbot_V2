@@ -69,7 +69,7 @@ def probe(dotenv_values, extra_env=None):
     env = {k: v for k, v in os.environ.items()
            if k not in ("HISTORY_LIMIT", "DB_PRUNE_DAYS", "WEB_SEARCH", "OLLAMA_THINK",
                         "OLLAMA_KEEP_ALIVE", "DISCORD_TOKEN", "TTS", "AMY_VOICE",
-                        "TTS_SPEED", "TTS_THREADS")}
+                        "TTS_SPEED", "TTS_THREADS", "DUCK_LEVEL", "VOICE_LEVEL")}
     env.update(extra_env or {})
     env["AMY_PROBE_SCENARIO"] = json.dumps({"dotenv": dotenv_values})
     env["PYTHONIOENCODING"] = "utf-8"
@@ -184,6 +184,13 @@ check("...speed and threads", res is not None and res["TTS_SPEED"] == 1.1
       and res["TTS_THREADS"] == 8, res)
 check("...and still imports neither PyTorch nor Kokoro at startup",
       res is not None and not res["torch_imported"], res)
+code, res, out = probe({"TTS": "on"})
+check("balance defaults: music 55% under her voice, voice at 0.75",
+      res is not None and res["DUCK_LEVEL"] == 0.55 and res["VOICE_LEVEL"] == 0.75
+      and res["speaker_level"] == 0.75, res and (res["DUCK_LEVEL"], res["VOICE_LEVEL"]))
+code, res, out = probe({"TTS": "on", "DUCK_LEVEL": "0.7", "VOICE_LEVEL": "0.5"})
+check("both levels are adjustable, and the voice level reaches the speaker",
+      res is not None and res["DUCK_LEVEL"] == 0.7 and res["speaker_level"] == 0.5, res)
 code, res, out = probe({"TTS": "on", "AMY_VOICE": "jf_alpha"})
 check("a non-English voice falls back to the default",
       res is not None and res["AMY_VOICE"] == [["af_heart", 1.0]], res and res["AMY_VOICE"])

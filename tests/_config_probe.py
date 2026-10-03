@@ -58,6 +58,9 @@ print("PROBE_RESULT " + json.dumps({
     "AMY_VOICE": amy.AMY_VOICE,
     "TTS_SPEED": amy.TTS_SPEED,
     "TTS_THREADS": amy.TTS_THREADS,
+    "DUCK_LEVEL": amy.DUCK_LEVEL,
+    "VOICE_LEVEL": amy.VOICE_LEVEL,
+    "speaker_level": amy.speaker.level if amy.speaker is not None else None,
     # Loading is deferred to on_ready; importing the bot must never pull PyTorch in.
     "torch_imported": "torch" in sys.modules or "kokoro" in sys.modules,
 }))

@@ -147,6 +147,10 @@ TTS_THREADS: int = _setting(config.parse_int("TTS_THREADS", os.getenv("TTS_THREA
 DUCK_LEVEL: float = _setting(config.parse_float("DUCK_LEVEL", os.getenv("DUCK_LEVEL"),
                                                 default=mixer.DEFAULT_DUCK, minimum=0.0,
                                                 maximum=1.0))
+# How loud Amy's voice is: 1.0 = full (normalised) level, 0.75 = 25% quieter.
+VOICE_LEVEL: float = _setting(config.parse_float("VOICE_LEVEL", os.getenv("VOICE_LEVEL"),
+                                                 default=speech.DEFAULT_VOICE_LEVEL,
+                                                 minimum=0.1, maximum=1.0))
 # How far back Amy remembers, and how much is replayed to the model each reply. The cap
 # itself lives in database.py because storage enforces it too; this is the single source of
 # truth for both. It is a speed knob as well as a memory one - every stored message is sent
@@ -242,7 +246,8 @@ if not bot_enabled:
 
 # Loaded in the background from on_ready, never here: a cold load takes ~9 seconds.
 speaker: Optional[speech.Speaker] = (
-    speech.Speaker(speech.KokoroEngine(AMY_VOICE, speed=TTS_SPEED, threads=TTS_THREADS))
+    speech.Speaker(speech.KokoroEngine(AMY_VOICE, speed=TTS_SPEED, threads=TTS_THREADS),
+                   level=VOICE_LEVEL)
     if TTS else None)
 if speaker is not None:
     log.info(f"Voice on: {speech.format_recipe(AMY_VOICE)} at {TTS_SPEED}x - loading after login")

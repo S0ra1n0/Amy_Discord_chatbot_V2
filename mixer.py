@@ -32,7 +32,9 @@ log = logging.getLogger("amy.mixer")
 
 FRAME_BYTES = 3840               # 20 ms of 48 kHz 16-bit stereo; matches speech.FRAME_BYTES
 SILENCE = b"\x00" * FRAME_BYTES
-DEFAULT_DUCK = 0.3               # music volume while Amy speaks (DUCK_LEVEL)
+# Music volume while Amy speaks (DUCK_LEVEL). Was 0.3; in the first live test the music
+# was barely audible under her voice, so it went up to 0.55.
+DEFAULT_DUCK = 0.55
 RAMP_FRAMES = 10                 # 200 ms fades, so the duck is never a hard cut
 MAX_QUEUED_SECONDS = 30          # a backlog beyond this drops whole sentences, oldest first
 SLOW_READ_MS = 40                # reads slower than two frames get logged (review item R9)

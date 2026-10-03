@@ -57,6 +57,9 @@ DEFAULT_VOICE = "af_heart"
 DEFAULT_THREADS = 6
 MAX_SPOKEN_CHARS = 400       # anything longer is cut at a sentence boundary
 PEAK_TARGET = 0.7            # speech peak as a fraction of full scale - headroom for mixing
+# How loud Amy's voice is, on top of PEAK_TARGET (VOICE_LEVEL). 0.75 since the first live
+# test, where her voice drowned out the music.
+DEFAULT_VOICE_LEVEL = 0.75
 
 
 # ---- Text clean-up -------------------------------------------------------------------------
@@ -381,8 +384,9 @@ class Speaker:
     `problem` and the log.
     """
 
-    def __init__(self, engine: SpeechEngine) -> None:
+    def __init__(self, engine: SpeechEngine, level: float = 1.0) -> None:
         self.engine = engine
+        self.level = level                       # voice volume: 1.0 = PEAK_TARGET
         self.state = "off"                       # off -> loading -> ready | failed
         self.problem: Optional[str] = None
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=1,
@@ -419,7 +423,8 @@ class Speaker:
         except Exception as e:
             log.warning(f"Couldn't synthesise a sentence: {e}")
             return []
-        return to_discord_frames(normalise_peak(pcm), self.engine.rate)
+        return to_discord_frames(normalise_peak(pcm, PEAK_TARGET * self.level),
+                                 self.engine.rate)
 
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
