@@ -11,7 +11,7 @@ import httpx
 from collections import defaultdict
 from datetime import datetime
 from dataclasses import dataclass
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Tuple,
                     Union)
 
 from dotenv import dotenv_values, load_dotenv
@@ -974,16 +974,12 @@ class PlayerControls(discord.ui.View):
                        custom_id="amy:previous")
     async def previous_button(self, interaction: discord.Interaction,
                               button: discord.ui.Button) -> None:
-        guild = interaction.guild
-        vc = voice.get_voice_client(guild) if guild else None
-        if guild is None or vc is None or not vc.is_connected():
-            await interaction.response.send_message(
-                embed=ui.error_embed("I'm not in a voice channel."), ephemeral=True)
+        if interaction.guild is None:
             return
-        if await go_back(guild, vc) is None:
-            await interaction.response.send_message(
-                embed=ui.error_embed("There's no previous track to go back to."),
-                ephemeral=True)
+        went_back, message = go_back(interaction.guild)
+        if not went_back:
+            await interaction.response.send_message(embed=ui.error_embed(message),
+                                                    ephemeral=True)
             return
         await interaction.response.defer()   # the now-playing card updates itself
 
@@ -1215,17 +1211,6 @@ async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
 #--------------------------------------
 
 #----Music Playback Engine------
-# Fire-and-forget tasks are held here until done: asyncio keeps only a weak reference, so an
-# unreferenced task can be garbage collected mid-flight and a track would silently never start.
-_background: Set[asyncio.Task] = set()
-
-
-def spawn(coro: Any) -> None:
-    task = asyncio.create_task(coro)
-    _background.add(task)
-    task.add_done_callback(_background.discard)
-
-
 async def finish_playback(guild: discord.Guild, player: music.GuildPlayer) -> None:
     """Nothing left to play: show the finished card, forget the snapshot, start idling."""
     if player.current is not None:
@@ -1287,7 +1272,7 @@ async def advance_playback(guild: discord.Guild) -> None:
             log.error(f"Could not play '{next_track.title}': {e}")
             # Skip the bad track rather than stalling the whole queue
             player.current = None
-            spawn(advance_playback(guild))
+            music.spawn(advance_playback(guild))
 
 
 async def idle_disconnect(guild: discord.Guild) -> None:
@@ -1572,39 +1557,52 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
     return _info(f"Skipped **{skipped}**.")
 
 
-async def go_back(guild: discord.Guild, vc: discord.VoiceClient) -> Optional[music.Track]:
+NO_HISTORY = "There's no previous track to go back to."
+BUSY_LOADING = "I'm still loading the next track - try again in a moment."
+
+
+def go_back(guild: discord.Guild) -> Tuple[bool, str]:
     """
-    Play the previous track; the one it interrupts plays straight after. Returns the track
-    gone back to, or None if there's no history. Shared by /previous and the button.
+    Play the previous track; the one it interrupts plays straight after. Returns (went back,
+    message to show). The one implementation behind /previous and the Previous button, so
+    their checks and wording can't drift apart. Synchronous on purpose: nothing here awaits,
+    so nothing can change between the checks and the queue edit.
+
+    Refused while the player lock is held - an advance loading the next track, or a /seek
+    rebuilding the stream. In that window nothing is audible and `current` still names the
+    track just left, so going back used to queue the previous song behind the one already
+    loading (or behind an endless TRACK-loop repeat) while replying that it had gone back.
 
     Never waits on the stream: while something plays, vc.stop() hands over to the
-    after-callback; when nothing does, the advance is started in the background. Resolving
+    after-callback; when nothing does, the advance runs in the background, since resolving
     takes seconds and a slash reply must answer within three.
     """
+    vc = voice.get_voice_client(guild)
+    if vc is None or not vc.is_connected():
+        return False, NOT_CONNECTED
     player = music_manager.player_for(guild.id)
+    if player.lock.locked():
+        return False, BUSY_LOADING
     playing = vc.is_playing() or vc.is_paused()
     prev = music.step_back(player.current if playing else None, player.queue, player.history)
     if prev is None:
-        return None
+        return False, NO_HISTORY
     player.cancel_idle()
     if playing:
         player.back_requested = True
         vc.stop()   # the after-callback plays `prev`
     else:
-        spawn(advance_playback(guild))
-    return prev
+        music.spawn(advance_playback(guild))
+    return True, f"Going back to **{prev.title}**."
 
 
 async def music_previous(ctx: MusicContext) -> MusicResult:
-    vc = ctx.connected()
-    if vc is None:
+    if ctx.connected() is None:
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error("You need to be in my voice channel to go back.")
-    prev = await go_back(ctx.guild, vc)
-    if prev is None:
-        return _error("There's no previous track to go back to.")
-    return _info(f"Going back to **{prev.title}**.")
+    went_back, message = go_back(ctx.guild)
+    return _info(message) if went_back else _error(message)
 
 
 async def music_seek(ctx: MusicContext, position: str) -> MusicResult:

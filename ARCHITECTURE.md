@@ -82,9 +82,10 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 
 ## Playback
 
-- **`vc.play(after=...)` runs its callback on another thread.** Advancing the queue must go
-  through `asyncio.run_coroutine_threadsafe` (`music.make_after_callback`), or it silently
-  stalls.
+- **`vc.play(after=...)` runs its callback on another thread.** Advancing the queue must hop
+  back to the event loop (`loop.call_soon_threadsafe`, in `music.make_after_callback`), or it
+  silently stalls. The coroutine is created on the loop, inside that callback, and started
+  with `spawn()`.
 - **Position comes from the clock, not FFmpeg**, which exposes no playback cursor.
   `GuildPlayer.mark_started/paused/resumed/stopped` maintain it. **Every `vc.pause()` and
   `vc.resume()` call site must update it**, or the progress bar and `/seek` drift.
@@ -100,14 +101,21 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `skip_requested`. Otherwise a later track would also start partway through.
 - **History for `/previous` is recorded in one place**, `music.advance_with_history`: a track
   goes on `player.history` only when playback moves past it (not when TRACK loop replays it),
-  and `stop_all` adds what was playing. `step_back` puts the previous track first and the
+  and `stop_all` adds what was playing (unless it's already the newest entry: while the
+  next track loads, `current` is the one just recorded). `step_back` puts the previous track first and the
   interrupted one right after it, then sets `back_requested` (one-shot) so that advance takes
   the front and records nothing - recording the interrupted track would make a second
   `/previous` bounce back to it instead of walking further back. Bounded by `MAX_HISTORY`,
   in memory only, cleared by `reset` when Amy leaves voice.
-- **Fire-and-forget tasks go through `spawn()`**, which holds a reference until they finish.
-  asyncio keeps only a weak one, so a bare `asyncio.create_task` can be garbage collected
-  mid-flight and a track would silently never start.
+- **`go_back` refuses while `player.lock` is held**: an advance loading the next track, or a
+  `/seek` rebuilding the stream. Nothing is audible then and `current` names the track just
+  left, so going back would queue behind the track already loading. It is synchronous on
+  purpose, so nothing can change between its checks and the queue edit, and the button and
+  `/previous` both call it, so they share checks and wording.
+- **Fire-and-forget tasks go through `music.spawn()`**, which holds a reference until they
+  finish. asyncio keeps only a weak one, and the Python docs warn an unreferenced task can be
+  collected before it completes. In practice a task waiting on a lock or I/O is kept alive by
+  that wait, so this is about not depending on it - no lost track has actually been seen.
 - **The periodic snapshot skips a player whose lock is held.** Mid-advance, the next track
   exists only in a local variable.
 - **Stream URLs expire** (about 6 hours). Metadata is resolved when a track is queued; the

@@ -343,7 +343,7 @@ whose saved row can't be read is skipped individually rather than failing the wh
 
 ### Player controls
 
-The now-playing card carries four buttons — **Previous**, **Pause/Resume**, **Skip** and **Stop**. **Previous** (and `/previous`) plays the last track again and puts the interrupted one straight after it; repeating it walks further back, up to 20 tracks. History is kept in memory, so a restart clears it.
+The now-playing card carries four buttons — **Previous**, **Pause/Resume**, **Skip** and **Stop**. **Previous** (and `/previous`) plays the last track again and puts the interrupted one straight after it; repeating it walks further back, up to 20 tracks. History is kept in memory, so a restart clears it. For the second or two while the next track is loading, Previous asks you to try again a moment later instead of guessing: going back mid-load used to queue the previous song behind the one already loading.
 
 They follow exactly the same permission rule as the equivalent commands: you must be in Amy's
 voice channel, or be an admin. Pressing one without permission gets a private (ephemeral)

@@ -199,4 +199,87 @@ check("/stop clears a pending go-back", p.back_requested is False)
 p.reset()
 check("leaving voice clears the history", not p.history)
 
+# ---- /previous fixes (code review, 2026-10-03) ----
+print()
+print("=== /previous regressions ===")
+# P2: QUEUE loop rotated A into the queue, then /play added D behind it. The old check only
+# looked at queue[-1], so A stayed and played twice in every cycle.
+h, q = deque([A]), deque([C, A, D])
+music.step_back(B, q, h)
+check("P2: the rotated copy is removed even with tracks queued after it",
+      [t.title for t in q] == ["A", "B", "C", "D"], [t.title for t in q])
+# P3: /previous moved B into the queue, then a /clearqueue emptied it before the advance ran.
+# B was in neither the queue nor the history - unreachable.
+h, q = deque(), deque()
+check("P3: a going-back advance with an emptied queue plays nothing",
+      music.advance_with_history(B, q, h, LoopMode.OFF, going_back=True) is None)
+check("P3: ...but keeps the interrupted track reachable", list(h) == [B], [t.title for t in h])
+# P1: /stop while the next track loads. `current` still holds X, which the advance already
+# recorded; stop_all used to record it again, so /previous brought X back twice.
+p = music.GuildPlayer(2)
+X = T("X")
+p.history.append(X)
+p.current = X
+p.stop_all()
+check("P1: /stop during a load doesn't record the same track twice", list(p.history) == [X],
+      [t.title for t in p.history])
+p = music.GuildPlayer(3)
+Y = T("Y")
+p.history.append(Y)                         # something played before...
+p.current = X                               # ...then X, on TRACK loop: never recorded yet
+p.stop_all()
+check("P1: ...but a looping track that was never recorded still is",
+      list(p.history) == [Y, X], [t.title for t in p.history])
+
+print()
+print("=== spawn holds its task until it finishes ===")
+import asyncio
+import threading
+
+
+async def _spawn_check():
+    gate = asyncio.Event()
+
+    async def work():
+        await gate.wait()
+    task = music.spawn(work())
+    held = task in music._background
+    gate.set()
+    await task
+    await asyncio.sleep(0)
+    return held, task in music._background
+
+held, still = asyncio.run(_spawn_check())
+check("a spawned task is held while it runs", held)
+check("and released once it finishes", not still)
+
+
+async def _after_check():
+    ran = asyncio.Event()
+
+    async def advance():
+        ran.set()
+    loop = asyncio.get_running_loop()
+    after = music.make_after_callback(loop, advance)
+    threading.Thread(target=after, args=(None,)).start()   # discord.py calls it off-loop
+    await asyncio.wait_for(ran.wait(), 2)
+    return True
+
+check("the after-callback advances the queue from another thread", asyncio.run(_after_check()))
+
+_spawned = []
+_real_spawn = music.spawn
+
+
+def _recording_spawn(coro):
+    _spawned.append(coro)
+    return _real_spawn(coro)
+
+music.spawn = _recording_spawn
+try:
+    asyncio.run(_after_check())
+finally:
+    music.spawn = _real_spawn
+check("P4: ...and starts it through spawn, so the task is held", len(_spawned) == 1, _spawned)
+
 finish("ALL QUEUE MANAGEMENT TESTS PASSED")

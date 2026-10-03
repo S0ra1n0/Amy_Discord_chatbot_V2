@@ -825,6 +825,42 @@ try:
     asyncio.run(amy.PlayerControls().previous_button.callback(it))
     check("the button with no history explains itself",
           "There's no previous track" in text_of(None, it), text_of(None, it))
+
+    # P1 (code review): /previous while the next track loads. The advance holds the player
+    # lock while it resolves; nothing is audible and `current` still names the track just
+    # left. Going back then queued the previous song BEHIND the one loading (or behind an
+    # endless TRACK-loop repeat) while replying that it had gone back.
+    def _while_loading(p, call):
+        async def go():
+            async with p.lock:              # what advance_playback holds while resolving
+                await call()
+        asyncio.run(go())
+
+    p, it = setup(USER, "userA", ["next up"])
+    p.current = make_track(amy, "just left")
+    it.guild.voice_client.stopped = True    # loading: nothing audible
+    p.history.append(make_track(amy, "earlier"))
+    _while_loading(p, lambda: amy.tree.get_command("previous").callback(it))
+    out = text_of(None, it)
+    check("P1: /previous while the next track loads says to try again",
+          "still loading the next track" in out, out)
+    check("P1: ...and changes nothing",
+          [t.title for t in p.history] == ["earlier"] and [t.title for t in p.queue] == ["next up"]
+          and not p.back_requested, ([t.title for t in p.history], [t.title for t in p.queue]))
+
+    p, it = setup(USER, "userA", [])
+    p.history.append(make_track(amy, "earlier"))
+    _while_loading(p, lambda: amy.PlayerControls().previous_button.callback(it))
+    check("P1: the button refuses the same way, with the same words",
+          "still loading the next track" in text_of(None, it) and len(p.history) == 1,
+          text_of(None, it))
+
+    p, it = setup(USER, "userA", ["t1"])
+    p.history.append(make_track(amy, "earlier"))
+    it.guild.voice_client.disconnected = True
+    asyncio.run(amy.PlayerControls().previous_button.callback(it))
+    check("the button and /previous share the not-connected message",
+          "I'm not in a voice channel." in text_of(None, it), text_of(None, it))
 finally:
     amy.music.play_track, amy.refresh_now_playing = _real_play, _real_refresh
 

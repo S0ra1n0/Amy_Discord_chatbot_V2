@@ -11,7 +11,7 @@ import urllib.parse
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Set, Tuple
 
 import discord
 
@@ -175,7 +175,14 @@ def advance_with_history(
     walking further back, and QUEUE loop would add a duplicate of it to the rotation.
     """
     if going_back:
-        return queue.popleft() if queue else None
+        if queue:
+            return queue.popleft()
+        # The queue was emptied between /previous and this advance (a /clearqueue landing
+        # in between). step_back had moved the interrupted track into the queue, so it is
+        # now in neither place - record it, or no /previous could ever reach it again.
+        if current is not None:
+            history.append(current)
+        return None
     nxt = advance_queue(current, queue, mode, force_next=force_next)
     if current is not None and nxt is not current:
         history.append(current)
@@ -189,14 +196,20 @@ def step_back(current: Optional[Track], queue: Deque[Track],
 
     `current` (what's playing now, or None if nothing is) goes back to the front, right after
     the previous track, so going back never loses the song that was interrupted. In QUEUE loop
-    the previous track was also rotated to the back of the queue when it finished; that copy
-    is removed so going back doesn't leave it in the rotation twice.
+    the previous track was also rotated into the queue when it finished; that copy is removed
+    so going back doesn't leave it in the rotation twice.
     """
     if not history:
         return None
     prev = history.pop()
-    if queue and queue[-1] is prev:
-        queue.pop()
+    # The same Track object can only be in the queue because QUEUE loop rotated it there.
+    # It isn't necessarily last: anything /play-ed since sits behind it. Remove the copy
+    # nearest the back, by identity - a separately queued request for the same song is a
+    # different object and stays.
+    for i in range(len(queue) - 1, -1, -1):
+        if queue[i] is prev:
+            del queue[i]
+            break
     if current is not None:
         queue.appendleft(current)
     queue.appendleft(prev)
@@ -680,7 +693,10 @@ class GuildPlayer:
         from bringing the music back.
         """
         # What was playing stays reachable: /previous after an accidental /stop brings it back.
-        if self.current is not None:
+        # While the next track loads, `current` still holds the one just left, which the
+        # advance has already recorded - so skip it if it's the newest entry, or /previous
+        # would bring the same song back twice.
+        if self.current is not None and not (self.history and self.history[-1] is self.current):
             self.history.append(self.current)
         self.queue.clear()
         self.loop_mode = LoopMode.OFF
@@ -950,6 +966,21 @@ async def restart_at(
     return True
 
 
+# Background tasks are held here until they finish. asyncio itself keeps only a weak
+# reference to a task, and the Python docs warn that an unreferenced task can be garbage
+# collected before it completes. In practice a task waiting on a lock or I/O is kept alive by
+# that wait, so this is about not depending on it rather than a bug seen in the wild.
+_background: Set["asyncio.Task[Any]"] = set()
+
+
+def spawn(coro: Coroutine[Any, Any, Any]) -> "asyncio.Task[Any]":
+    """Start `coro` as a task and hold a reference to it until it finishes. Loop thread only."""
+    task = asyncio.ensure_future(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
+
+
 def make_after_callback(
     loop: asyncio.AbstractEventLoop,
     advance: Callable[[], Coroutine[Any, Any, None]],
@@ -965,7 +996,9 @@ def make_after_callback(
         if error:
             log.error(f"Playback error: {error}")
         try:
-            asyncio.run_coroutine_threadsafe(advance(), loop)
+            # The coroutine is created on the loop's own thread, inside the callback, so a
+            # loop that has already closed never leaves an un-awaited coroutine behind.
+            loop.call_soon_threadsafe(lambda: spawn(advance()))
         except Exception as e:  # loop already closed during shutdown
             log.warning(f"Could not schedule next track: {e}")
 
