@@ -36,6 +36,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | Command                  | Description                                                               | Access     |
 | ------------------------ | ------------------------------------------------------------------------- | ---------- |
 | `/help`                  | Display all available commands                                            | Everyone   |
+| `/say [text]`            | Make Amy say something out loud in her voice channel (needs TTS on)       | Admin only |
 | `/toggle`                | Enable/disable bot responses to chat (commands still work)                | Admin only |
 | `/status`                | Show bot state, Ollama connectivity, memory stats and rate limit info     | Admin only |
 | `/model`                 | Show the current Ollama model                                             | Admin only |
@@ -469,7 +470,7 @@ naming it, without printing either value.
 - `AMY_LOG_FILE` is Amy's log file, `amy.log` by default. Everything the console shows at INFO and above is also written there with a timestamp, and it rotates at about 1MB, keeping 5 old files (`amy.log.1` … `amy.log.5`), so a problem overnight leaves a trace after the console window has closed. The console's DEBUG lines — which include the text of every chat message — are deliberately **not** written to the file. Set it blank to turn the file off.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
-- `TTS`, `AMY_VOICE`, `TTS_SPEED`, `TTS_THREADS` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
+- `TTS`, `AMY_VOICE`, `TTS_SPEED`, `TTS_THREADS`, `DUCK_LEVEL` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
 
 ### Step 5: Enable the Server Members Intent (required)
 
@@ -543,7 +544,7 @@ The bot should now be online and ready to respond in your Discord server!
 
 ### Amy's voice (optional)
 
-> **Work in progress.** This sets up the speech engine; Amy doesn't speak in calls yet. That arrives in the next update.
+> **Work in progress.** Amy can speak in calls now, through the admin-only `/say` command. Speaking her chat replies and command confirmations on her own arrives in the next update.
 
 Amy can speak in voice calls with [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a small text-to-speech model that runs on your CPU, so the chat model keeps the GPU. It's optional and off by default, because it's a large install: about **1.2 GB**, mostly PyTorch, plus a 313 MB voice model.
 
@@ -559,6 +560,8 @@ Then set `TTS=on` in `.env` and restart. The voice loads in the background after
 - **English only.** Kokoro is set up for English; replies in other languages won't be read aloud.
 - **Offline after setup.** `speech.py download` fetches one pinned version of the model into `kokoro_model/`; after that Amy never contacts Hugging Face, so an outage or an upstream change can't affect her voice.
 - **The voice** is `AMY_VOICE`: one Kokoro voice, or a weighted blend such as `af_heart:0.6,af_bella:0.4`. After changing it, run `python speech.py download` again to fetch any new voice.
+- **Music keeps playing while she talks.** It fades down to `DUCK_LEVEL` (30% by default) under her voice and back up afterwards, so nobody loses their place in the song. If the music is paused, it stays paused: she's heard, and the song doesn't move on.
+- **One sentence at a time.** She starts after the first sentence is ready rather than waiting for the whole reply, and a backlog longer than 30 seconds drops its oldest sentences instead of talking for minutes. `/stop`, `/leave` and Amy leaving the call silence her; `/skip`, `/seek` and `/previous` don't, so a sentence carries on over the next song.
 - **Licences:** Kokoro is Apache-2.0. Its English text handling bundles espeak-ng, which is GPL-3.0 — fine for running your own bot; it would matter only if you distributed the bot as a package.
 
 ## Project Structure
@@ -576,6 +579,7 @@ Amy_chatbot_V2/
 ├── models.py               # Which Ollama model is active: /model, probing, warm-up
 ├── logs.py                 # Logging: the console, plus a rotating amy.log
 ├── speech.py               # Amy's voice: text clean-up, speech engine (optional)
+├── mixer.py                # Mixes her voice over the music, lowering it while she talks
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
@@ -606,7 +610,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-24 suites covering queue logic, speech text handling, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+25 suites covering queue logic, speech text handling, voice mixing, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and

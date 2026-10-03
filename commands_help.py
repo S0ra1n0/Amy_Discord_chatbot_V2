@@ -31,6 +31,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 
 HELP_ADMIN = """
 **Commands — Admin only:**
+`/say [text]` - Make Amy say something in her voice channel (needs TTS on)
 `/toggle` - Enable/disable bot responses (remembered across restarts)
 `/forget` - Wipe conversation memory for this channel
 `/status` - Show bot state, Ollama connectivity, memory usage and rate limit info

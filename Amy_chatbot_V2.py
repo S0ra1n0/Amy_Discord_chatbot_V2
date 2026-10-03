@@ -27,6 +27,7 @@ import config
 import voice
 from voice import VoiceManager
 import music
+import mixer
 from music import LoopMode, MusicManager
 import websearch
 import llm
@@ -142,6 +143,10 @@ TTS_SPEED: float = _setting(config.parse_float("TTS_SPEED", os.getenv("TTS_SPEED
                                                default=1.0, minimum=0.5, maximum=2.0))
 TTS_THREADS: int = _setting(config.parse_int("TTS_THREADS", os.getenv("TTS_THREADS"),
                                              default=speech.DEFAULT_THREADS, minimum=1))
+# How loud the music stays while Amy speaks over it: 0.3 = 30%, 1.0 = not lowered at all.
+DUCK_LEVEL: float = _setting(config.parse_float("DUCK_LEVEL", os.getenv("DUCK_LEVEL"),
+                                                default=mixer.DEFAULT_DUCK, minimum=0.0,
+                                                maximum=1.0))
 # How far back Amy remembers, and how much is replayed to the model each reply. The cap
 # itself lives in database.py because storage enforces it too; this is the single source of
 # truth for both. It is a speed knob as well as a memory one - every stored message is sent
@@ -217,7 +222,10 @@ except SchemaTooNewError as e:
 
 #----Voice & Music------
 voice_manager = VoiceManager(db)
-music_manager = MusicManager()
+# With TTS on, every player gets a speech queue and every track plays through a Mixer.
+# The hold callback is looked up at call time: it's defined further down.
+music_manager = MusicManager(speech=TTS, duck=DUCK_LEVEL,
+                             on_hold_done=lambda gid: _on_hold_done(gid))
 #----------------------------------------------
 
 #----Bot State------
@@ -575,7 +583,7 @@ async def start_waiting_queue(guild: discord.Guild) -> int:
     vc = voice.get_voice_client(guild)
     if player.current is not None or not player.queue:
         return 0
-    if vc is not None and (vc.is_playing() or vc.is_paused()):
+    if music.music_active(vc, player):
         return 0
     waiting = len(player.queue)
     await advance_playback(guild)
@@ -1012,13 +1020,11 @@ class PlayerControls(discord.ui.View):
             return
 
         player = music_manager.player_for(guild.id)
-        if vc.is_paused():
-            vc.resume()
-            player.mark_resumed()      # keep the position clock honest
+        # Through the music helpers: they keep the position clock honest, and know the
+        # music is "paused" while Amy speaks over it with the track held.
+        if music.resume_music(vc, player):
             paused = False
-        elif vc.is_playing():
-            vc.pause()
-            player.mark_paused()
+        elif music.pause_music(vc, player):
             paused = True
         else:
             await interaction.response.send_message(
@@ -1041,12 +1047,12 @@ class PlayerControls(discord.ui.View):
                           button: discord.ui.Button) -> None:
         guild = interaction.guild
         vc = voice.get_voice_client(guild) if guild else None
-        if guild is None or vc is None or not (vc.is_playing() or vc.is_paused()):
+        player = music_manager.player_for(guild.id) if guild else None
+        if guild is None or player is None or not music.music_active(vc, player) or vc is None:
             await interaction.response.send_message(
                 embed=ui.error_embed("Nothing is playing."), ephemeral=True)
             return
 
-        player = music_manager.player_for(guild.id)
         player.skip_requested = True  # so TRACK loop can't swallow an explicit skip
         await interaction.response.defer()
         vc.stop()  # after-callback advances the queue and refreshes the message
@@ -1172,7 +1178,7 @@ class SearchResults(discord.ui.View):
         self.stop()
 
         vc = voice.get_voice_client(guild)
-        playing = vc is not None and (vc.is_playing() or vc.is_paused())
+        playing = music.music_active(vc, player)
         if not music.starts_immediately(len(player.queue), playing):
             # Acknowledge first: starting a backlog resolves a stream URL, which can outlast
             # the 3-second interaction window.
@@ -1256,7 +1262,9 @@ async def advance_playback(guild: discord.Guild) -> None:
         # Another call may have started a track while this one waited for the lock
         # (resolving a stream URL holds it for seconds). Starting a second one would
         # raise "Already playing audio" and silently drop the track.
-        if vc.is_playing() or vc.is_paused():
+        # A track already loaded - Amy's voice playing alone doesn't count: _start hands
+        # over from it.
+        if music.music_active(vc, player):
             return
 
         # A user-requested skip overrides TRACK loop for this one advance; a /previous has
@@ -1310,6 +1318,125 @@ async def idle_disconnect(guild: discord.Guild) -> None:
         left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
     if left:
         log.info(f"Left {left} after being idle")
+#--------------------------------------
+
+#----Speaking in the Call------
+# Amy's voice reaches the call through the guild's speech queue (music.GuildPlayer.speech).
+# Whatever is playing picks it up: a track's Mixer ducks the music under it; with nothing
+# playing a speech-only Mixer plays it; over paused music the track is held while she speaks.
+# Rules: ARCHITECTURE.md, "Speech".
+NO_VOICE = "My voice is off. Set TTS=on in .env (see the README)."
+VOICE_LOADING = "My voice is still loading - try again in a few seconds."
+NOT_ENGLISH = "I can only speak English for now."
+NOTHING_TO_SAY = "There's nothing in that I can say out loud."
+
+
+def voice_problem() -> Optional[str]:
+    """Why Amy can't speak right now, or None if she can."""
+    if speaker is None:
+        return NO_VOICE
+    if speaker.state == "failed":
+        return f"My voice couldn't load: {speaker.problem}"
+    if not speaker.ready:
+        return VOICE_LOADING
+    return None
+
+
+def start_saying(guild: discord.Guild, text: str) -> Tuple[bool, str]:
+    """
+    Check Amy can say `text` here, then speak it in the background. Returns (started, reply).
+    Quick on purpose - synthesis takes about a second per sentence, so it never runs inside
+    an interaction's 3-second window.
+    """
+    problem = voice_problem()
+    if problem:
+        return False, problem
+    vc = voice.get_voice_client(guild)
+    if vc is None or not vc.is_connected():
+        return False, NOT_CONNECTED
+    spoken = speech.clean_for_speech(text)
+    if not spoken:
+        return False, NOTHING_TO_SAY
+    if not speech.is_english(spoken):
+        return False, NOT_ENGLISH
+    music.spawn(_speak_sentences(guild, speech.split_sentences(spoken)))
+    return True, "Saying it now."
+
+
+async def _speak_sentences(guild: discord.Guild, sentences: List[str]) -> None:
+    """Synthesise one sentence at a time and queue it, so she starts after the first."""
+    assert speaker is not None
+    player = music_manager.player_for(guild.id)
+    for sentence in sentences:
+        frames = await speaker.frames_for(sentence)
+        vc = voice.get_voice_client(guild)
+        if not frames or player.speech is None or vc is None or not vc.is_connected():
+            return                                  # she left, or synthesis failed (logged)
+        dropped = player.speech.add(frames)
+        if dropped:
+            log.info(f"Speech backlog full: dropped {dropped} older sentence(s)")
+        await ensure_speaking(guild)
+
+
+async def ensure_speaking(guild: discord.Guild) -> None:
+    """Make sure queued speech is heard: start a speech-only source, or hold paused music."""
+    player = music_manager.player_for(guild.id)
+    if player.speech is None or not player.speech:
+        return
+    vc = voice.get_voice_client(guild)
+    if vc is None or not vc.is_connected():
+        player.speech.clear()
+        return
+    if vc.is_playing():
+        return                       # a Mixer is running and will pick the speech up
+    if vc.is_paused():
+        held = mixer.mixer_of(vc)
+        if held is not None:
+            # Speak over paused music: resume with the track held, so it doesn't move on.
+            # The position clock stays paused - the music isn't being read.
+            held.hold_music = True
+            vc.resume()
+        return
+    # Nothing playing: not even a track loading has started yet. Speak on our own; if a track
+    # starts meanwhile, music._start hands over and the rest of the speech plays over it.
+    loop = asyncio.get_running_loop()
+    player.speech_only = True
+    vc.play(mixer.Mixer(None, player.speech, player.duck),
+            after=lambda error: loop.call_soon_threadsafe(
+                lambda: music.spawn(_after_speech_only(guild.id))))
+
+
+async def _after_speech_only(guild_id: int) -> None:
+    """A speech-only source ended (it ran out, or a track took over). Never touches music."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    player = music_manager.player_for(guild_id)
+    vc = voice.get_voice_client(guild)
+    if vc is None or not vc.is_playing():
+        player.speech_only = False
+    await ensure_speaking(guild)     # more speech may have arrived as it ended
+
+
+def _on_hold_done(guild_id: int) -> None:
+    """From the audio thread: speech over paused music has run out - pause the music again."""
+    try:
+        bot.loop.call_soon_threadsafe(lambda: music.spawn(_pause_after_speech(guild_id)))
+    except Exception as e:                       # the loop is closing during shutdown
+        log.warning(f"Could not re-pause after speaking: {e}")
+
+
+async def _pause_after_speech(guild_id: int) -> None:
+    guild = bot.get_guild(guild_id)
+    vc = voice.get_voice_client(guild) if guild else None
+    held = mixer.mixer_of(vc)
+    if vc is None or held is None or not held.hold_music:
+        return                       # someone resumed the music meanwhile
+    player = music_manager.player_for(guild_id)
+    if player.speech:
+        return                       # more speech arrived; the Mixer will call again
+    vc.pause()
+    held.hold_music = False          # paused for real again, exactly as before she spoke
 #--------------------------------------
 
 #----Music Command Handlers------
@@ -1374,7 +1501,7 @@ async def music_nowplaying(ctx: MusicContext) -> MusicResult:
     p = ctx.player
     if p.current is None:
         return _info("Nothing is playing right now.")
-    paused = bool(ctx.vc and ctx.vc.is_paused())
+    paused = music.music_paused(ctx.vc)
     return Reply(
         embed=ui.now_playing_embed(p.current, len(p.queue), p.loop_mode, p.volume,
                                    paused=paused, elapsed=p.position()),
@@ -1496,7 +1623,7 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
 
         await status_msg.edit(content=None,
                               embed=ui.playlist_embed(title, len(tracks), skipped))
-        if vc is None or not (vc.is_playing() or vc.is_paused()):
+        if not music.music_active(vc, player):
             await advance_playback(guild)   # posts its own now-playing card
         return ""
 
@@ -1511,7 +1638,7 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
     player.queue.append(track)
     player.cancel_idle()
 
-    playing = vc is not None and (vc.is_playing() or vc.is_paused())
+    playing = music.music_active(vc, player)
     if not music.starts_immediately(len(player.queue), playing):
         if not playing:
             # Idle with a backlog in front of this track (e.g. a restored queue): start
@@ -1537,10 +1664,8 @@ async def music_pause(ctx: MusicContext) -> MusicResult:
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error(NOT_WITH_AMY)
-    if not vc.is_playing():
+    if not music.pause_music(vc, ctx.player):
         return _error("Nothing is playing.")
-    vc.pause()
-    ctx.player.mark_paused()           # paused time must not count towards the position
     await refresh_now_playing(ctx.guild, paused=True)
     return _info("Paused.")
 
@@ -1551,10 +1676,8 @@ async def music_resume(ctx: MusicContext) -> MusicResult:
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error(NOT_WITH_AMY)
-    if not vc.is_paused():
+    if not music.resume_music(vc, ctx.player):
         return _error("Nothing is paused.")
-    vc.resume()
-    ctx.player.mark_resumed()
     await refresh_now_playing(ctx.guild, paused=False)
     return _info("Resumed.")
 
@@ -1565,7 +1688,7 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error("You need to be in my voice channel to skip.")
-    if not (vc.is_playing() or vc.is_paused()):
+    if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
     player = ctx.player
     skipped = player.current.title if player.current else "the current track"
@@ -1600,7 +1723,7 @@ def go_back(guild: discord.Guild) -> Tuple[bool, str]:
     player = music_manager.player_for(guild.id)
     if player.lock.locked():
         return False, BUSY_LOADING
-    playing = vc.is_playing() or vc.is_paused()
+    playing = music.music_active(vc, player)
     prev = music.step_back(player.current if playing else None, player.queue, player.history)
     if prev is None:
         return False, NO_HISTORY
@@ -1637,7 +1760,7 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error(NOT_WITH_AMY)
-    if not (vc.is_playing() or vc.is_paused()):
+    if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
     player, guild = ctx.player, ctx.guild
     track = player.current
@@ -1675,7 +1798,8 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
     if not moved:
         return _info("Playback was stopped, so I didn't jump.")
 
-    await refresh_now_playing(guild, paused=vc.is_paused())
+    await refresh_now_playing(guild, paused=music.music_paused(vc))
+    await ensure_speaking(guild)    # a seek on paused music re-pauses; speech waiting resumes
     if position is None:
         return _info(f"Replaying **{track.title}** from the start.")
     return _info(f"Jumped to **{music.format_duration(int(target))}** in **{track.title}**.")
@@ -1708,8 +1832,9 @@ async def music_volume(ctx: MusicContext, level: Optional[int] = None) -> MusicR
     player.volume = level / 100
     # Applies instantly only on the PCM path; an opus-passthrough track has no
     # volume stage, so the change lands when the next track starts.
-    if isinstance(vc.source, discord.PCMVolumeTransformer):
-        vc.source.volume = player.volume
+    source = mixer.music_source(vc)    # looks through the speech Mixer when TTS is on
+    if isinstance(source, discord.PCMVolumeTransformer):
+        source.volume = player.volume
         return _info(f"Volume set to **{level}%**.")
 
     if level >= 100:
@@ -2201,6 +2326,20 @@ async def slash_volume(
     level: Optional[app_commands.Range[int, 0, 100]] = None,
 ) -> None:
     await simple_music(interaction, music_volume, level)
+
+
+@tree.command(name="say", description="Make Amy say something in her voice channel")
+@app_commands.describe(text="What she should say (English)")
+@app_commands.guild_only()
+@admin_only()
+async def slash_say(interaction: discord.Interaction,
+                    text: app_commands.Range[str, 1, 500]) -> None:
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    started, reply = start_saying(guild, text)
+    await send_reply(interaction, Reply(embed=ui.info_embed(reply) if started
+                                        else ui.error_embed(reply)), ephemeral=True)
 
 
 @tree.command(name="toggle", description="Enable or disable Amy's chat replies")

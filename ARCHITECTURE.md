@@ -20,6 +20,7 @@ one guards against.
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
+| `mixer.py` | `SpeechQueue` and `Mixer`: Amy's voice mixed over the music, with ducking and the hold-music mode | discord |
 | `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engine and its `Speaker` | Kokoro/PyTorch **only when loaded** |
 | `database.py` | SQLite: history, settings, voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
@@ -53,6 +54,35 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **Speech audio is normalised to `PEAK_TARGET`** before it leaves `speech.py`, leaving
   headroom for mixing over music (audio adds saturate rather than wrap).
 - **Speech text is logged at DEBUG only**, like chat, so it never reaches `amy.log`.
+- **With TTS on, every track plays through a `mixer.Mixer`** (wrapped in `music._start`).
+  Quiet, it passes the music through untouched - still opus, no CPU cost. With speech
+  queued it decodes, fades the music to `DUCK_LEVEL` over 200 ms, adds the voice, and fades
+  back. With TTS off nothing is wrapped and playback is exactly as before.
+- **`Mixer.read()` never raises** - discord.py treats an exception as the end of the song
+  and the queue advances. After one failure it plays the rest of that song unmixed: a
+  repeating fault would otherwise lose the packet read in each failed attempt and play
+  every other one. **It returns `b""` only when music and speech are both finished.**
+- **The first two packets of every passed-through song are Ogg headers** (`OpusHead`,
+  `OpusTags`); decoding them raises `OpusError`, and the Mixer skips them. A song starting
+  while Amy is mid-sentence used to be the trigger: unhandled, one `/skip` while she talked
+  would have ended every song in the queue in turn. Decoded audio is re-sliced into exact
+  20 ms frames, so music in 40 or 60 ms packets mixes too.
+- **The speech queue lives on the player** (`GuildPlayer.speech`), not on the Mixer, so a
+  sentence carries on across `/skip`, `/seek` and `/previous`. `stop_all` clears it.
+- **"Is something playing" now has two meanings.** With nothing loaded, Amy speaks through a
+  speech-only Mixer and `player.speech_only` is set. Code asking whether a TRACK is loaded
+  uses `music.music_active(vc, player)`, never `vc.is_playing()`; code asking whether the
+  music is paused uses `music.music_paused(vc)`. Pausing and resuming go through
+  `music.pause_music` / `resume_music`. When a track starts during speech-only playback,
+  `music._start` stops that source and the remaining speech plays over the music.
+- **Speaking over paused music holds the track.** `vc.pause()` silences everything,
+  speech included, so `ensure_speaking` sets `Mixer.hold_music` and resumes: the music
+  isn't read (it doesn't move on, and its clock stays paused), only speech plays, then
+  the Mixer calls `on_hold_done` from the audio thread and the bot pauses again. Until
+  then the Mixer sends silence, never an empty read.
+- **Synthesis never runs inside an interaction's 3-second window.** `start_saying`
+  validates and returns; `_speak_sentences` runs in the background via `music.spawn`.
+- **`/volume` reaches the volume stage through the Mixer** (`mixer.music_source`).
 
 ## Logging
 

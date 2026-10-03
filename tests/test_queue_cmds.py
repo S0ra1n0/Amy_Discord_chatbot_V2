@@ -864,6 +864,219 @@ try:
 finally:
     amy.music.play_track, amy.refresh_now_playing = _real_play, _real_refresh
 
+# ---- Phase 1B: speaking in the call ---------------------------------------------------
+print()
+print("=== speaking in the call (TTS wiring) ===")
+import discord as _discord
+import speech as _speech
+
+
+class _PCM(_discord.AudioSource):
+    def read(self):
+        return b"\x00" * 3840
+
+    def is_opus(self):
+        return False
+
+
+def tts_setup(gid, titles=(), current="playing"):
+    """A guild whose player has a speech queue, as when TTS=on."""
+    amy.music_manager.speech = True
+    try:
+        amy.music_manager.cleanup(gid)
+        p = amy.music_manager.player_for(gid)
+    finally:
+        amy.music_manager.speech = False
+    for t in titles:
+        p.queue.append(make_track(amy, t))
+    p.current = make_track(amy, current) if current else None
+    member = Member(USER, CH, name="userA")
+    vc = VoiceClient(CH)
+    guild = Guild(OWNER, member, vc, guild_id=gid)
+    return p, vc, guild, Interaction(member, guild)
+
+
+p, vc, g, it = tts_setup(7001)
+check("with TTS on, each player gets a speech queue", p.speech is not None)
+plain_player = amy.music_manager.player_for(7999)
+check("with TTS off, none - playback exactly as before", plain_player.speech is None)
+
+# _start wraps the track in a Mixer only with TTS on
+src = _PCM()
+amy.music._start(vc, p, make_track(amy, "song"), src, lambda e: None, 0.0)
+check("a track plays through a Mixer when TTS is on",
+      isinstance(vc.source, amy.mixer.Mixer) and vc.source.music is src)
+vc2 = VoiceClient(CH)
+amy.music._start(vc2, plain_player, make_track(amy, "song"), src, lambda e: None, 0.0)
+check("...and is passed straight to discord.py when it's off", vc2.source is src)
+
+# Handover: Amy is speaking alone when a track starts
+p, vc, g, it = tts_setup(7002, current=None)
+p.speech.add([b"\x00" * 3840] * 10)
+vc.play(amy.mixer.Mixer(None, p.speech), after=None)
+p.speech_only = True
+check("speech alone isn't a track (so /skip, /seek and an advance ignore it)",
+      not amy.music.music_active(vc, p))
+amy.music._start(vc, p, make_track(amy, "song"), _PCM(), lambda e: None, 0.0)
+check("a track starting mid-speech takes over the voice client",
+      not p.speech_only and isinstance(vc.source, amy.mixer.Mixer) and vc.source.music is not None)
+check("...and the rest of the sentence carries over to it", bool(p.speech))
+check("a loaded track counts as active", amy.music.music_active(vc, p))
+
+# /stop silences her too
+p.stop_all()
+check("stop_all clears queued speech", not p.speech and not p.speech_only)
+
+# pause / resume, including speaking over paused music
+p, vc, g, it = tts_setup(7003)
+vc.play(amy.mixer.Mixer(_PCM(), p.speech), after=None)
+p.started_at = 1000.0
+check("pause_music pauses a playing track", amy.music.pause_music(vc, p) and vc.is_paused()
+      and p.paused_at is not None)
+check("pausing twice is refused", not amy.music.pause_music(vc, p))
+held = vc.source
+held.hold_music = True
+vc.resume()                                     # what ensure_speaking does to speak over it
+check("while she speaks over paused music, the music still counts as paused",
+      amy.music.music_paused(vc) and not amy.music.pause_music(vc, p))
+check("resume_music releases the held music", amy.music.resume_music(vc, p)
+      and not held.hold_music and p.paused_at is None)
+check("nothing to resume -> refused", not amy.music.resume_music(vc, p))
+
+# ensure_speaking in each state
+p, vc, g, it = tts_setup(7004, current=None)
+vc.stopped = True
+p.speech.add([b"\x00" * 3840] * 5)
+asyncio.run(amy.ensure_speaking(g))
+check("idle: she speaks through a speech-only Mixer",
+      p.speech_only and isinstance(vc.source, amy.mixer.Mixer) and vc.source.music is None)
+
+p, vc, g, it = tts_setup(7005)
+music_mixer = amy.mixer.Mixer(_PCM(), p.speech)
+vc.play(music_mixer, after=None)
+vc.pause()
+p.speech.add([b"\x00" * 3840] * 5)
+asyncio.run(amy.ensure_speaking(g))
+check("paused music: held, and the voice client resumed so she's heard",
+      music_mixer.hold_music and not vc.is_paused() and vc.source is music_mixer)
+
+p, vc, g, it = tts_setup(7006)
+music_mixer = amy.mixer.Mixer(_PCM(), p.speech)
+vc.play(music_mixer, after=None)
+p.speech.add([b"\x00" * 3840] * 5)
+asyncio.run(amy.ensure_speaking(g))
+check("playing music: left alone - its Mixer picks the speech up",
+      vc.source is music_mixer and len(vc.played) == 1 and not music_mixer.hold_music)
+
+p, vc, g, it = tts_setup(7007, current=None)
+vc.disconnected = True
+p.speech.add([b"\x00" * 3840] * 5)
+asyncio.run(amy.ensure_speaking(g))
+check("not connected: queued speech is dropped", not p.speech)
+
+# the speech-only source ending never touches the music
+p, vc, g, it = tts_setup(7008, current=None)
+p.speech_only = True
+vc.stopped = True
+_real_get_guild = amy.bot.get_guild
+amy.bot.get_guild = lambda gid: g
+try:
+    asyncio.run(amy._after_speech_only(7008))
+    check("when speech alone ends, the flag clears", not p.speech_only)
+
+    # re-pausing after speaking over paused music
+    p, vc, g, it = tts_setup(7009)
+    m = amy.mixer.Mixer(_PCM(), p.speech)
+    vc.play(m, after=None)
+    m.hold_music = True
+    asyncio.run(amy._pause_after_speech(7009))
+    check("speech over paused music done: paused again, exactly as before",
+          vc.is_paused() and not m.hold_music)
+    m2 = amy.mixer.Mixer(_PCM(), p.speech)
+    vc.play(m2, after=None)
+    m2.hold_music = True
+    p.speech.add([b"\x00" * 3840])
+    asyncio.run(amy._pause_after_speech(7009))
+    check("...but not while more speech is queued", not vc.is_paused() and m2.hold_music)
+    m2.hold_music = False
+    p.speech.clear()
+    asyncio.run(amy._pause_after_speech(7009))
+    check("...and not if someone resumed the music meanwhile", not vc.is_paused())
+finally:
+    amy.bot.get_guild = _real_get_guild
+
+# start_saying: every refusal, then the real path with a fake engine. Refusals are checked
+# inside a running loop, so a refusal that wrongly goes ahead FAILs here instead of crashing.
+_real_speaker = amy.speaker
+p, vc, g, it = tts_setup(7010, current=None)
+
+
+def say_reply(text):
+    async def go():
+        return amy.start_saying(g, text)[1]
+    return asyncio.run(go())
+
+
+try:
+    amy.speaker = None
+    check("voice off -> says how to turn it on", say_reply("hi") == amy.NO_VOICE)
+    sp = _speech.Speaker(_speech.FakeEngine())
+    amy.speaker = sp
+    check("still loading -> says so", say_reply("hi") == amy.VOICE_LOADING)
+    sp.state, sp.problem = "failed", "Kokoro isn't installed"
+    check("failed -> gives the reason", "Kokoro isn't installed" in say_reply("hi"))
+    sp.state, sp.problem = "off", None
+    asyncio.run(sp.start())
+    vc.disconnected = True
+    check("not in a call -> says so", say_reply("hi") == amy.NOT_CONNECTED)
+    vc.disconnected = False
+    check("nothing speakable (emoji only) -> says so",
+          say_reply("\U0001F389 ✅ <@123456789012345678>") == amy.NOTHING_TO_SAY)
+    check("not English -> says so",
+          say_reply("Hôm nay trời đẹp quá, bạn khỏe không?") == amy.NOT_ENGLISH)
+
+    vc.stopped = True
+
+    async def say_and_wait():
+        started, reply = amy.start_saying(g, "Hello there everyone. This is a test sentence.")
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if len(sp.engine.spoken) >= 2:
+                break
+        await asyncio.sleep(0.05)
+        return started, reply
+    p.speech.clear()
+    started, reply = asyncio.run(say_and_wait())
+    check("English text is accepted", started and reply == "Saying it now.", reply)
+    check("...spoken one sentence at a time", sp.engine.spoken[-2:] ==
+          ["Hello there everyone.", "This is a test sentence."], sp.engine.spoken)
+    check("...and played: a speech-only Mixer started, frames queued",
+          p.speech_only and isinstance(vc.source, amy.mixer.Mixer) and bool(p.speech))
+    sp.close()
+finally:
+    amy.speaker = _real_speaker
+
+# /skip while only her voice plays: there's no song to skip
+p, vc, g, it = tts_setup(7011, current=None)
+vc.play(amy.mixer.Mixer(None, p.speech), after=None)
+p.speech_only = True
+amy.music_manager.players[GUILD] = p
+it_skip = Interaction(Member(USER, CH, name="userA"), Guild(OWNER, Member(USER, CH, name="userA"),
+                                                         vc, guild_id=GUILD))
+check("/skip during speech alone says nothing is playing",
+      "Nothing is playing" in slash("skip", it_skip))
+
+# /volume reaches the music's volume stage through the Mixer
+p, vc, g, it = tts_setup(7012)
+inner = _discord.PCMVolumeTransformer(_PCM(), volume=1.0)
+vc.play(amy.mixer.Mixer(inner, p.speech), after=None)
+amy.music_manager.players[GUILD] = p
+owner = Member(OWNER, CH, name="owner")
+it_vol = Interaction(owner, Guild(OWNER, owner, vc, guild_id=GUILD))
+out = slash("volume", it_vol, 40)
+check("/volume changes the music's volume through the Mixer at once",
+      abs(inner.volume - 0.4) < 1e-9 and "Volume set to **40%**." in out, (inner.volume, out))
+
 # The exit code is set by _check's gate, wherever a failure happens. It used to be one
 # `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could
 # print FAIL while the script exited 0 - the restore path looked covered and wasn't.

@@ -15,6 +15,8 @@ from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Set, T
 
 import discord
 
+import mixer
+
 log = logging.getLogger("amy.music")
 
 #----Configuration------
@@ -626,6 +628,14 @@ class GuildPlayer:
         self.history: Deque[Track] = deque(maxlen=MAX_HISTORY)
         # Set by /previous, consumed by the next advance, like skip_requested
         self.back_requested: bool = False
+        # Amy's voice (TTS). `speech` is None when TTS is off, and then nothing is wrapped
+        # and playback is exactly as before. It lives here, not on the audio source, so
+        # queued speech carries on across /skip. `speech_only` is True while the voice client
+        # is playing Amy's voice with no track loaded - see music_active().
+        self.speech: Optional[mixer.SpeechQueue] = None
+        self.speech_only: bool = False
+        self.duck: float = mixer.DEFAULT_DUCK
+        self.on_hold_done: Optional[Callable[[], None]] = None
         # Where to post the now-playing card, and the live message itself. advance_playback
         # runs from the audio thread's callback and has no message context of its own.
         self.text_channel_id: Optional[int] = None
@@ -692,6 +702,9 @@ class GuildPlayer:
         these lines separately, and the generation bump is what stops an in-flight start
         from bringing the music back.
         """
+        if self.speech is not None:
+            self.speech.clear()   # a deliberate stop silences Amy too
+        self.speech_only = False
         # What was playing stays reachable: /previous after an accidental /stop brings it back.
         # While the next track loads, `current` still holds the one just left, which the
         # advance has already recorded - so skip it if it's the newest entry, or /previous
@@ -716,13 +729,27 @@ class GuildPlayer:
 
 
 class MusicManager:
-    def __init__(self) -> None:
+    def __init__(self, speech: bool = False, duck: float = mixer.DEFAULT_DUCK,
+                 on_hold_done: Optional[Callable[[int], None]] = None) -> None:
         self.players: Dict[int, GuildPlayer] = {}
+        self.speech = speech                    # TTS on: give each player a speech queue
+        self.duck = duck
+        self.on_hold_done = on_hold_done        # called with the guild id, from the audio thread
 
     def player_for(self, guild_id: int) -> GuildPlayer:
         if guild_id not in self.players:
-            self.players[guild_id] = GuildPlayer(guild_id)
+            self.players[guild_id] = self._new_player(guild_id)
         return self.players[guild_id]
+
+    def _new_player(self, guild_id: int) -> GuildPlayer:
+        player = GuildPlayer(guild_id)
+        if self.speech:
+            player.speech = mixer.SpeechQueue()
+            player.duck = self.duck
+            if self.on_hold_done is not None:
+                callback = self.on_hold_done
+                player.on_hold_done = lambda: callback(guild_id)
+        return player
 
     def cleanup(self, guild_id: int) -> None:
         """Drop all playback state for a guild. Safe to call when nothing is playing."""
@@ -899,6 +926,13 @@ def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
     """Hand a ready source to the voice client and record it on the player."""
     player.current = track
     player.cancel_idle()
+    if player.speech is not None:
+        if player.speech_only:
+            # Amy is speaking with no track loaded. Stop that source; the speech queue lives
+            # on the player, so what's left of her sentence continues over the music.
+            player.speech_only = False
+            voice_client.stop()
+        source = mixer.Mixer(source, player.speech, player.duck, player.on_hold_done)
     voice_client.play(source, after=on_finished)
     player.mark_started(start_at)
     log.info(f"Now playing: {track.title}"
@@ -952,7 +986,7 @@ async def restart_at(
       4. Keep a paused track paused. Seeking used to start the music for everyone.
     """
     generation = player.generation
-    was_paused = voice_client.is_paused()
+    was_paused = music_paused(voice_client)
     source = await prepare_source(track, player.volume, position)   # raises: nothing changed
     if player.generation != generation:
         _discard(source)
@@ -963,6 +997,46 @@ async def restart_at(
     if was_paused:
         voice_client.pause()
         player.mark_paused()
+    return True
+
+
+def music_active(voice_client: Optional[discord.VoiceClient], player: GuildPlayer) -> bool:
+    """
+    Whether a TRACK is loaded (playing or paused). Not the same as the voice client playing:
+    with TTS on, it can be playing Amy's voice alone, and /skip, /seek or a new advance must
+    not treat that as a song.
+    """
+    return (voice_client is not None and not player.speech_only
+            and (voice_client.is_playing() or voice_client.is_paused()))
+
+
+def music_paused(voice_client: Optional[discord.VoiceClient]) -> bool:
+    """Whether the music is paused - including while Amy speaks over it (mixer.music_paused)."""
+    return mixer.music_paused(voice_client)
+
+
+def pause_music(voice_client: discord.VoiceClient, player: GuildPlayer) -> bool:
+    """Pause the track. Returns False if there's no playing track to pause."""
+    if not music_active(voice_client, player) or music_paused(voice_client):
+        return False
+    voice_client.pause()
+    player.mark_paused()          # paused time must not count towards the position
+    return True
+
+
+def resume_music(voice_client: discord.VoiceClient, player: GuildPlayer) -> bool:
+    """
+    Resume the track. Returns False if it isn't paused. If Amy is speaking over the paused
+    music, the music simply stops being held - she carries on over it, ducked.
+    """
+    held = mixer.mixer_of(voice_client)
+    if held is not None and held.hold_music:
+        held.hold_music = False
+    elif music_active(voice_client, player) and voice_client.is_paused():
+        voice_client.resume()
+    else:
+        return False
+    player.mark_resumed()
     return True
 
 

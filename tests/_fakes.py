@@ -166,6 +166,14 @@ class VoiceClient:
     def stop(self):
         self.stopped = True
 
+    def play(self, source, after=None):
+        # Like the real one: playing replaces the source and clears stopped/paused
+        self.source = source
+        self.after = after
+        self.played = getattr(self, "played", []) + [source]
+        self.stopped = False
+        self._paused = False
+
     async def move_to(self, ch):
         self.moved_to = ch
         self.channel = ch
