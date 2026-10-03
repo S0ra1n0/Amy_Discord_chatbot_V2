@@ -35,6 +35,7 @@ import logs
 import models
 from models import ModelManager
 import speech
+import voicelines
 # Re-exported so the rest of this file - and tests reaching in as amy.<name> - keep working.
 from llm import (  # noqa: F401
     _REASONING_OPENERS,
@@ -617,10 +618,11 @@ async def chat_streaming(
     server_id: Union[int, str],
     channel_id: int,
     discord_msg: discord.Message,
-) -> None:
+) -> Optional[str]:
     """
     Stream an Ollama response and progressively edit discord_msg as tokens arrive.
     Handles <think> blocks by showing 'Thinking...' until actual content begins.
+    Returns the final reply text (so it can also be spoken), or None if it failed.
     """
     loop = asyncio.get_running_loop()
     chunk_queue: asyncio.Queue = asyncio.Queue()
@@ -772,7 +774,7 @@ async def chat_streaming(
             )
         except discord.HTTPException:
             pass
-        return
+        return None
 
     final_response = strip_think_tags(accumulated)
     if not final_response:
@@ -798,6 +800,7 @@ async def chat_streaming(
         await active_msg.edit(content=pending if pending else "✅ Done.")
     except discord.HTTPException as e:
         log.error(f"Failed to edit final message: {e}")
+    return final_response
 #----------------------------------------------
 
 #----Voice Command Handlers------
@@ -869,6 +872,7 @@ async def execute_voice_command(
             player.text_channel_id = interaction.channel_id
         waiting = await start_waiting_queue(guild)
         note = f" Picking up {waiting} queued track(s)." if waiting else ""
+        announce(guild, "join")
         return Reply(embed=ui.voice_embed(f"{verb} **{target.name}**.{note}"))
 
     if command == "create":
@@ -916,6 +920,7 @@ async def execute_voice_command(
                 return Reply(embed=ui.error_embed("I created the channel but couldn't join it, so I removed it again."))
 
             voice_manager.mark_created(channel.id, guild.id)
+            announce(guild, "join")
             return Reply(embed=ui.voice_embed(
                 f"Created {channel.mention} and joined — hop in!", heading="Voice channel created"))
 
@@ -933,6 +938,7 @@ async def execute_voice_command(
         if not (is_admin_member(interaction.guild, interaction.user.id) or in_same_channel):
             return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
 
+        await say_goodbye(guild)     # waits for it to play, at most GOODBYE_WAIT seconds
         async with voice_manager.lock_for(guild.id):
             left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
         if not left:
@@ -1029,8 +1035,10 @@ class PlayerControls(discord.ui.View):
         # music is "paused" while Amy speaks over it with the track held.
         if music.resume_music(vc, player):
             paused = False
+            announce(guild, "resume")
         elif music.pause_music(vc, player):
             paused = True
+            announce(guild, "pause")
         else:
             await interaction.response.send_message(
                 embed=ui.error_embed("Nothing is playing."), ephemeral=True)
@@ -1059,8 +1067,10 @@ class PlayerControls(discord.ui.View):
             return
 
         player.skip_requested = True  # so TRACK loop can't swallow an explicit skip
+        skipped = player.current.title if player.current else "this one"
         await interaction.response.defer()
         vc.stop()  # after-callback advances the queue and refreshes the message
+        announce(guild, "skip", title=skipped)
 
     @discord.ui.button(label="Stop", emoji="⏹", style=discord.ButtonStyle.danger,
                        custom_id="amy:stop")
@@ -1078,6 +1088,7 @@ class PlayerControls(discord.ui.View):
         player.stop_all()       # also cancels a track that is still being prepared
         # Matches /stop: stop and stay. The idle timer still disconnects her later.
         vc.stop()
+        announce(guild, "stop")
 
         embed = (ui.now_playing_embed(finished, stopped=True) if finished
                  else ui.info_embed("Playback stopped."))
@@ -1191,14 +1202,17 @@ class SearchResults(discord.ui.View):
                 await interaction.response.edit_message(
                     embed=ui.queued_embed(track, len(player.queue) - 1), view=None)
                 await advance_playback(guild)
+                announce(guild, "queued", title=track.title, pos=len(player.queue))
                 return
             await interaction.response.edit_message(
                 embed=ui.queued_embed(track, len(player.queue)), view=None)
+            announce(guild, "queued", title=track.title, pos=len(player.queue))
             return
 
         await interaction.response.edit_message(
             embed=ui.info_embed(f"Loading **{track.title}**..."), view=None)
         await advance_playback(guild)   # posts the now-playing card
+        announce(guild, "play_now", title=track.title)
 
 
 async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
@@ -1442,6 +1456,83 @@ async def _pause_after_speech(guild_id: int) -> None:
         return                       # more speech arrived; the Mixer will call again
     vc.pause()
     held.hold_music = False          # paused for real again, exactly as before she spoke
+
+
+def can_speak(guild: discord.Guild) -> bool:
+    """Whether Amy can speak here right now: voice loaded and in a call."""
+    vc = voice.get_voice_client(guild)
+    return voice_problem() is None and vc is not None and vc.is_connected()
+
+
+def speak(guild: discord.Guild, text: str) -> None:
+    """
+    Say `text` in the background, or do nothing if she can't. For Amy's own lines -
+    confirmations, replies - where a reason to stay quiet isn't worth reporting.
+    """
+    if not can_speak(guild):
+        return
+    spoken = speech.clean_for_speech(text)
+    if spoken and speech.is_english(spoken):
+        music.spawn(_speak_sentences(guild, speech.split_sentences(spoken)))
+
+
+def announce(guild: Optional[discord.Guild], event: str, title: Optional[str] = None,
+             **values: object) -> None:
+    """Speak a confirmation of a music action (voicelines.LINES), if Amy can speak."""
+    if guild is None or not can_speak(guild):
+        return
+    if title is not None:
+        values["t"] = voicelines.speakable_title(title)
+    speak(guild, voicelines.confirmation(event, values))
+
+
+def in_call_with_amy(guild: discord.Guild, user_id: int) -> bool:
+    """Whether this user is in Amy's voice channel right now - who her replies are spoken to."""
+    channel = voice.active_channel(voice.get_voice_client(guild))
+    member = guild.get_member(user_id)
+    return bool(channel and member and member.voice and member.voice.channel
+                and member.voice.channel.id == channel.id)
+
+
+async def speak_reply(guild: discord.Guild, reply: str) -> None:
+    """
+    Speak a chat reply (D5): short ones as written; long ones as a model paraphrase - or,
+    if that's slow, fails or isn't usable, the opening sentences and "the rest is in the
+    chat". Non-English replies get a short English line instead (D6).
+    """
+    if not can_speak(guild):
+        return
+    kind, text = voicelines.plan_reply(reply)
+    if kind == "nothing":
+        return
+    if kind == "paraphrase":
+        raw = await model_manager.paraphrase(voicelines.PARAPHRASE_SYSTEM,
+                                             voicelines.paraphrase_request(text),
+                                             timeout=voicelines.PARAPHRASE_TIMEOUT)
+        text = voicelines.judge_paraphrase(raw) or voicelines.fallback_summary(text)
+    speak(guild, text)
+
+
+# How long /leave waits for the goodbye before leaving anyway: synthesis (~1s) plus a short line.
+GOODBYE_WAIT = 4.5
+
+
+async def say_goodbye(guild: discord.Guild) -> None:
+    """Say goodbye and wait (up to GOODBYE_WAIT) until it has played, so leaving doesn't cut it."""
+    if not can_speak(guild):
+        return
+    player = music_manager.player_for(guild.id)
+
+    async def speak_and_drain() -> None:
+        await _speak_sentences(guild, [voicelines.confirmation("leave")])
+        while player.speech:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)     # the last frame or two still in flight to Discord
+
+    try:
+        await asyncio.wait_for(speak_and_drain(), timeout=GOODBYE_WAIT)
+    except asyncio.TimeoutError:
+        log.info("Goodbye took too long; leaving anyway")
 #--------------------------------------
 
 #----Music Command Handlers------
@@ -1630,6 +1721,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
                               embed=ui.playlist_embed(title, len(tracks), skipped))
         if not music.music_active(vc, player):
             await advance_playback(guild)   # posts its own now-playing card
+        announce(guild, "playlist", n=voicelines.count_of(len(tracks), "song"),
+                 name=voicelines.speakable_title(title))
         return ""
 
     # --- single track ---
@@ -1650,10 +1743,12 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
             # the backlog, and say truthfully where the requested track landed.
             await advance_playback(guild)
         await status_msg.edit(content=None, embed=ui.queued_embed(track, len(player.queue)))
+        announce(guild, "queued", title=track.title, pos=len(player.queue))
         return ""
 
     await status_msg.edit(content=HOURGLASS + " Loading **" + track.title + "**...")
     await advance_playback(guild)   # posts the now-playing card with controls
+    announce(guild, "play_now", title=track.title)
     try:
         await status_msg.delete()   # the card replaces this status line
     except discord.HTTPException:
@@ -1671,6 +1766,7 @@ async def music_pause(ctx: MusicContext) -> MusicResult:
         return _error(NOT_WITH_AMY)
     if not music.pause_music(vc, ctx.player):
         return _error("Nothing is playing.")
+    announce(ctx.guild, "pause")
     await refresh_now_playing(ctx.guild, paused=True)
     return _info("Paused.")
 
@@ -1683,6 +1779,7 @@ async def music_resume(ctx: MusicContext) -> MusicResult:
         return _error(NOT_WITH_AMY)
     if not music.resume_music(vc, ctx.player):
         return _error("Nothing is paused.")
+    announce(ctx.guild, "resume")
     await refresh_now_playing(ctx.guild, paused=False)
     return _info("Resumed.")
 
@@ -1699,6 +1796,7 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
     skipped = player.current.title if player.current else "the current track"
     player.skip_requested = True
     vc.stop()  # triggers the after-callback, which advances the queue
+    announce(ctx.guild, "skip", title=skipped)
     return _info(f"Skipped **{skipped}**.")
 
 
@@ -1738,6 +1836,7 @@ def go_back(guild: discord.Guild) -> Tuple[bool, str]:
         vc.stop()   # the after-callback plays `prev`
     else:
         music.spawn(advance_playback(guild))
+    announce(guild, "previous", title=prev.title)
     return True, f"Going back to **{prev.title}**."
 
 
@@ -1806,6 +1905,10 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
     await refresh_now_playing(guild, paused=music.music_paused(vc))
     await ensure_speaking(guild)    # a seek on paused music re-pauses; speech waiting resumes
     if position is None:
+        announce(guild, "replay", title=track.title)
+    else:
+        announce(guild, "seek", at=voicelines.speakable_time(target))
+    if position is None:
         return _info(f"Replaying **{track.title}** from the start.")
     return _info(f"Jumped to **{music.format_duration(int(target))}** in **{track.title}**.")
 
@@ -1822,6 +1925,7 @@ async def music_stop(ctx: MusicContext) -> MusicResult:
     # own after 5 minutes. /leave is the command for disconnecting straight away.
     vc.stop()
     snapshot_player(ctx.guild.id)   # a deliberate clear shouldn't come back on restart
+    announce(ctx.guild, "stop")       # after stop_all, which clears any queued speech
     return _info("Stopped and cleared the queue. I'll stay here — use `/leave` to send me away.")
 
 
@@ -1835,6 +1939,7 @@ async def music_volume(ctx: MusicContext, level: Optional[int] = None) -> MusicR
     if level is None:
         return _info(f"Current volume: **{int(player.volume * 100)}%**\nUsage: `/volume 0-100`")
     player.volume = level / 100
+    announce(ctx.guild, "volume", level=level)
     # Applies instantly only on the PCM path; an opus-passthrough track has no
     # volume stage, so the change lands when the next track starts.
     source = mixer.music_source(vc)    # looks through the speech Mixer when TTS is on
@@ -1856,6 +1961,7 @@ async def music_loop(ctx: MusicContext, mode: LoopMode) -> MusicResult:
     if not ctx.may_control():
         return _error(NOT_WITH_AMY)
     ctx.player.loop_mode = mode
+    announce(ctx.guild, f"loop_{mode.value}")
     return _info(f"Loop set to **{mode.value}**.")
 
 
@@ -1874,6 +1980,7 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
                 + ". You can only remove your own.")
 
     music.remove_at(queue, position)  # `target` above already proved it exists
+    announce(ctx.guild, "remove", title=target.title)
     return _info("Removed **" + target.title + "** from the queue.")
 
 
@@ -1886,6 +1993,7 @@ async def music_shuffle(ctx: MusicContext) -> MusicResult:
     if len(queue) < 2:
         return _error("Not enough tracks queued to shuffle.")
     music.shuffle_queue(queue)
+    announce(ctx.guild, "shuffle", n=voicelines.count_of(len(queue), "song"))
     return _info("Shuffled **" + str(len(queue)) + "** queued track(s).")
 
 
@@ -1899,6 +2007,7 @@ async def music_clearqueue(ctx: MusicContext) -> MusicResult:
     if count == 0:
         return _error("The queue is already empty.")
     queue.clear()
+    announce(ctx.guild, "clearqueue", n=voicelines.count_of(count, "song"))
     return _info("Cleared **" + str(count) + "** queued track(s). Current track keeps playing.")
 
 
@@ -1917,6 +2026,7 @@ async def music_skipto(ctx: MusicContext, position: int) -> MusicResult:
     player.skip_requested = True
     # stop() fires the after-callback, which pulls the next track off the queue
     vc.stop()
+    announce(ctx.guild, "skipto", title=target.title)
     reply = NEXT + " Skipping to **" + target.title + "**"
     if dropped:
         reply += " (" + str(dropped) + " track(s) skipped)"
@@ -2553,7 +2663,11 @@ async def on_message(msg: discord.Message) -> None:
 
         log.debug("Processing as streaming chat...")
         thinking_msg = await msg.reply("⏳ Thinking...")
-        await chat_streaming(msg.content, server_id, channel_id, thinking_msg)
+        reply = await chat_streaming(msg.content, server_id, channel_id, thinking_msg)
+        # Spoken too, but only to someone in the call with her (D4) - and in the
+        # background: the paraphrase and synthesis take seconds and the text is already out.
+        if reply and msg.guild is not None and in_call_with_amy(msg.guild, msg.author.id):
+            music.spawn(speak_reply(msg.guild, reply))
         log.debug("Streaming response complete")
 
     except Exception as e:

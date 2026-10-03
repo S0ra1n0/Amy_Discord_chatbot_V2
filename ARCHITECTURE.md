@@ -21,6 +21,7 @@ one guards against.
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
 | `mixer.py` | `SpeechQueue` and `Mixer`: Amy's voice mixed over the music, with ducking and the hold-music mode | discord |
+| `voicelines.py` | What Amy says out loud: confirmation phrasings, speakable titles and times, how a chat reply becomes speech, the paraphrase prompt | llm, speech (both pure) |
 | `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engine and its `Speaker` | Kokoro/PyTorch **only when loaded** |
 | `database.py` | SQLite: history, settings, voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
@@ -84,6 +85,23 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **Synthesis never runs inside an interaction's 3-second window.** `start_saying`
   validates and returns; `_speak_sentences` runs in the background via `music.spawn`.
 - **`/volume` reaches the volume stage through the Mixer** (`mixer.music_source`).
+- **What Amy says lives in `voicelines.py`, pure.** Confirmations are plain text with
+  several phrasings, never a model call (instant). Every phrasing of every event is checked
+  by `test_voicelines.py` to format cleanly into speakable English.
+- **Chat replies are spoken only to someone in the call with her** (`in_call_with_amy`),
+  checked in `on_message`, and always in the background (`music.spawn(speak_reply(...))`):
+  the text reply is already out, and the paraphrase plus synthesis take seconds.
+- **The paraphrase prompt is load-bearing and measured.** A first version made qwen3.5:2b
+  answer the reply as if the user had written it, and flip a fact ("rain Thursday" for "Thursday
+  stays dry"). Telling it the text is its OWN answer and to keep every fact: 4/4 faithful.
+  `test_voicelines.py` pins the cues; changing them means re-measuring. A paraphrase that
+  times out (`PARAPHRASE_TIMEOUT`), runs long, isn't English or reads like reasoning is
+  replaced by the opening sentences plus "the rest is in the chat" - never spoken as is.
+- **`announce` speaks only after an action succeeded**: errors and read-only commands stay
+  silent, and `can_speak` (voice loaded and in a call) gates every line.
+- **`/leave` says goodbye after its permission check and before disconnecting**, waiting
+  at most `GOODBYE_WAIT`; a refused `/leave` says nothing. Idle and empty-channel leaves
+  don't say goodbye - nobody is listening.
 
 ## Logging
 

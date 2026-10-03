@@ -1077,6 +1077,279 @@ out = slash("volume", it_vol, 40)
 check("/volume changes the music's volume through the Mixer at once",
       abs(inner.volume - 0.4) < 1e-9 and "Volume set to **40%**." in out, (inner.volume, out))
 
+# ---- Phase 1C: what Amy says, and when -------------------------------------------------
+print()
+print("=== spoken confirmations, replies and goodbyes ===")
+import voicelines as _vl
+
+_said = []
+_real = {k: getattr(amy, k) for k in ("speak", "can_speak", "say_goodbye", "_speak_sentences")}
+amy.speak = lambda guild, text: _said.append(text)
+amy.can_speak = lambda guild: True
+
+
+def said_after(fn):
+    _said.clear()
+    out = fn()
+    return out, list(_said)
+
+
+def one_of(event, text, **values):
+    """Whether `text` is one of `event`'s phrasings with these values."""
+    return text in [l.format(**values) for l in _vl.LINES[event]]
+
+
+try:
+    p, it = setup(USER, "userA", ["t1", "t2"])
+    p.started_at = 1000.0
+    _, said = said_after(lambda: slash("pause", it))
+    check("/pause is confirmed out loud", len(said) == 1 and said[0] in _vl.LINES["pause"], said)
+    _, said = said_after(lambda: slash("resume", Interaction(it.user, it.guild)))
+    check("/resume too", len(said) == 1 and said[0] in _vl.LINES["resume"], said)
+
+    p, it = setup(USER, "userA", ["t1"])
+    p.current = amy.music.Track(title="Song A (Official Video)", query="https://youtu.be/a",
+                                duration=200, requested_by="userA")
+    _, said = said_after(lambda: slash("skip", it))
+    check("/skip names the song, cleaned for speaking",
+          len(said) == 1 and one_of("skip", said[0], t="Song A"), said)
+
+    p, it = setup(USER, "userA", [])
+    _, said = said_after(lambda: slash("loop", it, app_commands.Choice(name="queue", value="queue")))
+    check("/loop says which mode", len(said) == 1 and said[0] in _vl.LINES["loop_queue"], said)
+
+    p, it = setup(USER, "userA", ["a", "b", "c"])
+    _, said = said_after(lambda: slash("shuffle", it))
+    check("/shuffle counts the songs", len(said) == 1 and one_of("shuffle", said[0], n="3 songs"), said)
+
+    p, it = setup(USER, "userA", ["mine", "also mine"])
+    _, said = said_after(lambda: slash("remove", it, 2))
+    check("/remove names what went", len(said) == 1 and one_of("remove", said[0], t="also mine"), said)
+
+    p, it = setup(USER, "userA", ["a", "b", "c"])
+    _, said = said_after(lambda: slash("skipto", it, 3))
+    check("/skipto names where it's going", len(said) == 1 and one_of("skipto", said[0], t="c"), said)
+
+    p, it = setup(OWNER, "owner", ["a", "b"])
+    _, said = said_after(lambda: slash("clearqueue", it))
+    check("/clearqueue counts", len(said) == 1 and one_of("clearqueue", said[0], n="2 songs"), said)
+
+    p, it = setup(OWNER, "owner", ["t1"])
+    _, said = said_after(lambda: slash("volume", it, 40))
+    check("/volume says the level", len(said) == 1 and one_of("volume", said[0], level=40), said)
+    _, said = said_after(lambda: slash("volume", Interaction(it.user, it.guild), None))
+    check("...but just asking the volume is silent", said == [], said)
+
+    p, it = setup(USER, "userA", ["t1"])
+    _, said = said_after(lambda: slash("stop", it))
+    check("/stop is confirmed", len(said) == 1 and said[0] in _vl.LINES["stop"], said)
+
+    p, it = setup(USER, "userA", [])
+    p.history.append(make_track(amy, "earlier song"))
+    _, said = said_after(lambda: slash("previous", it))
+    check("/previous names the song", len(said) == 1 and one_of("previous", said[0], t="earlier song"),
+          said)
+
+    p, it = setup(USER, "userA", ["t1"])
+    _, said = said_after(lambda: slash("queue", it, 1))
+    check("read-only commands stay silent (/queue)", said == [], said)
+    _, said = said_after(lambda: slash("nowplaying", Interaction(it.user, it.guild)))
+    check("...(/nowplaying)", said == [], said)
+    p.current = None
+    it.guild.voice_client.stopped = True         # really nothing playing
+    _, said = said_after(lambda: slash("skip", Interaction(it.user, it.guild)))
+    check("errors stay silent (/skip with nothing playing)", said == [], said)
+
+    # the buttons speak the same lines
+    p, it = setup(USER, "userA", ["t1"])
+    _, said = said_after(lambda: asyncio.run(amy.PlayerControls().skip_button.callback(it)))
+    check("the Skip button is confirmed too", len(said) == 1 and one_of("skip", said[0], t="playing"),
+          said)
+    p, it = setup(USER, "userA", ["t1"])
+    _, said = said_after(lambda: asyncio.run(amy.PlayerControls().stop_button.callback(it)))
+    check("the Stop button too", len(said) == 1 and said[0] in _vl.LINES["stop"], said)
+
+    # announce() itself: silent when she can't speak
+    amy.can_speak = lambda guild: False
+    _said.clear()
+    amy.announce(it.guild, "pause")
+    check("nothing is said when she can't speak (voice off, loading, not in a call)", _said == [])
+    amy.can_speak = lambda guild: True
+
+    # Who replies are spoken to: only someone in the call with her
+    p, it = setup(USER, "userA", [])
+    check("someone in Amy's channel is in the call with her",
+          amy.in_call_with_amy(it.guild, USER))
+    far = Member(57, VoiceChannel(13, "elsewhere"), name="far")
+    g2 = Guild(OWNER, far, it.guild.voice_client, guild_id=GUILD)
+    check("someone in another channel isn't", not amy.in_call_with_amy(g2, 57))
+    nowhere = Member(58, None, name="nowhere")
+    g3 = Guild(OWNER, nowhere, it.guild.voice_client, guild_id=GUILD)
+    check("someone not in voice at all isn't", not amy.in_call_with_amy(g3, 58))
+
+    # speak_reply: read / paraphrase / fallback / not English
+    _para = {"value": None}
+
+    async def _fake_paraphrase(system, text, timeout, max_tokens=120):
+        _para["asked"] = text
+        return _para["value"]
+
+    _real_para = amy.model_manager.paraphrase
+    amy.model_manager.paraphrase = _fake_paraphrase
+    try:
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, "Sure! It's **4**.")))
+        check("a short reply is read as written, cleaned", said == ["Sure! It's 4."], said)
+        long_reply = " ".join("This is sentence %d of a long answer." % i for i in range(20))
+        _para["value"] = "It's a long answer with twenty sentences."
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
+        check("a long reply is paraphrased by the model", said == [_para["value"]], said)
+        check("...which is given the whole reply, fenced as Amy's own",
+              _para["asked"].startswith("My written answer:") and "sentence 19" in _para["asked"])
+        _para["value"] = None
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
+        check("no paraphrase (slow or failed) -> the opening sentences and a pointer to the chat",
+              len(said) == 1 and said[0].startswith("This is sentence 0")
+              and any(said[0].endswith(r) for r in _vl.REST_IN_CHAT), said)
+        _para["value"] = "Okay, the user wants me to shorten this. Let me think about it."
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
+        check("leaked reasoning is never spoken - fallback instead",
+              len(said) == 1 and said[0].startswith("This is sentence 0"), said)
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(
+            it.guild, "Hôm nay trời đẹp quá, bạn có khỏe không?")))
+        check("a Vietnamese reply gets a short English line", len(said) == 1
+              and said[0] in _vl.LINES["foreign"], said)
+        amy.can_speak = lambda guild: False
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
+        check("...and nothing at all when she can't speak (no paraphrase call either)", said == [])
+        amy.can_speak = lambda guild: True
+    finally:
+        amy.model_manager.paraphrase = _real_para
+
+    # say_goodbye: speaks, waits for it - but never longer than GOODBYE_WAIT
+    p, it = setup(USER, "userA", [])
+    _goodbyes = []
+
+    async def _quick(guild, sentences):
+        _goodbyes.extend(sentences)
+
+    amy._speak_sentences = _quick
+    asyncio.run(amy.say_goodbye(it.guild))
+    check("/leave says goodbye", len(_goodbyes) == 1 and _goodbyes[0] in _vl.LINES["leave"], _goodbyes)
+
+    async def _stuck(guild, sentences):
+        await asyncio.sleep(5)
+
+    amy._speak_sentences = _stuck
+    _real_wait = amy.GOODBYE_WAIT
+    amy.GOODBYE_WAIT = 0.2
+    import time as _time
+    t0 = _time.perf_counter()
+    asyncio.run(amy.say_goodbye(it.guild))
+    check("a goodbye that hangs doesn't hold the leave up", _time.perf_counter() - t0 < 1.0,
+          _time.perf_counter() - t0)
+    amy.GOODBYE_WAIT = _real_wait
+
+    # The real on_message: a chat reply is spoken only for someone in the call with her
+    _spoken_replies = []
+    _real_chat, _real_sr = amy.chat_streaming, amy.speak_reply
+
+    async def _fake_chat(content, server_id, channel_id, msg):
+        return "Hi there, nice to meet you."
+
+    async def _record_reply(guild, reply):
+        _spoken_replies.append(reply)
+
+    class _Msg:
+        _next = 900000
+
+        def __init__(self, author, guild):
+            _Msg._next += 1
+            self.id = _Msg._next
+            self.author = author
+            self.guild = guild
+            self.channel = type("Ch", (), {"id": 77})()
+            self.content = "hello amy"
+
+        async def reply(self, text):
+            return self
+
+    amy.chat_streaming, amy.speak_reply = _fake_chat, _record_reply
+    try:
+        def chat_from(member, guild):
+            _spoken_replies.clear()
+
+            async def go():
+                await amy.on_message(_Msg(member, guild))
+                await asyncio.sleep(0.02)          # let the spawned speak_reply run
+            asyncio.run(go())
+            return list(_spoken_replies)
+
+        p, it = setup(USER, "userA", [])
+        amy.rate_limit_store.clear()
+        check("a chat reply is spoken to someone in the call with her",
+              chat_from(it.user, it.guild) == ["Hi there, nice to meet you."])
+        far = Member(60, VoiceChannel(15, "elsewhere"), name="far")
+        check("...but not to someone in another channel",
+              chat_from(far, Guild(OWNER, far, it.guild.voice_client, guild_id=GUILD)) == [])
+    finally:
+        amy.chat_streaming, amy.speak_reply = _real_chat, _real_sr
+
+    # /play confirms what it did: starting now, or where it landed in the queue
+    _real_res, _real_adv, _real_ff = (amy.music.resolve_metadata, amy.advance_playback,
+                                      amy.music.find_ffmpeg)
+
+    async def _resolve(query, requested_by="?"):
+        return amy.music.Track(title="New Song [Lyrics]", query="https://youtu.be/n", duration=100,
+                               requested_by=requested_by)
+
+    async def _no_adv(guild):
+        return None
+
+    amy.music.resolve_metadata, amy.advance_playback = _resolve, _no_adv
+    amy.music.find_ffmpeg = lambda: "ffmpeg"
+    try:
+        p, it = setup(USER, "userA", [])
+        p.current = None
+        it.guild.voice_client.stopped = True
+        _, said = said_after(lambda: slash("play", it, "new song"))
+        check("/play starting a song now says so", len(said) == 1
+              and one_of("play_now", said[0], t="New Song"), said)
+        p, it = setup(USER, "userA", ["a", "b"])
+        _, said = said_after(lambda: slash("play", it, "new song"))
+        check("/play behind a queue says where it landed", len(said) == 1
+              and one_of("queued", said[0], t="New Song", pos=3), said)
+    finally:
+        amy.music.resolve_metadata, amy.advance_playback, amy.music.find_ffmpeg = (
+            _real_res, _real_adv, _real_ff)
+
+    # /leave: goodbye first, and only if she's actually allowed to leave
+    _order = []
+
+    async def _bye(guild):
+        _order.append("goodbye")
+
+    amy.say_goodbye = _bye
+    stranger = Member(59, VoiceChannel(14, "elsewhere"), name="stranger")
+    gs = Guild(OWNER, stranger, VoiceClient(CH), guild_id=GUILD)
+    run_voice(amy, "leave", interaction=Interaction(stranger, gs))
+    check("no goodbye when /leave is refused", _order == [], _order)
+
+    friend = Member(USER, CH, name="userA")
+    leaving_vc = VoiceClient(CH)
+    gl = Guild(OWNER, friend, leaving_vc, guild_id=GUILD)
+
+    async def _bye_checking(guild):
+        _order.append("goodbye while connected" if not leaving_vc.disconnected
+                      else "goodbye after leaving")
+
+    amy.say_goodbye = _bye_checking
+    out = run_voice(amy, "leave", interaction=Interaction(friend, gl))
+    check("an allowed /leave says goodbye first, while still connected",
+          _order == ["goodbye while connected"] and leaving_vc.disconnected, (_order, out))
+finally:
+    for k, v in _real.items():
+        setattr(amy, k, v)
+
 # The exit code is set by _check's gate, wherever a failure happens. It used to be one
 # `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could
 # print FAIL while the script exited 0 - the restore path looked covered and wasn't.

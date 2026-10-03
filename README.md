@@ -544,7 +544,13 @@ The bot should now be online and ready to respond in your Discord server!
 
 ### Amy's voice (optional)
 
-> **Work in progress.** Amy can speak in calls now, through the admin-only `/say` command. Speaking her chat replies and command confirmations on her own arrives in the next update.
+**What she says, once `TTS=on` and she's in a call:**
+
+- **Her chat replies — to people in the call with her.** Someone chatting from outside the call gets the usual text reply only. A short reply is read as written; a long one becomes a one-or-two-sentence spoken version written by the chat model (about 2–3 seconds; if it's slow or unusable she reads the opening sentences and adds "the rest is in the chat"). The full text always appears in the chat as before.
+- **Music commands, confirmed out loud** — "Skipping Never Gonna Give You Up", "Paused", "Added Song, it's number 3 in the queue" — with a few phrasings each so it doesn't sound canned, and song titles tidied up ("(Official Video)" and the like are left out). The player buttons do the same. Looking at things (`/queue`, `/nowplaying`) and errors stay silent.
+- **Hello and goodbye** on `/join` and `/leave` (she finishes the goodbye before leaving, waiting at most a few seconds).
+- **English only.** A reply in another language gets a short English line instead, such as "My reply's in the chat".
+- **`/say`** (admin only) makes her say anything you type.
 
 Amy can speak in voice calls with [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a small text-to-speech model that runs on your CPU, so the chat model keeps the GPU. It's optional and off by default, because it's a large install: about **1.2 GB**, mostly PyTorch, plus a 313 MB voice model.
 
@@ -611,7 +617,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-25 suites covering queue logic, speech text handling, voice mixing, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+26 suites covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and

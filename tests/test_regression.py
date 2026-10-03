@@ -485,7 +485,9 @@ try:
     amy.db.set_setting("think_mode:needs:auto", "auto")
     amy.model_manager.current = "needs:auto"
     _msg = _FakeMsg()
-    _asyncio.run(amy.chat_streaming("what is 2+2", "srv", 4242, _msg))
+    _returned = _asyncio.run(amy.chat_streaming("what is 2+2", "srv", 4242, _msg))
+    assert _returned == "Four.", \
+        "chat_streaming must hand back what it said, so it can be spoken: %r" % (_returned,)
     assert _chat_calls and _chat_calls[-1]["model"] == "needs:auto",         "the reply must use the active model: %r" % (_chat_calls[-1:],)
     assert _chat_calls[-1]["think"] is None,         "a model recorded as 'auto' must be sent think=None, not the global default: %r"         % _chat_calls[-1]["think"]
     assert _chat_calls[-1]["keep_alive"] == amy.OLLAMA_KEEP_ALIVE

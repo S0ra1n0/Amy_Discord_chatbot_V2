@@ -30,6 +30,8 @@ PROBE_TIMEOUT: float = 60.0
 # Long enough that the second probe attempt reuses the loaded model, short enough that a
 # rejected candidate does not sit in VRAM.
 PROBE_KEEP_ALIVE: str = "2m"
+# A spoken paraphrase is one or two sentences; this caps a model that rambles.
+PARAPHRASE_MAX_TOKENS: int = 120
 
 
 def set_model_residency(name: str, keep_alive: Union[str, int]) -> None:
@@ -225,6 +227,37 @@ class ModelManager:
                     f"run. The saved choice is kept, so reinstalling '{saved}' brings it back.")
         self.current = chosen
         await self.warm(chosen)
+
+    async def paraphrase(self, system: str, text: str, timeout: float,
+                         max_tokens: int = PARAPHRASE_MAX_TOKENS) -> Optional[str]:
+        """
+        Ask the active model to rewrite `text` (e.g. for speaking aloud). Returns its content,
+        or None if it took longer than `timeout`, failed, or said nothing. Never raises.
+
+        Uses the model's own reasoning mode and the normal keep-alive, so it's the same warm
+        model the chat uses - no second model loads.
+        """
+        name = self.current
+
+        def ask() -> str:
+            reply = ollama.chat(model=name,
+                                messages=[{"role": "system", "content": system},
+                                          {"role": "user", "content": text}],
+                                think=think_value(self.think_mode_for(name)),
+                                keep_alive=self.keep_alive,
+                                options={"num_predict": max_tokens})
+            return (reply["message"].get("content") or "").strip()
+
+        try:
+            content = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, ask), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.info(f"Paraphrase took longer than {timeout}s; using the fallback")
+            return None
+        except Exception as e:
+            log.warning(f"Paraphrase failed, using the fallback: {e}")
+            return None
+        return content or None
 
     def start_startup_check(self) -> None:
         """Background verify_restored, once - on_ready can fire again after a failed RESUME."""

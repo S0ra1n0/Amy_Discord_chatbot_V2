@@ -40,6 +40,7 @@ OFFLINE = [
     "test_logs.py",
     "test_speech.py",
     "test_mixer.py",
+    "test_voicelines.py",
     "test_docs_audit.py",
 ]
 NETWORK = [
