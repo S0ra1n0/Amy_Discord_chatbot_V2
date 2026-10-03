@@ -52,5 +52,6 @@ amy_memory.db
 
 # Agent working notes - local only, not for people pulling the repo
 CLAUDE.md
+TTS_PLAN.md
 AGENTS.md
 .claude/
