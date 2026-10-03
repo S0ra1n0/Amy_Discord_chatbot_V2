@@ -1350,6 +1350,109 @@ finally:
     for k, v in _real.items():
         setattr(amy, k, v)
 
+# ---- Phase 1D: controls ------------------------------------------------------------------
+print()
+print("=== /shush, /voice, and stopping mid-synthesis ===")
+import time as _t
+
+
+class _SlowEngine(_speech.FakeEngine):
+    def synthesize(self, text):
+        _t.sleep(0.05)                       # long enough to land a /stop between sentences
+        return super().synthesize(text)
+
+
+_real_speaker2, _real_enabled = amy.speaker, amy.voice_enabled
+try:
+    sp = _speech.Speaker(_SlowEngine())
+    asyncio.run(sp.start())
+    amy.speaker = sp
+
+    # Regression: /stop used to clear the queue while the background task kept synthesising
+    # and queueing the rest of a long line - so she carried on talking after /stop.
+    p, vc, g, it = tts_setup(7101, current=None)
+    vc.stopped = True
+
+    async def stop_mid_line():
+        amy.start_saying(g, "This is the first sentence. This is the second sentence. "
+                            "This is the third sentence.")
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if p.speech:
+                break
+        p.stop_all()                         # what /stop does
+        await asyncio.sleep(0.3)             # well past when the other sentences would land
+    asyncio.run(stop_mid_line())
+    check("after /stop, sentences still being synthesised are dropped", not p.speech,
+          p.speech.seconds())
+    check("...the first one was queued before the stop (the test really stopped mid-line)",
+          len(sp.engine.spoken) >= 1, sp.engine.spoken)
+
+    # shush() itself
+    p, vc, g, it = tts_setup(7102)
+    check("shush with nothing to say -> False", amy.shush(g) is False)
+    p.speech.add([b"\x00" * 3840] * 5)
+    gen = p.speech.generation
+    check("shush while speaking -> True, queue emptied", amy.shush(g) is True and not p.speech)
+    check("...and in-flight synthesis is cancelled (generation moved)", p.speech.generation != gen)
+    p.speech_only = True
+    check("shush during speech-only playback counts as talking", amy.shush(g) is True)
+    p.speech_only = False
+
+    # /shush and the button
+    p, it = setup(USER, "userA", [])
+    tp = amy.music_manager.player_for(GUILD)
+    tp.speech = amy.mixer.SpeechQueue()
+    tp.speech.add([b"\x00" * 3840] * 5)
+    out = slash("shush", it)
+    check("/shush quiets her", "be quiet" in out and not tp.speech, out)
+    out = slash("shush", Interaction(it.user, it.guild))
+    check("/shush with nothing to quiet says so", "not saying anything" in out, out)
+    stranger = Member(61, VoiceChannel(16, "elsewhere"), name="stranger")
+    tp.speech.add([b"\x00" * 3840])
+    out = slash("shush", Interaction(stranger, Guild(OWNER, stranger, it.guild.voice_client,
+                                                      guild_id=GUILD)))
+    check("someone outside her channel can't shush her", "need to be in my voice channel" in out
+          and bool(tp.speech), out)
+    p, it = setup(USER, "userA", [])
+    tp = amy.music_manager.player_for(GUILD)
+    tp.speech = amy.mixer.SpeechQueue()
+    tp.speech.add([b"\x00" * 3840] * 5)
+    asyncio.run(amy.PlayerControls().shush_button.callback(it))
+    check("the Shush button quiets her too", not tp.speech)
+
+    # /voice: status, off, on - admins only (gating is checked in test_slash)
+    owner = Member(OWNER, CH, name="owner")
+    p, vc, g, it = tts_setup(7103)
+    it_owner = Interaction(owner, Guild(OWNER, owner, vc, guild_id=7103))
+    out = slash("voice", it_owner, None)
+    check("/voice shows the status", "Voice: on" in out and "Engine: ready" in out
+          and "af_heart" in out, out)
+    p.speech.add([b"\x00" * 3840] * 5)
+    out = slash("voice", Interaction(owner, it_owner.guild),
+                app_commands.Choice(name="off", value="off"))
+    check("/voice off turns her off", amy.voice_enabled is False and "off" in out, out)
+    check("...saves it (survives a restart)", amy.db.get_bool_setting("voice_enabled", True) is False)
+    check("...and quiets her now, not later", not p.speech)
+    check("...after which she can't speak", not amy.can_speak(g)
+          and amy.voice_problem() == amy.VOICE_MUTED)
+    out = slash("voice", Interaction(owner, it_owner.guild),
+                app_commands.Choice(name="on", value="on"))
+    check("/voice on turns her back on", amy.voice_enabled is True
+          and amy.db.get_bool_setting("voice_enabled", False) is True and amy.can_speak(g), out)
+
+    amy.speaker = None
+    out = slash("voice", Interaction(owner, it_owner.guild), None)
+    check("/voice without TTS set up says how to set it up", "not set up" in out
+          and "TTS=on" in out, out)
+    out = slash("voice", Interaction(owner, it_owner.guild),
+                app_commands.Choice(name="off", value="off"))
+    check("/voice off without TTS set up is refused, setting unchanged",
+          "TTS=on" in out and amy.voice_enabled is True, out)
+    sp.close()
+finally:
+    amy.speaker, amy.voice_enabled = _real_speaker2, _real_enabled
+
 # The exit code is set by _check's gate, wherever a failure happens. It used to be one
 # `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could
 # print FAIL while the script exited 0 - the restore path looked covered and wasn't.

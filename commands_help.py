@@ -19,6 +19,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/pause` / `/resume` - Pause or resume playback
 `/skip` - Skip the current track
 `/previous` - Go back to the previous track
+`/shush` - Stop me talking (the music carries on)
 `/seek [position]` - Jump to a spot (`1:30`, `1:02:03` or `90`)
 `/replay` - Restart the current track from the beginning
 `/stop` - Stop playback and clear the queue (I stay in the channel)
@@ -31,13 +32,12 @@ HELP_EVERYONE = """**Commands — Everyone:**
 
 HELP_ADMIN = """
 **Commands — Admin only:**
-`/say [text]` - Make Amy say something in her voice channel (needs TTS on)
+`/say [text]` - Make me say something in my voice channel
+`/voice [on|off]` - Turn my voice in calls on or off, or show its status
 `/toggle` - Enable/disable bot responses (remembered across restarts)
 `/forget` - Wipe conversation memory for this channel
-`/status` - Show bot state, Ollama connectivity, memory usage and rate limit info
-`/model` - Show the current Ollama model
-`/model [name]` - Switch to another installed model (remembered)
-  • I check how it handles reasoning before switching
+`/status` - Show bot, Ollama, voice and memory status
+`/model [name]` - Show the model, or switch to another installed one (remembered)
 `/create [name]` - Create a new voice channel and join it
 `/volume [0-100]` - Show or set playback volume
 `/clearqueue` - Empty the queue (current track keeps playing)"""

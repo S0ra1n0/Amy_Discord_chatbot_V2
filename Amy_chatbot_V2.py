@@ -240,10 +240,15 @@ music_manager = MusicManager(speech=TTS, duck=DUCK_LEVEL,
 # (ModelManager.verify_restored), because checking needs a network call this code can't make.
 model_manager = ModelManager(db, DEFAULT_MODEL, OLLAMA_THINK, OLLAMA_KEEP_ALIVE)
 bot_enabled: bool = db.get_bool_setting("bot_enabled", True)
+# /voice on|off (admins). Mutes her without unloading the engine, so turning it back on is
+# instant. Saved, like /toggle. Only matters when TTS=on loads the engine at all.
+voice_enabled: bool = db.get_bool_setting("voice_enabled", True)
 if model_manager.current != DEFAULT_MODEL:
     log.info(f"Restored saved model: {model_manager.current}")
 if not bot_enabled:
     log.info("Restored saved state: responses are OFF (use /toggle to enable)")
+if TTS and not voice_enabled:
+    log.info("Restored saved state: voice is OFF (use /voice on to enable)")
 
 # Loaded in the background from on_ready, never here: a cold load takes ~9 seconds.
 speaker: Optional[speech.Speaker] = (
@@ -996,6 +1001,10 @@ class PlayerControls(discord.ui.View):
         # Reflect current state on the toggle rather than showing two buttons
         self.pause_button.label = "Resume" if paused else "Pause"
         self.pause_button.emoji = "▶" if paused else "⏸"
+        # Shush only means something when Amy can speak at all. Decided per process, so the
+        # view registered at startup and every card sent afterwards agree.
+        if speaker is None:
+            self.remove_item(self.shush_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if may_control_playback(interaction.guild, interaction.user.id):
@@ -1093,6 +1102,16 @@ class PlayerControls(discord.ui.View):
         embed = (ui.now_playing_embed(finished, stopped=True) if finished
                  else ui.info_embed("Playback stopped."))
         await interaction.response.edit_message(embed=embed, view=None)
+
+    @discord.ui.button(label="Shush", emoji="\U0001F92B", style=discord.ButtonStyle.secondary,
+                       custom_id="amy:shush")
+    async def shush_button(self, interaction: discord.Interaction,
+                           button: discord.ui.Button) -> None:
+        if interaction.guild is None or not shush(interaction.guild):
+            await interaction.response.send_message(
+                embed=ui.info_embed("I'm not saying anything right now."), ephemeral=True)
+            return
+        await interaction.response.defer()
 
 
 class SearchResults(discord.ui.View):
@@ -1345,6 +1364,7 @@ async def idle_disconnect(guild: discord.Guild) -> None:
 # playing a speech-only Mixer plays it; over paused music the track is held while she speaks.
 # Rules: ARCHITECTURE.md, "Speech".
 NO_VOICE = "My voice is off. Set TTS=on in .env (see the README)."
+VOICE_MUTED = "My voice is turned off. An admin can turn it back on with `/voice on`."
 VOICE_LOADING = "My voice is still loading - try again in a few seconds."
 NOT_ENGLISH = "I can only speak English for now."
 NOTHING_TO_SAY = "There's nothing in that I can say out loud."
@@ -1354,6 +1374,8 @@ def voice_problem() -> Optional[str]:
     """Why Amy can't speak right now, or None if she can."""
     if speaker is None:
         return NO_VOICE
+    if not voice_enabled:
+        return VOICE_MUTED
     if speaker.state == "failed":
         return f"My voice couldn't load: {speaker.problem}"
     if not speaker.ready:
@@ -1386,11 +1408,16 @@ async def _speak_sentences(guild: discord.Guild, sentences: List[str]) -> None:
     """Synthesise one sentence at a time and queue it, so she starts after the first."""
     assert speaker is not None
     player = music_manager.player_for(guild.id)
+    if player.speech is None:
+        return
+    generation = player.speech.generation
     for sentence in sentences:
         frames = await speaker.frames_for(sentence)
         vc = voice.get_voice_client(guild)
-        if not frames or player.speech is None or vc is None or not vc.is_connected():
+        if not frames or vc is None or not vc.is_connected():
             return                                  # she left, or synthesis failed (logged)
+        if player.speech.generation != generation:
+            return                                  # /stop or /shush while this was synthesising
         dropped = player.speech.add(frames)
         if dropped:
             log.info(f"Speech backlog full: dropped {dropped} older sentence(s)")
@@ -1456,6 +1483,19 @@ async def _pause_after_speech(guild_id: int) -> None:
         return                       # more speech arrived; the Mixer will call again
     vc.pause()
     held.hold_music = False          # paused for real again, exactly as before she spoke
+
+
+def shush(guild: discord.Guild) -> bool:
+    """
+    Stop Amy mid-sentence: drop what's queued, and any sentences still being synthesised.
+    The music isn't touched - it fades back up. Returns whether she was saying anything.
+    """
+    player = music_manager.player_for(guild.id)
+    if player.speech is None:
+        return False
+    talking = bool(player.speech) or player.speech_only
+    player.speech.clear()            # bumps the generation, so in-flight sentences are dropped
+    return talking
 
 
 def can_speak(guild: discord.Guild) -> bool:
@@ -1847,6 +1887,16 @@ async def music_previous(ctx: MusicContext) -> MusicResult:
         return _error("You need to be in my voice channel to go back.")
     went_back, message = go_back(ctx.guild)
     return _info(message) if went_back else _error(message)
+
+
+async def music_shush(ctx: MusicContext) -> MusicResult:
+    if ctx.connected() is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error("You need to be in my voice channel to do that.")
+    if not shush(ctx.guild):
+        return _info("I'm not saying anything right now.")
+    return _info("Okay, I'll be quiet.")
 
 
 async def music_seek(ctx: MusicContext, position: str) -> MusicResult:
@@ -2337,6 +2387,12 @@ async def slash_previous(interaction: discord.Interaction) -> None:
     await simple_music(interaction, music_previous)
 
 
+@tree.command(name="shush", description="Stop Amy talking (the music carries on)")
+@app_commands.guild_only()
+async def slash_shush(interaction: discord.Interaction) -> None:
+    await simple_music(interaction, music_shush)
+
+
 @tree.command(name="seek", description="Jump to a position in the current track")
 @app_commands.describe(position="Where to jump to: 1:30, 1:02:03, or seconds")
 @app_commands.guild_only()
@@ -2455,6 +2511,46 @@ async def slash_say(interaction: discord.Interaction,
     started, reply = start_saying(guild, text)
     await send_reply(interaction, Reply(embed=ui.info_embed(reply) if started
                                         else ui.error_embed(reply)), ephemeral=True)
+
+
+def voice_status() -> str:
+    """The /voice report: the switch, the engine, and the voice settings."""
+    if speaker is None:
+        return ("\U0001F507 **Voice: not set up.** Set `TTS=on` in `.env` and restart "
+                "(the README's \"Amy's voice\" section covers the one-time install).")
+    switch = "on" if voice_enabled else "off (`/voice on` to enable)"
+    engine = {"ready": "ready", "loading": "loading...", "off": "not started yet",
+              "failed": f"failed - {speaker.problem}"}.get(speaker.state, speaker.state)
+    return (f"\U0001F50A **Voice: {switch}**\n"
+            f"Engine: {engine}\n"
+            f"Voice: {speech.format_recipe(AMY_VOICE)} at {TTS_SPEED}x, "
+            f"level {round(VOICE_LEVEL * 100)}%\n"
+            f"Music while I talk: {round(DUCK_LEVEL * 100)}%")
+
+
+@tree.command(name="voice", description="Turn Amy's voice in calls on or off, or show its status")
+@app_commands.describe(state="on or off (leave empty to see the status)")
+@app_commands.choices(state=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+@admin_only()
+async def slash_voice(interaction: discord.Interaction,
+                      state: Optional[app_commands.Choice[str]] = None) -> None:
+    global voice_enabled
+    if state is None:
+        await interaction.response.send_message(voice_status(), ephemeral=True)
+        return
+    if speaker is None:
+        await deny(interaction, NO_VOICE)
+        return
+    voice_enabled = state.value == "on"
+    db.set_bool_setting("voice_enabled", voice_enabled)   # survives a restart
+    if not voice_enabled and interaction.guild is not None:
+        shush(interaction.guild)                          # off means quiet now, not later
+    log.info("Voice is now " + state.value)
+    await interaction.response.send_message(
+        "\U0001F50A My voice is **on**." if voice_enabled else "\U0001F507 My voice is **off**.")
 
 
 @tree.command(name="toggle", description="Enable or disable Amy's chat replies")

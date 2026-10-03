@@ -99,6 +99,15 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   replaced by the opening sentences plus "the rest is in the chat" - never spoken as is.
 - **`announce` speaks only after an action succeeded**: errors and read-only commands stay
   silent, and `can_speak` (voice loaded and in a call) gates every line.
+- **Every stop of speech goes through `SpeechQueue.clear()`, which bumps its `generation`.**
+  Speech is synthesised a sentence at a time in the background; `_speak_sentences` captures
+  the generation when it starts and drops its remaining sentences once it moves. Before
+  this, `/stop` mid-way through a long line cleared the queue while the rest kept arriving
+  - she carried on talking. `/stop`, `/leave`, `/shush` and `/voice off` all go through it.
+- **`voice_enabled` (`/voice`, saved) mutes without unloading**: `voice_problem` reports it,
+  so `can_speak`, replies, confirmations and `/say` all go quiet together. The Shush button
+  is removed from `PlayerControls` when there's no speaker at all (`TTS=off`) - decided once
+  per process, so the registered persistent view and every card agree.
 - **`/leave` says goodbye after its permission check and before disconnecting**, waiting
   at most `GOODBYE_WAIT`; a refused `/leave` says nothing. Idle and empty-channel leaves
   don't say goodbye - nobody is listening.

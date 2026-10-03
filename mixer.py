@@ -53,6 +53,10 @@ class SpeechQueue:
         self._sentences: Deque[Deque[bytes]] = collections.deque()
         self._lock = threading.Lock()
         self._max_frames = int(max_seconds * 50)
+        # Bumped by every clear(). Speech is synthesised a sentence at a time in the
+        # background; a task that started before a /stop or /shush checks this and drops its
+        # remaining sentences, or she'd carry on talking after being told to stop.
+        self.generation = 0
 
     def add(self, frames: List[bytes]) -> int:
         """Queue one sentence. Returns how many older sentences were dropped to make room."""
@@ -78,6 +82,7 @@ class SpeechQueue:
     def clear(self) -> None:
         with self._lock:
             self._sentences.clear()
+            self.generation += 1
 
     def seconds(self) -> float:
         with self._lock:

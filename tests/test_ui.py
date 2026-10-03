@@ -86,10 +86,22 @@ spec = importlib.util.spec_from_file_location("amy", os.path.join(PROJ, "Amy_cha
 amy = importlib.util.module_from_spec(spec); sys.modules["amy"] = amy
 spec.loader.exec_module(amy)
 assert_isolated_db(amy)
+# Whether the Shush button appears depends on whether TTS is set up - which a local .env can
+# change. Pin both cases explicitly so the result never depends on the machine.
+_real_speaker = amy.speaker
+amy.speaker = object()                          # voice set up
+voiced = list(amy.PlayerControls().children)
+amy.speaker = None                              # voice not set up
 v = amy.PlayerControls()
+amy.speaker = _real_speaker
+with_voice = [i.label for i in voiced]
+check("with TTS set up there's a fifth button, Shush, at the end",
+      with_voice == ["Previous", "Pause", "Skip", "Stop", "Shush"], with_voice)
+check("Shush has a fixed custom_id (persistent buttons are matched by it)",
+      getattr(voiced[-1], "custom_id", None) == "amy:shush", getattr(voiced[-1], "custom_id", None))
 check("timeout is None (required for add_view)", v.timeout is None, v.timeout)
 items = list(v.children)
-check("four buttons", len(items) == 4, len(items))
+check("without TTS: four buttons, no Shush", len(items) == 4, len(items))
 check("every button has a custom_id",
       all(getattr(i, "custom_id", None) for i in items),
       [getattr(i, "custom_id", None) for i in items])

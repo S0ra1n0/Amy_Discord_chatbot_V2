@@ -71,7 +71,7 @@ for cmd, param, lo, hi in [
 
 print()
 print("=== admin gating ===")
-ADMIN = {"create", "clearqueue", "volume", "toggle", "status", "model", "forget", "say"}
+ADMIN = {"create", "clearqueue", "volume", "toggle", "status", "model", "forget", "say", "voice"}
 for c in commands:
     has_check = bool(getattr(c, "checks", []))
     if c.name in ADMIN:
@@ -92,7 +92,7 @@ print()
 print("=== guild-only where a guild is required ===")
 GUILD_ONLY = {"join", "leave", "create", "play", "search", "pause", "resume", "skip",
               "stop", "queue", "nowplaying", "remove", "skipto", "shuffle", "loop",
-              "clearqueue", "volume", "forget", "seek", "replay", "previous", "say"}
+              "clearqueue", "volume", "forget", "seek", "replay", "previous", "say", "shush"}
 for name in sorted(GUILD_ONLY):
     c = by_name[name]
     allowed = getattr(c, "allowed_contexts", None)
@@ -107,6 +107,9 @@ from commands_help import HELP_EVERYONE, HELP_ADMIN
 
 full = HELP_EVERYONE + HELP_ADMIN
 print("        /help admin view is %d chars (limit %d)" % (len(full), amy.MAX_DISCORD_LEN))
+# It would still be delivered (split in two), but a /help in two messages reads badly. When a
+# new command pushes it over, tighten the wording - as was done for /voice and /shush.
+check("/help still fits in one message", len(full) <= amy.MAX_DISCORD_LEN, len(full))
 
 sent = []
 class Resp:

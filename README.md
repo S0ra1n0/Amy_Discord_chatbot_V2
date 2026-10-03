@@ -37,6 +37,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | ------------------------ | ------------------------------------------------------------------------- | ---------- |
 | `/help`                  | Display all available commands                                            | Everyone   |
 | `/say [text]`            | Make Amy say something out loud in her voice channel (needs TTS on)       | Admin only |
+| `/voice [on/off]`        | Turn Amy's voice in calls on or off (remembered), or show its status      | Admin only |
 | `/toggle`                | Enable/disable bot responses to chat (commands still work)                | Admin only |
 | `/status`                | Show bot state, Ollama connectivity, memory stats and rate limit info     | Admin only |
 | `/model`                 | Show the current Ollama model                                             | Admin only |
@@ -53,6 +54,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
 | `/skip`                  | Skip the current track                                                    | In-channel |
 | `/previous`               | Go back to the previous track                                             | In-channel |
+| `/shush`                  | Stop Amy talking mid-sentence (the music carries on)                      | In-channel |
 | `/seek [position]`       | Jump to a spot in the current track (`1:30`, `1:02:03` or `90`)           | In-channel |
 | `/replay`                | Restart the current track from the beginning                              | In-channel |
 | `/stop`                  | Stop playback and clear the queue (Amy stays in the channel)              | In-channel or admin |
@@ -551,6 +553,8 @@ The bot should now be online and ready to respond in your Discord server!
 - **Hello and goodbye** on `/join` and `/leave` (she finishes the goodbye before leaving, waiting at most a few seconds).
 - **English only.** A reply in another language gets a short English line instead, such as "My reply's in the chat".
 - **`/say`** (admin only) makes her say anything you type.
+
+**Controlling it:** `/shush` — or the 🤫 **Shush** button on the now-playing card — stops her mid-sentence, including sentences she hadn't started yet; the music fades back up. Anyone in the call with her can use it, like `/skip`. Admins can turn her voice off entirely with `/voice off` (remembered across restarts; the engine stays loaded, so `/voice on` is instant), and `/voice` on its own shows whether it's on, the engine's state, the voice and the volume balance. The Shush button only appears when TTS is set up.
 
 Amy can speak in voice calls with [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a small text-to-speech model that runs on your CPU, so the chat model keeps the GPU. It's optional and off by default, because it's a large install: about **1.2 GB**, mostly PyTorch, plus a 313 MB voice model.
 

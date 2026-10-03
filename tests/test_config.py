@@ -191,6 +191,19 @@ check("balance defaults: music 55% under her voice, voice at 0.75",
 code, res, out = probe({"TTS": "on", "DUCK_LEVEL": "0.7", "VOICE_LEVEL": "0.5"})
 check("both levels are adjustable, and the voice level reaches the speaker",
       res is not None and res["DUCK_LEVEL"] == 0.7 and res["speaker_level"] == 0.5, res)
+# /voice off is saved in the database and survives a restart
+from database import ConversationDB as _DB
+_saved_db = tempfile.mktemp(prefix="amy_test_voice_", suffix=".db")
+_d = _DB(_saved_db)
+_d.set_bool_setting("voice_enabled", False)
+_d.conn.close()
+code, res, out = probe({"TTS": "on"}, extra_env={"AMY_DB_PATH": _saved_db})
+check("a saved /voice off is restored at startup", res is not None and res["voice_enabled"] is False,
+      res and res["voice_enabled"])
+check("...and logged, so the console says why she's quiet",
+      any("voice is OFF" in l for l in out.splitlines()), out[-300:])
+code, res, out = probe({"TTS": "on"})
+check("a fresh database starts with the voice on", res is not None and res["voice_enabled"] is True)
 code, res, out = probe({"TTS": "on", "AMY_VOICE": "jf_alpha"})
 check("a non-English voice falls back to the default",
       res is not None and res["AMY_VOICE"] == [["af_heart", 1.0]], res and res["AMY_VOICE"])
