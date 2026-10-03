@@ -33,6 +33,7 @@ import llm
 import logs
 import models
 from models import ModelManager
+import speech
 # Re-exported so the rest of this file - and tests reaching in as amy.<name> - keep working.
 from llm import (  # noqa: F401
     _REASONING_OPENERS,
@@ -132,6 +133,15 @@ WEB_SEARCH: bool = _setting(config.parse_bool("WEB_SEARCH", os.getenv("WEB_SEARC
 # for this long after the last message. Set "0" to restore the old unload-immediately
 # behaviour, or a longer window like "2h" on a dedicated machine.
 OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "30m").strip() or "30m"
+# Amy's voice in calls (speech.py). Off unless TTS=on: it needs `pip install -r
+# requirements-tts.txt` (about 1.2 GB) and `python speech.py download` first. With it off,
+# Kokoro and PyTorch are never imported.
+TTS: bool = _setting(config.parse_bool("TTS", os.getenv("TTS"), default=False))
+AMY_VOICE: speech.Recipe = _setting(speech.parse_voice_recipe(os.getenv("AMY_VOICE")))
+TTS_SPEED: float = _setting(config.parse_float("TTS_SPEED", os.getenv("TTS_SPEED"),
+                                               default=1.0, minimum=0.5, maximum=2.0))
+TTS_THREADS: int = _setting(config.parse_int("TTS_THREADS", os.getenv("TTS_THREADS"),
+                                             default=speech.DEFAULT_THREADS, minimum=1))
 # How far back Amy remembers, and how much is replayed to the model each reply. The cap
 # itself lives in database.py because storage enforces it too; this is the single source of
 # truth for both. It is a speed knob as well as a memory one - every stored message is sent
@@ -221,6 +231,13 @@ if model_manager.current != DEFAULT_MODEL:
     log.info(f"Restored saved model: {model_manager.current}")
 if not bot_enabled:
     log.info("Restored saved state: responses are OFF (use /toggle to enable)")
+
+# Loaded in the background from on_ready, never here: a cold load takes ~9 seconds.
+speaker: Optional[speech.Speaker] = (
+    speech.Speaker(speech.KokoroEngine(AMY_VOICE, speed=TTS_SPEED, threads=TTS_THREADS))
+    if TTS else None)
+if speaker is not None:
+    log.info(f"Voice on: {speech.format_recipe(AMY_VOICE)} at {TTS_SPEED}x - loading after login")
 #----------------------------------------------
 
 #----Slash Command Tree------
@@ -2324,6 +2341,11 @@ async def on_ready() -> None:
     # Backgrounded rather than awaited: it takes a few seconds, and nothing else here needs
     # to wait for it.
     model_manager.start_startup_check()
+
+    # Same for Amy's voice: load once, in the background, on its own thread. on_ready fires
+    # again after a reconnect; start() does nothing if it's already loading or loaded.
+    if speaker is not None and speaker.state == "off":
+        music.spawn(speaker.start())
 
     # Clean up voice channels Amy created before a restart
     try:

@@ -118,4 +118,15 @@ for mod in sorted(glob.glob("*.py")):
 check("README links to it", "ARCHITECTURE.md" in readme)
 
 print()
+print("=== .gitignore patterns actually match ===")
+# gitignore has no end-of-line comments: "*.log.*   # rotated logs" is a pattern that
+# includes the comment text, so it matches nothing. Two lines were written that way and
+# amy.log.1... and kokoro_model/ were silently NOT ignored.
+gitignore = open(".gitignore", encoding="utf-8").read().splitlines()
+trailing = [l for l in gitignore if l.strip() and not l.lstrip().startswith("#") and " #" in l]
+check("no pattern line has a comment after it", not trailing, str(trailing))
+for must in ("*.log.*", "kokoro_model/", "amy_memory.db", ".env"):
+    check("%s is ignored" % must, must in [l.strip() for l in gitignore])
+
+print()
 finish("ALL AUDIT CHECKS PASSED")

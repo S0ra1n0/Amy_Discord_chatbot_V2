@@ -469,6 +469,7 @@ naming it, without printing either value.
 - `AMY_LOG_FILE` is Amy's log file, `amy.log` by default. Everything the console shows at INFO and above is also written there with a timestamp, and it rotates at about 1MB, keeping 5 old files (`amy.log.1` … `amy.log.5`), so a problem overnight leaves a trace after the console window has closed. The console's DEBUG lines — which include the text of every chat message — are deliberately **not** written to the file. Set it blank to turn the file off.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
+- `TTS`, `AMY_VOICE`, `TTS_SPEED`, `TTS_THREADS` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
 
 ### Step 5: Enable the Server Members Intent (required)
 
@@ -540,6 +541,26 @@ Or without activating it:
 
 The bot should now be online and ready to respond in your Discord server!
 
+### Amy's voice (optional)
+
+> **Work in progress.** This sets up the speech engine; Amy doesn't speak in calls yet. That arrives in the next update.
+
+Amy can speak in voice calls with [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a small text-to-speech model that runs on your CPU, so the chat model keeps the GPU. It's optional and off by default, because it's a large install: about **1.2 GB**, mostly PyTorch, plus a 313 MB voice model.
+
+```bash
+pip install -r requirements-tts.txt
+python speech.py download
+```
+
+Then set `TTS=on` in `.env` and restart. The voice loads in the background after Amy logs in (about 9 seconds), so startup isn't delayed; if anything is missing she logs what to run and carries on without a voice.
+
+- **Speed:** a short sentence takes about 1 second to generate, using about 6 CPU threads (`TTS_THREADS`). On a 16-thread CPU: 4 threads 1.4s, 6 threads 1.1s, 8 threads 0.9s.
+- **Memory:** about 1.1 GB of RAM while loaded.
+- **English only.** Kokoro is set up for English; replies in other languages won't be read aloud.
+- **Offline after setup.** `speech.py download` fetches one pinned version of the model into `kokoro_model/`; after that Amy never contacts Hugging Face, so an outage or an upstream change can't affect her voice.
+- **The voice** is `AMY_VOICE`: one Kokoro voice, or a weighted blend such as `af_heart:0.6,af_bella:0.4`. After changing it, run `python speech.py download` again to fetch any new voice.
+- **Licences:** Kokoro is Apache-2.0. Its English text handling bundles espeak-ng, which is GPL-3.0 — fine for running your own bot; it would matter only if you distributed the bot as a package.
+
 ## Project Structure
 
 ```
@@ -554,14 +575,18 @@ Amy_chatbot_V2/
 ├── config.py               # Reading settings: warns on bad values instead of crashing
 ├── models.py               # Which Ollama model is active: /model, probing, warm-up
 ├── logs.py                 # Logging: the console, plus a rotating amy.log
+├── speech.py               # Amy's voice: text clean-up, speech engine (optional)
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── requirements.txt        # Pinned Python dependencies
 ├── constraints.txt         # Pinned indirect dependencies (loaded by requirements.txt)
 ├── requirements-dev.txt    # + pyright, for running the checks
+├── requirements-tts.txt    # Optional: the speech engine (Kokoro + CPU PyTorch)
+├── constraints-tts.txt     # Pinned versions for the speech engine's dependencies
 ├── .github/workflows/      # CI: offline tests + type check on every push
 ├── amy_memory.db           # SQLite conversation store, auto-created (Git ignored)
 ├── amy.log                 # Rotating log file, auto-created (Git ignored)
+├── kokoro_model/           # Voice model from `python speech.py download` (Git ignored)
 ├── .venv/                  # Virtual environment (Git ignored)
 ├── .vscode/                # Editor settings, points at .venv (Git ignored)
 ├── .env                    # Environment variables (Git ignored)
@@ -581,7 +606,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-22 suites covering queue logic, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+24 suites covering queue logic, speech text handling, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and

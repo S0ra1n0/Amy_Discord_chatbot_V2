@@ -20,6 +20,7 @@ one guards against.
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
+| `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engine and its `Speaker` | Kokoro/PyTorch **only when loaded** |
 | `database.py` | SQLite: history, settings, voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
 
@@ -30,6 +31,28 @@ Discord connection. `llm.py` must never import Discord or Ollama (`test_llm.py` 
 **Decisions that are hard to reach go in a pure function.** `voice.decide_join_action` and
 `voice.decide_restore_action` take plain values; the caller resolves the Discord objects. The
 whole truth table is then tested offline. Try this before writing "needs manual testing".
+
+## Speech
+
+- **Kokoro and PyTorch are imported only inside `KokoroEngine.load`**, via `importlib`. Importing
+  the bot - even with `TTS=on` - must never pull them in: they cost ~9 s and 1.1 GB, CI
+  doesn't install them, and pyright there can't resolve them. `test_speech.py` and
+  `test_config.py` both check this.
+- **The model is pinned and local.** `KOKORO_REVISION` is fetched once by `python speech.py
+  download` into `kokoro_model/`; `load` passes local paths and sets `HF_HUB_OFFLINE`.
+  Left alone, Kokoro checks Hugging Face on every start and follows the repo's latest files.
+- **The spaCy model is checked, never installed.** If `en_core_web_sm` is missing, Kokoro
+  runs `pip install` by itself at runtime; `load` refuses first with a clear message.
+- **One thread does all speech work.** `Speaker` runs load and every synthesis on a single
+  dedicated worker: synthesis takes about a second of CPU and must never block the event
+  loop, and Kokoro isn't documented as safe from two threads at once.
+- **A voice failure never stops the bot.** `Speaker.start` catches everything, sets
+  `state = "failed"` with the reason in `problem`, and Amy stays text-only.
+- **Blends are weighted here**, not by Kokoro: its own `"a,b"` syntax only averages
+  equally. `AMY_VOICE` weights are normalised to sum to 1.
+- **Speech audio is normalised to `PEAK_TARGET`** before it leaves `speech.py`, leaving
+  headroom for mixing over music (audio adds saturate rather than wrap).
+- **Speech text is logged at DEBUG only**, like chat, so it never reaches `amy.log`.
 
 ## Logging
 

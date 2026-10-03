@@ -55,6 +55,29 @@ def parse_int(name: str, raw: Optional[str], default: int,
     return value, None
 
 
+def parse_float(name: str, raw: Optional[str], default: float,
+                minimum: float, maximum: float) -> Tuple[float, Optional[str]]:
+    """
+    Read a decimal setting. Blank or unset means `default`.
+
+    A non-number keeps the default; a number outside [minimum, maximum] is clamped to the
+    nearer bound. Either way the problem is reported rather than crashing the bot.
+    """
+    if raw is None or not raw.strip():
+        return default, None
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default, f"{name}={raw.strip()!r} isn't a number; using {default}."
+    if value != value:                       # NaN parses, but compares false to everything
+        return default, f"{name}={raw.strip()!r} isn't a number; using {default}."
+    if value < minimum:
+        return minimum, f"{name}={value} is below the minimum of {minimum}; using {minimum}."
+    if value > maximum:
+        return maximum, f"{name}={value} is above the maximum of {maximum}; using {maximum}."
+    return value, None
+
+
 def shadowed_settings(env_before_dotenv: Mapping[str, str],
                       dotenv_file: Mapping[str, Optional[str]]) -> List[str]:
     """

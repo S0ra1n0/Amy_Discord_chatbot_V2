@@ -1,0 +1,23 @@
+# Optional: Amy's voice in calls (TTS). Everything the bot needs, plus the speech engine.
+#   pip install -r requirements-tts.txt
+#   python speech.py download        # one-time: fetches the voice model (~330 MB)
+# Then set TTS=on in .env. Without this file installed the bot runs exactly as before, and the
+# test suite never needs it. About 1.2 GB on disk, mostly PyTorch.
+-r requirements.txt
+-c constraints-tts.txt
+
+# The CPU build of PyTorch. Speech runs on the CPU on purpose: the chat model keeps the GPU,
+# and a short sentence still takes under a second. The +cpu build only exists on this index.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+
+kokoro==0.9.4
+
+# Kokoro's English text handling needs this spaCy model, and if it's missing it runs
+# `pip install` by itself at runtime - so it's pinned here and the bot checks for it
+# (see speech.py) instead of ever letting that happen.
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+# Note: speech.py mixes and resamples audio with the standard library's audioop, which Python
+# 3.13 removes. Kokoro itself requires Python < 3.13, so this only matters if both move on;
+# the replacement then is the audioop-lts package.

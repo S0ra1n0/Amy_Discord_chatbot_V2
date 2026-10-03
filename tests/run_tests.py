@@ -38,11 +38,13 @@ OFFLINE = [
     "test_config.py",
     "test_schema.py",
     "test_logs.py",
+    "test_speech.py",
     "test_docs_audit.py",
 ]
 NETWORK = [
     "test_websearch_live.py",
     "test_model_live.py",    # needs Ollama, not Discord
+    "test_speech_live.py",   # needs requirements-tts.txt + speech.py download
     "test_resolve.py",       # yt-dlp against YouTube
     "test_search.py",        # yt-dlp search
     "test_audio_path.py",    # yt-dlp + FFmpeg decoding

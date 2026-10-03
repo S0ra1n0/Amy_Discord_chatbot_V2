@@ -47,8 +47,11 @@ Thumbs.db
 
 # Project specific
 *.log
-*.log.*          # rotated logs: amy.log.1 ... amy.log.5
+# rotated logs: amy.log.1 ... amy.log.5
+*.log.*
 amy_memory.db
+# Amy's voice model, fetched by `python speech.py download`
+kokoro_model/
 
 # Agent working notes - local only, not for people pulling the repo
 CLAUDE.md

@@ -53,4 +53,11 @@ print("PROBE_RESULT " + json.dumps({
     "WEB_SEARCH": amy.WEB_SEARCH,
     "OLLAMA_THINK": amy.OLLAMA_THINK,
     "OLLAMA_KEEP_ALIVE": amy.OLLAMA_KEEP_ALIVE,
+    "TTS": amy.TTS,
+    "speaker": amy.speaker is not None,
+    "AMY_VOICE": amy.AMY_VOICE,
+    "TTS_SPEED": amy.TTS_SPEED,
+    "TTS_THREADS": amy.TTS_THREADS,
+    # Loading is deferred to on_ready; importing the bot must never pull PyTorch in.
+    "torch_imported": "torch" in sys.modules or "kokoro" in sys.modules,
 }))

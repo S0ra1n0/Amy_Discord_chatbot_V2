@@ -46,6 +46,14 @@ for raw, want, warns in [(None, True, False), ("", True, False), ("true", True, 
           value is want and bool(problem) == warns, (value, problem))
 
 print()
+print("=== parse_float ===")
+for raw, want, warns in [(None, 1.0, False), ("", 1.0, False), ("1.25", 1.25, False),
+                         (" 0.8 ", 0.8, False), ("fast", 1.0, True), ("nan", 1.0, True),
+                         ("0.1", 0.5, True), ("9", 2.0, True)]:
+    value, problem = config.parse_float("TTS_SPEED", raw, default=1.0, minimum=0.5, maximum=2.0)
+    check("%-6r -> %s%s" % (raw, want, " (warns)" if warns else ""),
+          value == want and bool(problem) == warns, (value, problem))
+print()
 print("=== shadowed_settings ===")
 before = {"OLLAMA_KEEP_ALIVE": "5m", "PATH": "x", "SAME": "1"}
 in_file = {"OLLAMA_KEEP_ALIVE": "30m", "SAME": "1", "ONLY_FILE": "v", "BLANK": None}
@@ -60,7 +68,8 @@ check("nothing set twice -> nothing reported", config.shadowed_settings({}, in_f
 def probe(dotenv_values, extra_env=None):
     env = {k: v for k, v in os.environ.items()
            if k not in ("HISTORY_LIMIT", "DB_PRUNE_DAYS", "WEB_SEARCH", "OLLAMA_THINK",
-                        "OLLAMA_KEEP_ALIVE", "DISCORD_TOKEN")}
+                        "OLLAMA_KEEP_ALIVE", "DISCORD_TOKEN", "TTS", "AMY_VOICE",
+                        "TTS_SPEED", "TTS_THREADS")}
     env.update(extra_env or {})
     env["AMY_PROBE_SCENARIO"] = json.dumps({"dotenv": dotenv_values})
     env["PYTHONIOENCODING"] = "utf-8"
@@ -160,5 +169,25 @@ try:
     os.remove(_logfile)
 except OSError:
     pass
+
+print()
+print("=== TTS settings, through a real import of the bot ===")
+code, res, out = probe({})
+check("TTS is off by default", res is not None and res["TTS"] is False and not res["speaker"], res)
+check("...and nothing heavy is imported", res is not None and not res["torch_imported"], res)
+code, res, out = probe({"TTS": "on", "AMY_VOICE": "af_heart:3,af_bella:1", "TTS_SPEED": "1.1",
+                        "TTS_THREADS": "8"})
+check("TTS=on creates the speaker", res is not None and res["speaker"] is True, res)
+check("...with the blend, normalised", res is not None and res["AMY_VOICE"] ==
+      [["af_heart", 0.75], ["af_bella", 0.25]], res and res["AMY_VOICE"])
+check("...speed and threads", res is not None and res["TTS_SPEED"] == 1.1
+      and res["TTS_THREADS"] == 8, res)
+check("...and still imports neither PyTorch nor Kokoro at startup",
+      res is not None and not res["torch_imported"], res)
+code, res, out = probe({"TTS": "on", "AMY_VOICE": "jf_alpha"})
+check("a non-English voice falls back to the default",
+      res is not None and res["AMY_VOICE"] == [["af_heart", 1.0]], res and res["AMY_VOICE"])
+check("...and says so at startup", any("[WARNING]" in l and "AMY_VOICE" in l
+                                       for l in out.splitlines()), out[-300:])
 
 finish("ALL CONFIG TESTS PASSED")
