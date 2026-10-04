@@ -141,7 +141,8 @@ OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "30m").strip() or "30m"
 TTS: bool = _setting(config.parse_bool("TTS", os.getenv("TTS"), default=False))
 AMY_VOICE: speech.Recipe = _setting(speech.parse_voice_recipe(os.getenv("AMY_VOICE")))
 TTS_SPEED: float = _setting(config.parse_float("TTS_SPEED", os.getenv("TTS_SPEED"),
-                                               default=1.0, minimum=0.5, maximum=2.0))
+                                               default=speech.DEFAULT_SPEED, minimum=0.5,
+                                               maximum=2.0))
 TTS_THREADS: int = _setting(config.parse_int("TTS_THREADS", os.getenv("TTS_THREADS"),
                                              default=speech.DEFAULT_THREADS, minimum=1))
 # How loud the music stays while Amy speaks over it: 0.3 = 30%, 1.0 = not lowered at all.

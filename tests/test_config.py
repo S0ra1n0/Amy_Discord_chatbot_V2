@@ -206,7 +206,8 @@ code, res, out = probe({"TTS": "on"})
 check("a fresh database starts with the voice on", res is not None and res["voice_enabled"] is True)
 code, res, out = probe({"TTS": "on", "AMY_VOICE": "jf_alpha"})
 check("a non-English voice falls back to the default",
-      res is not None and res["AMY_VOICE"] == [["af_heart", 1.0]], res and res["AMY_VOICE"])
+      res is not None and res["AMY_VOICE"] == [["af_heart", 0.4], ["af_bella", 0.6]],
+      res and res["AMY_VOICE"])
 check("...and says so at startup", any("[WARNING]" in l and "AMY_VOICE" in l
                                        for l in out.splitlines()), out[-300:])
 

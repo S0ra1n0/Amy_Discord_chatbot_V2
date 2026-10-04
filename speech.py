@@ -50,6 +50,7 @@ ENGINE_RATE = 24000          # Kokoro outputs 24 kHz mono
 DISCORD_RATE = 48000         # Discord takes 48 kHz stereo...
 FRAME_BYTES = 3840           # ...in 20 ms frames of 16-bit samples: 960 x 2 channels x 2 bytes
 
+# A single voice that is always downloaded: the reference the tests and the voice lab use.
 DEFAULT_VOICE = "af_heart"
 # PyTorch CPU threads (TTS_THREADS). Measured on this 16-thread CPU, per short sentence:
 # 4 threads 1.41s / ~4 cores busy, 6 threads 1.11s / ~6, 8 threads 0.91s / ~8. Six leaves
@@ -190,13 +191,20 @@ _VOICE_NAME = re.compile(r"^[ab][fm]_[a-z]+$")
 MAX_BLEND_VOICES = 5
 Recipe = List[Tuple[str, float]]
 
+# Amy's voice, chosen by ear in the voice lab on 2026-10-04 (Phase 1E): three rounds, from all
+# 15 English female voices to a shortlist (heart, bella, isabella) to this blend of the two
+# top-graded ones (A and A-), with no accent mismatch. Used when AMY_VOICE is unset or invalid.
+DEFAULT_RECIPE: Recipe = [("af_heart", 0.4), ("af_bella", 0.6)]
+DEFAULT_SPEED = 1.1
+DEFAULT_RECIPE_NAME = "Amy's default voice (af_heart 40% + af_bella 60%)"
+
 
 def parse_voice_recipe(raw: Optional[str]) -> Tuple[Recipe, Optional[str]]:
     """
     Read AMY_VOICE. Returns (recipe, problem) like config.parse_*: weights normalised to add
     up to 1; anything malformed falls back to the default voice and says why.
     """
-    default: Recipe = [(DEFAULT_VOICE, 1.0)]
+    default: Recipe = list(DEFAULT_RECIPE)
     if raw is None or not raw.strip():
         return default, None
     recipe: Recipe = []
@@ -208,21 +216,21 @@ def parse_voice_recipe(raw: Optional[str]) -> Tuple[Recipe, Optional[str]]:
         name = name.strip().lower()
         if not _VOICE_NAME.match(name):
             return default, (f"AMY_VOICE: {name!r} isn't an English Kokoro voice name "
-                             f"(like af_heart or bf_lily); using {DEFAULT_VOICE}.")
+                             f"(like af_heart or bf_lily); using {DEFAULT_RECIPE_NAME}.")
         try:
             weight = float(weight_text) if weight_text.strip() else 1.0
         except ValueError:
-            return default, f"AMY_VOICE: {weight_text.strip()!r} isn't a number; using {DEFAULT_VOICE}."
+            return default, f"AMY_VOICE: {weight_text.strip()!r} isn't a number; using {DEFAULT_RECIPE_NAME}."
         if not weight > 0:
-            return default, f"AMY_VOICE: weights must be above 0; using {DEFAULT_VOICE}."
+            return default, f"AMY_VOICE: weights must be above 0; using {DEFAULT_RECIPE_NAME}."
         if any(n == name for n, _ in recipe):
-            return default, f"AMY_VOICE: {name} is listed twice; using {DEFAULT_VOICE}."
+            return default, f"AMY_VOICE: {name} is listed twice; using {DEFAULT_RECIPE_NAME}."
         recipe.append((name, weight))
     if not recipe:
         return default, None
     if len(recipe) > MAX_BLEND_VOICES:
         return default, (f"AMY_VOICE: at most {MAX_BLEND_VOICES} voices in a blend; "
-                         f"using {DEFAULT_VOICE}.")
+                         f"using {DEFAULT_RECIPE_NAME}.")
     total = sum(w for _, w in recipe)
     return [(n, w / total) for n, w in recipe], None
 
@@ -472,7 +480,7 @@ def _main(argv: Sequence[str]) -> int:
         if problem:
             print(problem)
         voices = [n for n, _ in recipe]
-    voices = sorted(set(voices) | {DEFAULT_VOICE})
+    voices = sorted(set(voices) | {DEFAULT_VOICE} | {n for n, _ in DEFAULT_RECIPE})
     bad = [v for v in voices if not _VOICE_NAME.match(v)]
     if bad:
         print("Not English Kokoro voice names:", ", ".join(bad))

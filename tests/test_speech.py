@@ -97,7 +97,7 @@ for label, text, want in [
 print()
 print("=== voice recipes (AMY_VOICE) ===")
 P = speech.parse_voice_recipe
-check("unset -> the default voice", P(None) == ([("af_heart", 1.0)], None))
+check("unset -> Amy's chosen voice", P(None) == (speech.DEFAULT_RECIPE, None), P(None))
 check("one voice", P("af_bella") == ([("af_bella", 1.0)], None), P("af_bella"))
 recipe, problem = P("af_heart:3, af_bella:1")
 check("weights are normalised to add up to 1",
@@ -108,8 +108,8 @@ for bad, why in [("jf_alpha", "not English"), ("af_heart:abc", "bad weight"),
                  ("heart", "not a voice name"),
                  (",".join("af_v%s" % c for c in "abcdef"), "too many voices")]:
     got, problem = P(bad)
-    check("%s (%s) falls back to the default and says why" % (bad[:24], why),
-          got == [("af_heart", 1.0)] and problem is not None and "AMY_VOICE" in problem, problem)
+    check("%s (%s) falls back to Amy's voice and says why" % (bad[:24], why),
+          got == speech.DEFAULT_RECIPE and problem is not None and "AMY_VOICE" in problem, problem)
 check("format: one voice", speech.format_recipe([("af_heart", 1.0)]) == "af_heart")
 check("format: a blend", speech.format_recipe([("af_heart", 0.6), ("af_bella", 0.4)])
       == "af_heart 60% + af_bella 40%")
@@ -252,5 +252,13 @@ check("level 1.0 puts her peak at PEAK_TARGET",
       abs(full - speech.PEAK_TARGET * 32767) <= 64, full)
 check("level 0.75 makes her 25% quieter", abs(quieter / full - 0.75) < 0.01, quieter / full)
 check("the shipped default is 25% below full", speech.DEFAULT_VOICE_LEVEL == 0.75)
+
+print()
+print("=== Amy's chosen voice (Phase 1E) ===")
+check("the default is the blend chosen in the voice lab",
+      speech.DEFAULT_RECIPE == [("af_heart", 0.4), ("af_bella", 0.6)] and speech.DEFAULT_SPEED == 1.1)
+check("its weights add up to 1", abs(sum(w for _, w in speech.DEFAULT_RECIPE) - 1.0) < 1e-9)
+check("it parses back to itself from the .env form",
+      speech.parse_voice_recipe("af_heart:0.4,af_bella:0.6") == (speech.DEFAULT_RECIPE, None))
 
 finish("ALL SPEECH TESTS PASSED")
