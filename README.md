@@ -651,6 +651,18 @@ know. Update to the latest code, or point `AMY_DB_PATH` at a different file. Upg
 other way automatically: on first start, a newer Amy migrates an older database in place, in a
 single transaction, keeping all history and settings.
 
+**Amy doesn't speak in the call:**
+
+Run `/voice` (admins) — it says what's wrong. In order: `TTS=on` must be set in `.env` (then restart); the voice must be switched on (`/voice on`); the engine must have loaded (about 10 seconds after login — if it says *failed*, the reason tells you what to run, usually `pip install -r requirements-tts.txt` or `python speech.py download`); and Amy must be in a voice channel. Remember she only speaks her chat replies to people who are in the call with her, and only in English.
+
+**Her voice or the music stutters while she talks:**
+
+Keep `TTS_THREADS` at 6 or lower. It sounds like more threads should be faster, but on a 16-thread CPU with music, speech and a chat reply all running, 8 threads made audio frames late (99th percentile 58 ms, enough to hear) and was slower per sentence too (2.4 s vs 1.8 s); 6 threads stayed as steady as plain music playback (8 ms). Keeping `/volume` at 100% also helps: below that the music has to be decoded, which costs more CPU.
+
+**The music is too quiet (or too loud) under her voice:**
+
+Raise or lower `DUCK_LEVEL` (the music's volume while she talks, 0.55 by default) or `VOICE_LEVEL` (her voice, 0.75) in `.env` and restart.
+
 **Something went wrong while nobody was watching:**
 
 Look in `amy.log` (and `amy.log.1` … for older entries). Every warning and error, with full tracebacks for crashes, is written there with a timestamp — including the errors behind "Something went wrong running that command" replies.

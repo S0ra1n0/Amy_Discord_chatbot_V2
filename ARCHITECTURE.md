@@ -102,6 +102,15 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   replaced by the opening sentences plus "the rest is in the chat" - never spoken as is.
 - **`announce` speaks only after an action succeeded**: errors and read-only commands stay
   silent, and `can_speak` (voice loaded and in a call) gates every line.
+- **One utterance at a time per server** (`GuildPlayer.speech_turn`, held by
+  `_speak_sentences`). Two replies at once used to take turns on the single speech thread
+  and interleave their sentences ("Alpha one, Bravo one, Alpha two..."). Start speech with
+  `_queue_utterance`, which captures the generation when it's ASKED for, so a /stop also
+  cancels an utterance still waiting its turn.
+- **`TTS_THREADS` is a stutter setting, not just a speed one.** Measured under load (music,
+  non-stop speech and a chat reply): 6 threads kept audio frames as punctual as plain music
+  (p99 8 ms late); 8 threads made them late enough to hear (p99 58 ms) and was slower.
+  The only slow mixer read in a song is frame 0 (~190 ms): FFmpeg opening the stream.
 - **Every stop of speech goes through `SpeechQueue.clear()`, which bumps its `generation`.**
   Speech is synthesised a sentence at a time in the background; `_speak_sentences` captures
   the generation when it starts and drops its remaining sentences once it moves. Before

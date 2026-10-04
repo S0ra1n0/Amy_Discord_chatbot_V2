@@ -1401,28 +1401,51 @@ def start_saying(guild: discord.Guild, text: str) -> Tuple[bool, str]:
         return False, NOTHING_TO_SAY
     if not speech.is_english(spoken):
         return False, NOT_ENGLISH
-    music.spawn(_speak_sentences(guild, speech.split_sentences(spoken)))
+    _queue_utterance(guild, speech.split_sentences(spoken))
     return True, "Saying it now."
 
 
-async def _speak_sentences(guild: discord.Guild, sentences: List[str]) -> None:
-    """Synthesise one sentence at a time and queue it, so she starts after the first."""
+def _queue_utterance(guild: discord.Guild, sentences: List[str]) -> None:
+    """
+    Start speaking `sentences` in the background, as one utterance. The speech generation is
+    captured NOW, when it's asked for: a /stop or /shush that lands before the task even
+    runs, or while it waits its turn, still cancels it.
+    """
+    player = music_manager.player_for(guild.id)
+    if player.speech is None:
+        return
+    music.spawn(_speak_sentences(guild, sentences, player.speech.generation))
+
+
+async def _speak_sentences(guild: discord.Guild, sentences: List[str],
+                           generation: Optional[int] = None) -> None:
+    """
+    Synthesise one sentence at a time and queue it, so she starts after the first.
+
+    One utterance at a time per server (`player.speech_turn`). Two replies at once used to
+    take turns on the single speech thread and interleave their sentences - "Alpha one,
+    Bravo one, Alpha two..." - so the second waits until the first is fully queued.
+    """
     assert speaker is not None
     player = music_manager.player_for(guild.id)
     if player.speech is None:
         return
-    generation = player.speech.generation
-    for sentence in sentences:
-        frames = await speaker.frames_for(sentence)
-        vc = voice.get_voice_client(guild)
-        if not frames or vc is None or not vc.is_connected():
-            return                                  # she left, or synthesis failed (logged)
-        if player.speech.generation != generation:
-            return                                  # /stop or /shush while this was synthesising
-        dropped = player.speech.add(frames)
-        if dropped:
-            log.info(f"Speech backlog full: dropped {dropped} older sentence(s)")
-        await ensure_speaking(guild)
+    if generation is None:
+        generation = player.speech.generation
+    async with player.speech_turn:
+        for sentence in sentences:
+            if player.speech.generation != generation:
+                return                              # /stop or /shush: drop what's left
+            frames = await speaker.frames_for(sentence)
+            vc = voice.get_voice_client(guild)
+            if not frames or vc is None or not vc.is_connected():
+                return                              # she left, or synthesis failed (logged)
+            if player.speech.generation != generation:
+                return                              # stopped while this one was synthesising
+            dropped = player.speech.add(frames)
+            if dropped:
+                log.info(f"Speech backlog full: dropped {dropped} older sentence(s)")
+            await ensure_speaking(guild)
 
 
 async def ensure_speaking(guild: discord.Guild) -> None:
@@ -1514,7 +1537,7 @@ def speak(guild: discord.Guild, text: str) -> None:
         return
     spoken = speech.clean_for_speech(text)
     if spoken and speech.is_english(spoken):
-        music.spawn(_speak_sentences(guild, speech.split_sentences(spoken)))
+        _queue_utterance(guild, speech.split_sentences(spoken))
 
 
 def announce(guild: Optional[discord.Guild], event: str, title: Optional[str] = None,

@@ -634,6 +634,9 @@ class GuildPlayer:
         # is playing Amy's voice with no track loaded - see music_active().
         self.speech: Optional[mixer.SpeechQueue] = None
         self.speech_only: bool = False
+        # One utterance at a time: a second waits until the first is fully queued, so two
+        # replies never interleave their sentences.
+        self.speech_turn: asyncio.Lock = asyncio.Lock()
         self.duck: float = mixer.DEFAULT_DUCK
         self.on_hold_done: Optional[Callable[[], None]] = None
         # Where to post the now-playing card, and the live message itself. advance_playback

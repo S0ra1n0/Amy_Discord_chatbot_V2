@@ -1453,6 +1453,66 @@ try:
 finally:
     amy.speaker, amy.voice_enabled = _real_speaker2, _real_enabled
 
+# ---- Phase 1F: two replies at once ---------------------------------------------------------
+print()
+print("=== two things to say at once don't interleave ===")
+_real_speaker3 = amy.speaker
+try:
+    sp = _speech.Speaker(_SlowEngine())
+    asyncio.run(sp.start())
+    amy.speaker = sp
+    p, vc, g, it = tts_setup(7201, current=None)
+    vc.stopped = True
+
+    async def two_at_once():
+        amy.start_saying(g, "Alpha one is first. Alpha two is second. Alpha three is third.")
+        amy.start_saying(g, "Bravo one is first. Bravo two is second.")
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if len(sp.engine.spoken) >= 5:
+                break
+        await asyncio.sleep(0.05)
+    asyncio.run(two_at_once())
+    order = [s.split()[0] for s in sp.engine.spoken]
+    check("one utterance finishes before the next starts (no A-B-A-B sentences)",
+          order == ["Alpha", "Alpha", "Alpha", "Bravo", "Bravo"], sp.engine.spoken)
+
+    # A /stop also cancels an utterance still waiting its turn, not just the one speaking
+    p, vc, g, it = tts_setup(7202, current=None)
+    vc.stopped = True
+    sp.engine.spoken.clear()
+
+    async def stop_with_one_waiting():
+        amy.start_saying(g, "Charlie one is first. Charlie two is second.")
+        amy.start_saying(g, "Delta one is waiting. Delta two is waiting.")
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if p.speech:
+                break
+        p.stop_all()
+        await asyncio.sleep(0.4)
+    asyncio.run(stop_with_one_waiting())
+    check("a /stop also drops what was waiting its turn",
+          not any(s.startswith("Delta") for s in sp.engine.spoken) and not p.speech,
+          sp.engine.spoken)
+
+    # The tightest case: /stop in the same instant as the request, before the background task
+    # has even started. Only capturing the generation when it's ASKED for catches this.
+    p, vc, g, it = tts_setup(7203, current=None)
+    vc.stopped = True
+    sp.engine.spoken.clear()
+
+    async def stop_before_it_starts():
+        amy.start_saying(g, "Echo one should never be heard. Echo two neither.")
+        p.stop_all()                         # no await in between: the task hasn't run yet
+        await asyncio.sleep(0.3)
+    asyncio.run(stop_before_it_starts())
+    check("a /stop before the speech task even starts still cancels it",
+          sp.engine.spoken == [] and not p.speech, sp.engine.spoken)
+    sp.close()
+finally:
+    amy.speaker = _real_speaker3
+
 # The exit code is set by _check's gate, wherever a failure happens. It used to be one
 # `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could
 # print FAIL while the script exited 0 - the restore path looked covered and wasn't.
