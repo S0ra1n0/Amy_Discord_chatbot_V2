@@ -125,7 +125,7 @@ print("=== .gitignore patterns actually match ===")
 gitignore = open(".gitignore", encoding="utf-8").read().splitlines()
 trailing = [l for l in gitignore if l.strip() and not l.lstrip().startswith("#") and " #" in l]
 check("no pattern line has a comment after it", not trailing, str(trailing))
-for must in ("*.log.*", "kokoro_model/", "amy_memory.db", ".env"):
+for must in ("*.log.*", "kokoro_model/", "piper_model/", "amy_memory.db", ".env"):
     check("%s is ignored" % must, must in [l.strip() for l in gitignore])
 
 print()

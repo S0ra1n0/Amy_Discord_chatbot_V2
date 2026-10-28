@@ -145,6 +145,19 @@ TTS_SPEED: float = _setting(config.parse_float("TTS_SPEED", os.getenv("TTS_SPEED
                                                maximum=2.0))
 TTS_THREADS: int = _setting(config.parse_int("TTS_THREADS", os.getenv("TTS_THREADS"),
                                              default=speech.DEFAULT_THREADS, minimum=1))
+# Which voice engine: kokoro (the default) or piper. Piper needs `pip install -r
+# requirements-piper.txt` and `python speech.py download-piper`; it is never imported unless
+# chosen here. TTS_SPEED and AMY_VOICE are Kokoro's; the PIPER_* settings are Piper's.
+TTS_ENGINE: str = _setting(speech.parse_engine(os.getenv("TTS_ENGINE")))
+PIPER_VOICE: str = speech.resolve_piper_path(os.getenv("PIPER_VOICE"))
+PIPER_LENGTH: float = _setting(config.parse_float("PIPER_LENGTH", os.getenv("PIPER_LENGTH"),
+                                                  default=speech.DEFAULT_PIPER_LENGTH,
+                                                  minimum=0.5, maximum=2.0))
+PIPER_PITCH: float = _setting(config.parse_float("PIPER_PITCH", os.getenv("PIPER_PITCH"),
+                                                 default=speech.DEFAULT_PIPER_PITCH,
+                                                 minimum=-4.0, maximum=4.0))
+PIPER_SOFT: bool = _setting(config.parse_bool("PIPER_SOFT", os.getenv("PIPER_SOFT"),
+                                              default=True))
 # How loud the music stays while Amy speaks over it: 0.3 = 30%, 1.0 = not lowered at all.
 DUCK_LEVEL: float = _setting(config.parse_float("DUCK_LEVEL", os.getenv("DUCK_LEVEL"),
                                                 default=mixer.DEFAULT_DUCK, minimum=0.0,
@@ -252,12 +265,26 @@ if TTS and not voice_enabled:
     log.info("Restored saved state: voice is OFF (use /voice on to enable)")
 
 # Loaded in the background from on_ready, never here: a cold load takes ~9 seconds.
+def describe_voice() -> str:
+    """The active engine's voice and settings, in one line (the log and /voice)."""
+    if TTS_ENGINE == "piper":
+        return speech.format_piper(PIPER_VOICE, PIPER_LENGTH, PIPER_PITCH, PIPER_SOFT)
+    return f"{speech.format_recipe(AMY_VOICE)} at {TTS_SPEED}x"
+
+
+def make_engine() -> speech.SpeechEngine:
+    """The engine TTS_ENGINE names. Constructing one imports nothing heavy; load() does."""
+    if TTS_ENGINE == "piper":
+        return speech.PiperEngine(PIPER_VOICE, length=PIPER_LENGTH, pitch=PIPER_PITCH,
+                                  soft=PIPER_SOFT, threads=TTS_THREADS,
+                                  ffmpeg=music.find_ffmpeg())
+    return speech.KokoroEngine(AMY_VOICE, speed=TTS_SPEED, threads=TTS_THREADS)
+
+
 speaker: Optional[speech.Speaker] = (
-    speech.Speaker(speech.KokoroEngine(AMY_VOICE, speed=TTS_SPEED, threads=TTS_THREADS),
-                   level=VOICE_LEVEL)
-    if TTS else None)
+    speech.Speaker(make_engine(), level=VOICE_LEVEL) if TTS else None)
 if speaker is not None:
-    log.info(f"Voice on: {speech.format_recipe(AMY_VOICE)} at {TTS_SPEED}x - loading after login")
+    log.info(f"Voice on: {describe_voice()} - loading after login")
 #----------------------------------------------
 
 #----Slash Command Tree------
@@ -2547,7 +2574,7 @@ def voice_status() -> str:
               "failed": f"failed - {speaker.problem}"}.get(speaker.state, speaker.state)
     return (f"\U0001F50A **Voice: {switch}**\n"
             f"Engine: {engine}\n"
-            f"Voice: {speech.format_recipe(AMY_VOICE)} at {TTS_SPEED}x, "
+            f"Voice: {describe_voice()}, "
             f"level {round(VOICE_LEVEL * 100)}%\n"
             f"Music while I talk: {round(DUCK_LEVEL * 100)}%")
 

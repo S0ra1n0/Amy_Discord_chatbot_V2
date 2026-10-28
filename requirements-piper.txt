@@ -1,0 +1,14 @@
+# Optional: the Piper speech engine, an alternative to Kokoro (set TTS_ENGINE=piper).
+#   pip install -r requirements-piper.txt
+#   python speech.py download-piper    # one-time: fetches the voice (~60 MB)
+# Small (about 100 MB on disk, no PyTorch). It can share an environment with
+# requirements-tts.txt: the pins below match it, so installing one doesn't move the other.
+#
+# Licence: piper-tts is GPL-3.0-or-later (https://pypi.org/project/piper-tts/), while Amy is
+# MIT. That is why Piper is a separate, optional install that Amy only imports while it is
+# running with TTS_ENGINE=piper - it is not bundled, not listed in requirements.txt, and not
+# needed by the test suite. (Information, not legal advice.)
+-r requirements.txt
+-c constraints-piper.txt
+
+piper-tts==1.8.0

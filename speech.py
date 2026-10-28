@@ -2,25 +2,35 @@
 Amy's voice: turning reply text into audio for a voice call.
 
 Pure helpers - text clean-up, the English check, sentence splitting, voice recipes, audio
-framing - plus a swappable engine. Kokoro (and PyTorch) are imported only when TTS is turned
-on, so neither the bot nor the test suite needs them installed; `tests/test_speech.py` checks
-that importing this module pulls in neither.
+framing - plus a swappable engine. Kokoro (and PyTorch) or Piper (and onnxruntime) are
+imported only when TTS is turned on and that engine is chosen, so neither the bot nor the test
+suite needs them installed; `tests/test_speech.py` checks that importing this module pulls in
+none of them.
 
-One-time setup, after `pip install -r requirements-tts.txt`:
+One-time setup for the Kokoro voice, after `pip install -r requirements-tts.txt`:
 
     python speech.py download                 # model + the voices in AMY_VOICE
     python speech.py download af_bella,af_sky # extra voices, e.g. for trying blends
+
+One-time setup for the Piper voice (TTS_ENGINE=piper), after
+`pip install -r requirements-piper.txt`:
+
+    python speech.py download-piper           # the en_GB cori voice, into piper_model/
 
 The rules this follows are in ARCHITECTURE.md under "Speech".
 """
 import asyncio
 import concurrent.futures
+import hashlib
 import importlib
 import importlib.util
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
+import urllib.request
 import warnings
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -30,6 +40,9 @@ with warnings.catch_warnings():
     import audioop
 
 log = logging.getLogger("amy.speech")
+
+# Windows would flash a console window for every FFmpeg run without this.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # ---- The model ---------------------------------------------------------------------------
 # Pinned to one revision and read from local files only. Left to itself, Kokoro checks Hugging
@@ -61,6 +74,31 @@ PEAK_TARGET = 0.7            # speech peak as a fraction of full scale - headroo
 # How loud Amy's voice is, on top of PEAK_TARGET (VOICE_LEVEL). 0.75 since the first live
 # test, where her voice drowned out the music.
 DEFAULT_VOICE_LEVEL = 0.75
+
+# ---- The Piper voice (optional engine, TTS_ENGINE=piper) -----------------------------------
+# Same idea as the Kokoro model: one pinned revision, fetched once by `python speech.py
+# download-piper` into piper_model/, read from local files only. The voice is "cori" (en_GB,
+# female, medium quality, 22.05 kHz), trained on LibriVox public-domain recordings
+# (the voice's MODEL_CARD). Both files are checked against these SHA-256 hashes.
+PIPER_REPO = "rhasspy/piper-voices"
+PIPER_REVISION = "5041a7a49ae5b3a0f30e6837769eb03fdbb231bd"
+PIPER_VOICE_NAME = "en_GB-cori-medium"
+PIPER_REPO_DIR = "en/en_GB/cori/medium"
+PIPER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "piper_model")
+PIPER_MODEL = os.path.join(PIPER_DIR, PIPER_VOICE_NAME + ".onnx")
+PIPER_SHA256 = {
+    PIPER_VOICE_NAME + ".onnx": "1899f98e5fb8310154f3c2973f4b8a929ba7245e722b3d3a85680b833d95f10d",
+    PIPER_VOICE_NAME + ".onnx.json": "e262c16d7f192f69d4edd6b4ef8a5915379e67495fcc402f1ab15eeb33da3d36",
+}
+# Amy's Piper voice, chosen by ear on 2026-10-28 (TTS_PLAN.md, T0.1 route 2): a little slower
+# than the model's own pace, a semitone up with the formants (the "body" of the voice) kept,
+# and a softened top end. noise_scale / noise_w are how much random variation the model adds
+# to the sound and to the rhythm; they stay fixed.
+DEFAULT_PIPER_LENGTH = 1.10          # length_scale: above 1 = slower
+DEFAULT_PIPER_PITCH = 1.0            # semitones; 0 = leave the pitch alone
+PIPER_NOISE_SCALE = 0.5
+PIPER_NOISE_W = 0.5
+PIPER_FFMPEG_TIMEOUT = 20.0          # seconds, for one sentence through the filter chain
 
 
 # ---- Text clean-up -------------------------------------------------------------------------
@@ -153,7 +191,7 @@ def is_english(text: str) -> bool:
 # ---- Sentence splitting ---------------------------------------------------------------------
 _SPLIT = re.compile(r"(?<=[.!?\u2026])\s+")
 _ABBREVIATIONS = ("mr.", "mrs.", "ms.", "dr.", "st.", "vs.", "e.g.", "i.e.", "jr.", "sr.",
-                  "no.", "prof.", "approx.")
+                  "no.", "prof.", "approx.", "feat.", "ft.")
 MIN_SENTENCE_CHARS = 12      # shorter pieces join the next, so speech isn't choppy
 
 
@@ -240,6 +278,136 @@ def format_recipe(recipe: Recipe) -> str:
     if len(recipe) == 1:
         return recipe[0][0]
     return " + ".join(f"{n} {round(w * 100)}%" for n, w in recipe)
+
+
+# ---- Choosing and describing the engine -----------------------------------------------------
+ENGINES = ("kokoro", "piper")
+
+
+def parse_engine(raw: Optional[str]) -> Tuple[str, Optional[str]]:
+    """Read TTS_ENGINE. Returns (engine, problem) like config.parse_*; unknown -> kokoro."""
+    if raw is None or not raw.strip():
+        return "kokoro", None
+    word = raw.strip().lower()
+    if word in ENGINES:
+        return word, None
+    return "kokoro", f"TTS_ENGINE={raw.strip()!r} isn't one of {', '.join(ENGINES)}; using kokoro."
+
+
+def resolve_piper_path(raw: Optional[str]) -> str:
+    """PIPER_VOICE -> the .onnx path. Blank = the downloaded cori voice; relative = from the project."""
+    if raw is None or not raw.strip():
+        return PIPER_MODEL
+    path = os.path.expanduser(raw.strip())
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    return os.path.normpath(path)
+
+
+def format_piper(model_path: str, length: float, pitch: float, soft: bool) -> str:
+    """'Piper en_GB-cori-medium (length 1.10, pitch +1.0 st, soft EQ)', for /voice and the log."""
+    name = os.path.basename(model_path)
+    if name.endswith(".onnx"):
+        name = name[:-5]
+    pitch_text = f"pitch {pitch:+.1f} st" if pitch else "pitch unchanged"
+    return f"Piper {name} (length {length:.2f}, {pitch_text}, soft EQ {'on' if soft else 'off'})"
+
+
+# ---- Piper: text fixes and the audio filter chain ---------------------------------------------
+# Piper reads text through espeak-ng, which says some things the way a dictionary would rather
+# than the way a song list does. These fixes come from listening to a round of test lines
+# (TTS_PLAN.md, T0.1 route 2, round 4). They run only for Piper, inside PiperEngine.synthesize:
+# Kokoro has its own text handling and was tuned without them.
+#
+# Names espeak gets wrong, as respellings it reads right. A respelling (not a raw `[[ ipa ]]`
+# block) on purpose: Piper drops the full stop after a raw block and glues the next sentence on,
+# and even turns "!" into the word "exclamation". Keys are lower case; accented and plain
+# spellings are separate keys because song titles often lose the accents. To add a name, check
+# how espeak reads the respelling (voice.phonemize) before trusting it.
+PIPER_NAMES = {
+    "sade": "Shah-day",
+    "måneskin": "Mawneskin",
+    "maneskin": "Mawneskin",
+    "einaudi": "Eye-now-dee",
+    "beyoncé": "Bee-yon-say",
+    "beyonce": "Bee-yon-say",
+    "dua lipa": "Dooah Leepah",
+}
+_PIPER_NAME_RE = re.compile(
+    r"(?<!\w)(" + "|".join(re.escape(k).replace(r"\ ", r"\s+")
+                           for k in sorted(PIPER_NAMES, key=len, reverse=True)) + r")(?!\w)",
+    re.I)
+_RAW_PHONEMES = re.compile(r"[\[\]]")
+# "feat. Name" / "ft. Name": a capital or digit follows, and what comes before is a comma,
+# bracket or dash, or a capitalised word (a title or name) - so the noun in "What a feat. Next
+# up..." and "6 ft. tall" stay as they are. The full stop is swallowed so it can't end the
+# sentence.
+_FEATURING = re.compile(r"(?<![\w.])(?<!\d )(?<!\d)(?i:feat|ft)\.?(?=\s+[A-Z0-9])")
+
+
+def _featuring(m: "re.Match[str]") -> str:
+    before = m.string[:m.start()].rstrip()
+    if not before or before[-1] in ",([-–—&":
+        return "featuring"
+    return "featuring" if before.split()[-1][:1].isupper() else m.group(0)
+_HASH_NUMBER = re.compile(r"(?<![\w&])#(\d+)\b")
+_DURATION_UNIT = re.compile(r"(?<!\w)(\d+(?:\.\d+)?)\s*(mins?|secs?)\b", re.I)
+_ZERO_MINUTES = re.compile(r"(?<![\d:.])(\d{1,2}):0([1-9])(?![\d:])")
+
+
+def _duration(m: "re.Match[str]") -> str:
+    unit = "minute" if m.group(2).lower().startswith("min") else "second"
+    return f"{m.group(1)} {unit}" + ("" if m.group(1) == "1" else "s")
+
+
+def piper_text(text: str) -> str:
+    """
+    Fix what espeak-ng mispronounces in song-list text before Piper reads it. Pure.
+
+    "feat." and "ft." become "featuring" (and no longer end the sentence), "#3" becomes
+    "number 3", "2 min" / "30 secs" become minutes / seconds, "1:05" becomes "1 oh 5" ("2:30"
+    is read fine as it is), and the names in PIPER_NAMES are respelt. Words are matched whole
+    and case-insensitively, so nothing inside another word changes. `[[` and `]]` are removed:
+    Piper treats text between them as raw phonemes, which chat text must not be able to do.
+    Every `[` and `]` is removed (not just the pairs): removing pairs in one pass lets "[]][x][[]"
+    collapse into a fresh "[[x]]".
+    """
+    t = _RAW_PHONEMES.sub("", text)
+    t = _FEATURING.sub(_featuring, t)
+    t = _HASH_NUMBER.sub(r"number \1", t)
+    t = _DURATION_UNIT.sub(_duration, t)
+    t = _ZERO_MINUTES.sub(r"\1 oh \2", t)
+    t = _PIPER_NAME_RE.sub(
+        lambda m: PIPER_NAMES.get(re.sub(r"\s+", " ", m.group(1).lower()), m.group(0)), t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def piper_filter_chain(pitch_semitones: float, soft: bool, has_rubberband: bool) -> Optional[str]:
+    """
+    The FFmpeg -af chain applied to Piper's audio, or None when there is nothing to do. Pure.
+
+    Pitch: rubberband shifts it by `pitch_semitones` and keeps the formants (the vocal-tract
+    "body"), so she sounds higher, not smaller. Needs an FFmpeg built with rubberband; without
+    it the pitch step is dropped. Soft: a gentle cut around 4.5 kHz, a shelf above 6.5 kHz, and
+    a de-esser take the edge off the "s" sounds and hiss.
+    """
+    parts: List[str] = []
+    if pitch_semitones and has_rubberband:
+        parts.append(f"rubberband=pitch={2 ** (pitch_semitones / 12):.6f}:formant=preserved")
+    if soft:
+        parts.append("equalizer=f=4500:t=q:w=1:g=-3")
+        parts.append("highshelf=f=6500:g=-3")
+        parts.append("deesser=i=0.4:m=0.5:f=0.5:s=o")
+    return ",".join(parts) if parts else None
+
+
+_FILTER_LINE = re.compile(r"^\s*[A-Z.]{2,3}\s+(\S+)\s+\S+->\S+", re.M)
+SOFT_FILTERS = ("equalizer", "highshelf", "deesser")
+
+
+def parse_ffmpeg_filters(listing: str) -> set:
+    """The filter names in `ffmpeg -filters` output. Pure."""
+    return set(_FILTER_LINE.findall(listing))
 
 
 # ---- Audio -----------------------------------------------------------------------------------
@@ -374,6 +542,130 @@ class KokoroEngine(SpeechEngine):
         return (samples * 32767).astype("<i2").tobytes()
 
 
+def missing_piper_files(model_path: str) -> List[str]:
+    """The Piper voice files (.onnx and its .json) that don't exist yet."""
+    return [p for p in (model_path, model_path + ".json") if not os.path.isfile(p)]
+
+
+class PiperEngine(SpeechEngine):
+    """
+    Piper (a small ONNX voice, GPL-3.0 package, optional) on the CPU, from local files only.
+
+    Text -> `piper_text` -> Piper -> optionally FFmpeg's filter chain (`piper_filter_chain`)
+    -> 16-bit mono at the voice's own rate. Everything after Piper degrades quietly: no FFmpeg,
+    no rubberband or a failing filter run all mean "speak without that step", with one warning.
+    """
+    name = "Piper"
+    rate = 22050                 # replaced by the voice's own rate in load()
+
+    def __init__(self, model_path: str = PIPER_MODEL, length: float = DEFAULT_PIPER_LENGTH,
+                 pitch: float = DEFAULT_PIPER_PITCH, soft: bool = True,
+                 threads: int = DEFAULT_THREADS, ffmpeg: Optional[str] = None) -> None:
+        self.model_path = model_path
+        self.length = length
+        self.pitch = pitch
+        self.soft = soft
+        self.threads = threads
+        self.ffmpeg = ffmpeg                    # injected: speech.py must not import music.py
+        self.chain: Optional[str] = None        # decided in load()
+        self._voice: Any = None
+        self._cfg: Any = None
+        self._ffmpeg_warned = False
+
+    def load(self) -> None:
+        missing = missing_piper_files(self.model_path)
+        if missing:
+            names = ', '.join(os.path.basename(m) for m in missing)
+            if os.path.normpath(self.model_path) == os.path.normpath(PIPER_MODEL):
+                raise SpeechUnavailable(f"Piper's voice files aren't downloaded ({names}). "
+                                        "Run: python speech.py download-piper")
+            raise SpeechUnavailable(f"Piper's voice file isn't there ({names} at {self.model_path}). "
+                                    "Check PIPER_VOICE in .env, or leave it blank to use the "
+                                    "downloaded cori voice.")
+        if importlib.util.find_spec("piper") is None or importlib.util.find_spec("onnxruntime") is None:
+            raise SpeechUnavailable("Piper isn't installed. Run: pip install -r requirements-piper.txt")
+        piper = importlib.import_module("piper")
+        ort = importlib.import_module("onnxruntime")
+        with open(self.model_path + ".json", encoding="utf-8") as f:
+            config = piper.PiperConfig.from_dict(json.load(f))
+        # Built here rather than with PiperVoice.load(): that one makes its own onnxruntime
+        # session, which takes every core, and TTS_THREADS has to bound speech's CPU use.
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = self.threads
+        options.inter_op_num_threads = 1
+        session = ort.InferenceSession(self.model_path, sess_options=options,
+                                       providers=["CPUExecutionProvider"])
+        self._voice = piper.PiperVoice(config=config, session=session)
+        self._cfg = piper.SynthesisConfig(length_scale=self.length, noise_scale=PIPER_NOISE_SCALE,
+                                          noise_w_scale=PIPER_NOISE_W)
+        self.rate = int(config.sample_rate)
+        self.chain = self._plan_chain()
+        self.synthesize("Ready.")       # the first call is slow; pay it here, not mid-call
+
+    def _plan_chain(self) -> Optional[str]:
+        """Work out which filters FFmpeg can really run here; warn once about each gap."""
+        if not self.pitch and not self.soft:
+            return None
+        if not self.ffmpeg:
+            log.warning("Piper: FFmpeg not found - speaking without the pitch/soft-EQ polish")
+            return None
+        try:
+            listing = subprocess.run(
+                [self.ffmpeg, "-hide_banner", "-filters"], capture_output=True, text=True,
+                errors="replace", timeout=PIPER_FFMPEG_TIMEOUT, creationflags=_NO_WINDOW).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning(f"Piper: couldn't ask FFmpeg for its filters ({e}) - "
+                        "speaking without the pitch/soft-EQ polish")
+            return None
+        names = parse_ffmpeg_filters(listing)
+        has_rubberband = "rubberband" in names
+        soft = self.soft
+        if self.pitch and not has_rubberband:
+            log.warning("Piper: this FFmpeg has no rubberband filter - skipping the pitch shift")
+        if soft and not all(f in names for f in SOFT_FILTERS):
+            log.warning("Piper: this FFmpeg lacks equalizer/highshelf/deesser - skipping the soft EQ")
+            soft = False
+        return piper_filter_chain(self.pitch, soft, has_rubberband)
+
+    def _filter(self, pcm: bytes) -> bytes:
+        """Run `pcm` through the chain. On any failure, say so once and return it as it was."""
+        if not self.ffmpeg or not self.chain:
+            return pcm
+        try:
+            r = subprocess.run(
+                [self.ffmpeg, "-hide_banner", "-loglevel", "error",
+                 "-f", "s16le", "-ar", str(self.rate), "-ac", "1", "-i", "pipe:0",
+                 "-af", self.chain,
+                 "-f", "s16le", "-ar", str(self.rate), "-ac", "1", "pipe:1"],
+                input=pcm, capture_output=True, timeout=PIPER_FFMPEG_TIMEOUT,
+                creationflags=_NO_WINDOW)
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+            reason = (r.stderr or b"").decode("utf-8", "replace").strip()[-200:] or f"exit {r.returncode}"
+        except subprocess.TimeoutExpired:
+            # A hung FFmpeg would otherwise stall every sentence for the full timeout on the
+            # one speech thread. Switch the polish off until restart.
+            self.chain = None
+            reason = f"timed out after {PIPER_FFMPEG_TIMEOUT:.0f}s; post-processing is now off until restart"
+        except (OSError, subprocess.SubprocessError) as e:
+            reason = str(e) or type(e).__name__
+        if not self._ffmpeg_warned:
+            self._ffmpeg_warned = True
+            log.warning(f"Piper: the FFmpeg filter step failed ({reason}) - speaking unprocessed")
+        return pcm
+
+    def synthesize(self, text: str) -> bytes:
+        if self._voice is None:
+            raise SpeechUnavailable("Piper isn't loaded")
+        spoken = piper_text(text)
+        if not spoken:
+            return b""
+        pcm = b"".join(chunk.audio_int16_bytes for chunk in self._voice.synthesize(spoken, self._cfg))
+        if not pcm or not self.chain:
+            return pcm
+        return self._filter(pcm)
+
+
 class FakeEngine(SpeechEngine):
     """For tests: 'speaks' 50 ms of silence per character, and records what it was given."""
     name = "fake"
@@ -467,7 +759,51 @@ def download(voices: Sequence[str], model_dir: str = MODEL_DIR) -> List[str]:
     return fetched
 
 
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def download_piper(model_dir: str = PIPER_DIR) -> List[str]:
+    """
+    Fetch the pinned Piper voice (.onnx + .onnx.json) into `model_dir`. Returns what was
+    fetched. Plain HTTPS from the pinned Hugging Face revision - no extra package needed - and
+    each file is checked against PIPER_SHA256 before it is put in place, so a damaged or
+    swapped download can never become Amy's voice.
+    """
+    os.makedirs(model_dir, exist_ok=True)
+    fetched = []
+    for name, want in PIPER_SHA256.items():
+        dest = os.path.join(model_dir, name)
+        if os.path.isfile(dest) and _sha256(dest) == want:
+            continue
+        url = f"https://huggingface.co/{PIPER_REPO}/resolve/{PIPER_REVISION}/{PIPER_REPO_DIR}/{name}"
+        part = dest + ".part"
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as out:
+                for block in iter(lambda: resp.read(1 << 20), b""):
+                    out.write(block)
+        except BaseException:
+            if os.path.exists(part):
+                os.remove(part)
+            raise
+        if _sha256(part) != want:
+            os.remove(part)
+            raise RuntimeError(f"{name} downloaded but its checksum doesn't match the pinned one")
+        os.replace(part, dest)
+        fetched.append(name)
+    return fetched
+
+
 def _main(argv: Sequence[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "download-piper":
+        print(f"Fetching the Piper voice {PIPER_VOICE_NAME} ({PIPER_REVISION[:7]}) into {PIPER_DIR} ...")
+        fetched = download_piper()
+        print("Fetched: " + (", ".join(fetched) if fetched else "nothing - already up to date"))
+        return 0
     if len(argv) < 2 or argv[1] != "download":
         print(__doc__)
         return 2

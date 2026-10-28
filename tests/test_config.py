@@ -69,7 +69,9 @@ def probe(dotenv_values, extra_env=None):
     env = {k: v for k, v in os.environ.items()
            if k not in ("HISTORY_LIMIT", "DB_PRUNE_DAYS", "WEB_SEARCH", "OLLAMA_THINK",
                         "OLLAMA_KEEP_ALIVE", "DISCORD_TOKEN", "TTS", "AMY_VOICE",
-                        "TTS_SPEED", "TTS_THREADS", "DUCK_LEVEL", "VOICE_LEVEL")}
+                        "TTS_SPEED", "TTS_THREADS", "DUCK_LEVEL", "VOICE_LEVEL",
+                        "TTS_ENGINE", "PIPER_VOICE", "PIPER_LENGTH", "PIPER_PITCH",
+                        "PIPER_SOFT")}
     env.update(extra_env or {})
     env["AMY_PROBE_SCENARIO"] = json.dumps({"dotenv": dotenv_values})
     env["PYTHONIOENCODING"] = "utf-8"
@@ -210,5 +212,60 @@ check("a non-English voice falls back to the default",
       res and res["AMY_VOICE"])
 check("...and says so at startup", any("[WARNING]" in l and "AMY_VOICE" in l
                                        for l in out.splitlines()), out[-300:])
+
+print()
+print("=== TTS_ENGINE and the Piper settings, through a real import of the bot ===")
+code, res, out = probe({"TTS": "on"})
+check("the engine defaults to Kokoro", res is not None and res["TTS_ENGINE"] == "kokoro"
+      and res["engine"] == "Kokoro", res and (res["TTS_ENGINE"], res["engine"]))
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper"})
+check("TTS_ENGINE=piper builds the Piper engine", res is not None and res["engine"] == "Piper", res)
+check("...with the chosen voice as its defaults (length 1.10, +1 semitone, soft EQ on)",
+      res is not None and res["PIPER_LENGTH"] == 1.1 and res["PIPER_PITCH"] == 1.0
+      and res["PIPER_SOFT"] is True and res["engine_settings"]["length"] == 1.1
+      and res["engine_settings"]["pitch"] == 1.0 and res["engine_settings"]["soft"] is True, res)
+check("...the cori voice in piper_model/ and the shared TTS_THREADS",
+      res is not None and res["PIPER_VOICE"].endswith(os.path.join("piper_model", "en_GB-cori-medium.onnx"))
+      and res["engine_settings"]["model_path"] == res["PIPER_VOICE"]
+      and res["engine_settings"]["threads"] == 6, res and res["engine_settings"])
+check("...and the startup log line names the engine once, not twice",
+      any("Voice on: Piper en_GB-cori-medium" in l for l in out.splitlines())
+      and not any("Piper, Piper" in l for l in out.splitlines()), out[-300:])
+check("...described without anything Kokoro-specific",
+      res is not None and res["voice_description"].startswith("Piper en_GB-cori-medium")
+      and "af_" not in res["voice_description"] and "TTS_SPEED" not in res["voice_description"],
+      res and res["voice_description"])
+check("...and still imports neither PyTorch, Kokoro, Piper nor onnxruntime at startup",
+      res is not None and not res["torch_imported"], res)
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper", "PIPER_LENGTH": "1.3", "PIPER_PITCH": "-2",
+                        "PIPER_SOFT": "off", "PIPER_VOICE": "voices/mine.onnx", "TTS_THREADS": "4"})
+check("PIPER_LENGTH, PIPER_PITCH, PIPER_SOFT, PIPER_VOICE and TTS_THREADS reach the engine",
+      res is not None and res["engine_settings"]["length"] == 1.3 and res["engine_settings"]["pitch"] == -2.0
+      and res["engine_settings"]["soft"] is False and res["engine_settings"]["threads"] == 4
+      and res["engine_settings"]["model_path"].endswith(os.path.join("voices", "mine.onnx"))
+      and os.path.isabs(res["engine_settings"]["model_path"]), res and res["engine_settings"])
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper"}, extra_env={"FFMPEG_PATH": sys.executable})
+check("the FFmpeg the bot found is handed to the engine (speech.py can't import music.py)",
+      res is not None and res["engine_settings"]["ffmpeg_given"] is True, res)
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper", "PIPER_PITCH": "9", "PIPER_LENGTH": "0.1"})
+check("the pitch is capped at +4 semitones and the length at 0.5",
+      res is not None and res["PIPER_PITCH"] == 4.0 and res["PIPER_LENGTH"] == 0.5, res)
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper", "PIPER_PITCH": "-9"})
+check("...and the pitch at -4", res is not None and res["PIPER_PITCH"] == -4.0, res)
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "pipr"})
+check("a mistyped engine falls back to Kokoro",
+      res is not None and res["TTS_ENGINE"] == "kokoro" and res["engine"] == "Kokoro", res)
+check("...and says so at startup", any("[WARNING]" in l and "TTS_ENGINE" in l
+                                       for l in out.splitlines()), out[-300:])
+code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper", "PIPER_LENGTH": "9", "PIPER_PITCH": "fast",
+                        "PIPER_SOFT": "maybe"})
+check("bad Piper numbers are clamped or defaulted, never a crash",
+      res is not None and res["PIPER_LENGTH"] == 2.0 and res["PIPER_PITCH"] == 1.0
+      and res["PIPER_SOFT"] is True, res)
+check("...each named in a warning", all(any("[WARNING]" in l and n in l for l in out.splitlines())
+                                        for n in ("PIPER_LENGTH", "PIPER_PITCH", "PIPER_SOFT")), out[-400:])
+code, res, out = probe({"TTS_ENGINE": "piper"})
+check("TTS off -> no speaker, whatever the engine", res is not None and res["speaker"] is False
+      and res["engine"] is None, res)
 
 finish("ALL CONFIG TESTS PASSED")

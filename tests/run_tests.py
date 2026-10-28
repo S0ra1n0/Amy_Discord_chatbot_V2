@@ -47,6 +47,7 @@ NETWORK = [
     "test_websearch_live.py",
     "test_model_live.py",    # needs Ollama, not Discord
     "test_speech_live.py",   # needs requirements-tts.txt + speech.py download
+    "test_piper_live.py",    # needs requirements-piper.txt + speech.py download-piper
     "test_resolve.py",       # yt-dlp against YouTube
     "test_search.py",        # yt-dlp search
     "test_audio_path.py",    # yt-dlp + FFmpeg decoding

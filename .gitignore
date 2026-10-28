@@ -52,6 +52,8 @@ Thumbs.db
 amy_memory.db
 # Amy's voice model, fetched by `python speech.py download`
 kokoro_model/
+# Amy's Piper voice, fetched by `python speech.py download-piper`
+piper_model/
 
 # Agent working notes - local only, not for people pulling the repo
 CLAUDE.md

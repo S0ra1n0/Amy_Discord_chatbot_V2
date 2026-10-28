@@ -1,0 +1,13 @@
+# Exact versions of what requirements-piper.txt pulls in beyond the bot's own packages, so a
+# Piper install gets the set it was tested with. Same idea as constraints-tts.txt.
+# numpy and packaging are pinned to the same versions as constraints-tts.txt on purpose: Piper
+# is happy with newer ones (a bare install picks numpy 2.5.x), but installing it into the
+# same environment as Kokoro must not move the pins Kokoro and PyTorch were tested with.
+# Regenerate after an upgrade: pip freeze in a venv with requirements-piper.txt installed,
+# minus everything already in a plain requirements.txt install, minus the direct pins.
+flatbuffers==25.12.19
+numpy==2.4.6
+onnxruntime==1.31.1
+packaging==26.3
+pathvalidate==3.3.1
+protobuf==7.36.2

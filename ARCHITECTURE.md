@@ -22,7 +22,7 @@ one guards against.
 | `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
 | `mixer.py` | `SpeechQueue` and `Mixer`: Amy's voice mixed over the music, with ducking and the hold-music mode | discord |
 | `voicelines.py` | What Amy says out loud: confirmation phrasings, speakable titles and times, how a chat reply becomes speech, the paraphrase prompt | llm, speech (both pure) |
-| `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engine and its `Speaker` | Kokoro/PyTorch **only when loaded** |
+| `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engines (Kokoro, Piper) and the `Speaker` | Kokoro/PyTorch or Piper/onnxruntime **only when loaded** |
 | `database.py` | SQLite: history, settings, voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
 
@@ -55,6 +55,32 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   numbers (a speaking style per input length), so a blend is their weighted sum.
   `KokoroEngine.set_recipe` swaps it without reloading the model (~0.1s vs ~9s), which is
   what `tools/voicelab.py` uses to render many voices in one run.
+- **Piper is a second, optional engine and follows the same rules.** `TTS_ENGINE` (`kokoro`
+  by default) picks it; `piper` and `onnxruntime` are imported only inside `PiperEngine.load`,
+  via `importlib`, after the voice files and `find_spec` have been checked
+  (`test_speech.py` fails if importing `speech` pulls either in). `piper-tts` is **GPL-3.0**
+  and Amy is MIT, so it lives in `requirements-piper.txt`, never in `requirements.txt` or the
+  tests' needs; CI does not install it (`test_piper_live.py` SKIPs without it).
+- **The Piper voice is pinned and checksummed.** `PIPER_REVISION` plus `PIPER_SHA256`:
+  `python speech.py download-piper` fetches `en_GB-cori-medium` into `piper_model/` over plain
+  HTTPS, verifies each file, and only then moves it into place - so a half or altered download
+  can never be loaded.
+- **Piper's CPU use is bounded by `TTS_THREADS`.** `PiperVoice.load` builds its own onnxruntime
+  session with every core, so `PiperEngine.load` builds the session itself with
+  `intra_op_num_threads = threads` and hands it to `PiperVoice`.
+- **Piper's polish is an FFmpeg step that may be missing, and speech must survive that.**
+  `PiperEngine.load` asks the injected FFmpeg (`music.find_ffmpeg()` passed in by the bot;
+  `speech.py` never imports `music.py`) which filters it has. No FFmpeg, no `rubberband` or no
+  EQ filters each drop that step with one warning; a failed or hung run (`PIPER_FFMPEG_TIMEOUT`)
+  returns the unprocessed audio, once-warned. The chain is built by the pure
+  `piper_filter_chain`; FFmpeg runs without `shell=True` and without a console window.
+- **`piper_text` runs for Piper only**, inside `PiperEngine.synthesize`. It fixes what espeak-ng
+  mispronounces in track lists ("feat.", "#3", "2 min", "1:05", and the `PIPER_NAMES`
+  respellings). Names are respelt, never given as `[[ ... ]]` raw phonemes: Piper drops the full
+  stop after a raw block, and `piper_text` strips `[[` / `]]` so chat text can't inject one.
+  "feat." and "ft." are in `split_sentences`' abbreviations so a credit isn't cut in two before
+  `piper_text` sees it. The engine's output is at the voice's own rate (22.05 kHz);
+  `to_discord_frames` resamples it like any other.
 - **Speech audio is normalised to `PEAK_TARGET`** before it leaves `speech.py`, leaving
   headroom for mixing over music (audio adds saturate rather than wrap).
 - **Speech text is logged at DEBUG only**, like chat, so it never reaches `amy.log`.

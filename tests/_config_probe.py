@@ -60,8 +60,20 @@ print("PROBE_RESULT " + json.dumps({
     "TTS_THREADS": amy.TTS_THREADS,
     "DUCK_LEVEL": amy.DUCK_LEVEL,
     "VOICE_LEVEL": amy.VOICE_LEVEL,
+    "TTS_ENGINE": amy.TTS_ENGINE,
+    "PIPER_VOICE": amy.PIPER_VOICE,
+    "PIPER_LENGTH": amy.PIPER_LENGTH,
+    "PIPER_PITCH": amy.PIPER_PITCH,
+    "PIPER_SOFT": amy.PIPER_SOFT,
+    "engine": amy.speaker.engine.name if amy.speaker is not None else None,
+    "engine_settings": ({"length": amy.speaker.engine.length, "pitch": amy.speaker.engine.pitch,
+                         "soft": amy.speaker.engine.soft, "threads": amy.speaker.engine.threads,
+                         "model_path": amy.speaker.engine.model_path,
+                         "ffmpeg_given": bool(amy.speaker.engine.ffmpeg)}
+                        if amy.speaker is not None and amy.speaker.engine.name == "Piper" else None),
+    "voice_description": amy.describe_voice(),
     "voice_enabled": amy.voice_enabled,
     "speaker_level": amy.speaker.level if amy.speaker is not None else None,
     # Loading is deferred to on_ready; importing the bot must never pull PyTorch in.
-    "torch_imported": "torch" in sys.modules or "kokoro" in sys.modules,
+    "torch_imported": any(m in sys.modules for m in ("torch", "kokoro", "piper", "onnxruntime")),
 }))

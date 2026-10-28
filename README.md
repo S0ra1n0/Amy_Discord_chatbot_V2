@@ -472,7 +472,7 @@ naming it, without printing either value.
 - `AMY_LOG_FILE` is Amy's log file, `amy.log` by default. Everything the console shows at INFO and above is also written there with a timestamp, and it rotates at about 1MB, keeping 5 old files (`amy.log.1` … `amy.log.5`), so a problem overnight leaves a trace after the console window has closed. The console's DEBUG lines — which include the text of every chat message — are deliberately **not** written to the file. Set it blank to turn the file off.
 - `FFMPEG_PATH` is optional. Leave it blank to find FFmpeg on PATH; set it to the full path of `ffmpeg.exe` if PATH isn't picking it up (see Step 6).
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
-- `TTS`, `AMY_VOICE`, `TTS_SPEED`, `TTS_THREADS`, `DUCK_LEVEL`, `VOICE_LEVEL` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
+- `TTS`, `TTS_ENGINE`, `AMY_VOICE`, `TTS_SPEED`, `PIPER_VOICE`, `PIPER_LENGTH`, `PIPER_PITCH`, `PIPER_SOFT`, `TTS_THREADS`, `DUCK_LEVEL`, `VOICE_LEVEL` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
 
 ### Step 5: Enable the Server Members Intent (required)
 
@@ -576,6 +576,22 @@ Then set `TTS=on` in `.env` and restart. The voice loads in the background after
 - **One sentence at a time.** She starts after the first sentence is ready rather than waiting for the whole reply, and a backlog longer than 30 seconds drops its oldest sentences instead of talking for minutes. `/stop`, `/leave` and Amy leaving the call silence her; `/skip`, `/seek` and `/previous` don't, so a sentence carries on over the next song.
 - **Licences:** Kokoro is Apache-2.0. Its English text handling bundles espeak-ng, which is GPL-3.0 — fine for running your own bot; it would matter only if you distributed the bot as a package.
 
+#### Another voice: Piper (optional)
+
+Amy can use a second, lighter speech engine, [Piper](https://github.com/OHF-Voice/piper1-gpl), in place of Kokoro. It is a small install (about 100 MB, no PyTorch), a short sentence takes about a quarter of a second, and its voice here is **cori**, a British English female voice. Kokoro stays the default; Piper is opt-in.
+
+```bash
+pip install -r requirements-piper.txt
+python speech.py download-piper
+```
+
+Then, in `.env`, keep `TTS=on` and add `TTS_ENGINE=piper`, and restart. To go back to Kokoro, delete that line or set `TTS_ENGINE=kokoro`, and restart; an unrecognised value logs a warning and uses Kokoro. (You can install both engines in the same `.venv`; the pins match, so neither moves the other's packages.) The voice file is fetched from one pinned revision into `piper_model/` (Git ignored) and checked against its SHA-256 before use, and after that Amy never contacts the internet for it.
+
+- **What is tuned:** the voice files are only the raw voice. Amy's sound, chosen by ear on 2026-10-28, is that voice a little slower (`PIPER_LENGTH=1.10`; above 1.0 is slower, range 0.5 to 2.0), shifted up one semitone with its "body" kept (`PIPER_PITCH=1.0`, in semitones from -4 to 4, `0` turns it off) and with a softened top end (`PIPER_SOFT=on`: a little EQ and a de-esser). These are the defaults, so `TTS_ENGINE=piper` on its own gives the chosen voice. `PIPER_VOICE` points at a different `.onnx` voice file (blank = the cori voice; a relative path is from the bot's folder).
+- **The pitch and soft EQ run through FFmpeg**, which Amy already needs for music. The pitch shift needs an FFmpeg with the `rubberband` filter (the winget "full" build has it). If FFmpeg or a filter is missing, or a run fails, she logs one warning and speaks without that step - she never goes silent over it. `TTS_SPEED` and `AMY_VOICE` belong to Kokoro and are ignored with Piper; `TTS_THREADS` limits both.
+- **Song-list pronunciation.** Piper reads text through espeak-ng, which fumbles some things people type in track lists, so Piper's text is tidied first: "feat." and "ft." become "featuring" (and no longer end the sentence), "#3" becomes "number 3", "2 min" becomes "2 minutes", "1:05" becomes "1 oh 5", and a short list of names is respelt so they sound right (Sade, Måneskin, Einaudi, Beyoncé, Dua Lipa - the `PIPER_NAMES` list in `speech.py`, easy to extend). This does not apply to Kokoro.
+- **Licences:** the Piper program (`piper-tts`) is **GPL-3.0**, while Amy is MIT. That is why it is a separate, optional install that Amy only loads when you choose it - it isn't bundled and isn't in `requirements.txt` (this is information, not legal advice). The cori voice was trained on public-domain LibriVox recordings (its model card says so) and is published in the MIT-licensed `rhasspy/piper-voices` collection.
+
 ## Project Structure
 
 ```
@@ -600,10 +616,13 @@ Amy_chatbot_V2/
 ├── requirements-dev.txt    # + pyright, for running the checks
 ├── requirements-tts.txt    # Optional: the speech engine (Kokoro + CPU PyTorch)
 ├── constraints-tts.txt     # Pinned versions for the speech engine's dependencies
+├── requirements-piper.txt  # Optional: the Piper speech engine (GPL-3.0, separate install)
+├── constraints-piper.txt   # Pinned versions for Piper's dependencies
 ├── .github/workflows/      # CI: offline tests + type check on every push
 ├── amy_memory.db           # SQLite conversation store, auto-created (Git ignored)
 ├── amy.log                 # Rotating log file, auto-created (Git ignored)
 ├── kokoro_model/           # Voice model from `python speech.py download` (Git ignored)
+├── piper_model/            # Piper voice from `python speech.py download-piper` (Git ignored)
 ├── .venv/                  # Virtual environment (Git ignored)
 ├── .vscode/                # Editor settings, points at .venv (Git ignored)
 ├── .env                    # Environment variables (Git ignored)
@@ -623,7 +642,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-26 suites covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+27 suites covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and
@@ -653,7 +672,7 @@ single transaction, keeping all history and settings.
 
 **Amy doesn't speak in the call:**
 
-Run `/voice` (admins) — it says what's wrong. In order: `TTS=on` must be set in `.env` (then restart); the voice must be switched on (`/voice on`); the engine must have loaded (about 10 seconds after login — if it says *failed*, the reason tells you what to run, usually `pip install -r requirements-tts.txt` or `python speech.py download`); and Amy must be in a voice channel. Remember she only speaks her chat replies to people who are in the call with her, and only in English.
+Run `/voice` (admins) — it says what's wrong. In order: `TTS=on` must be set in `.env` (then restart); the voice must be switched on (`/voice on`); the engine must have loaded (about 10 seconds after login — if it says *failed*, the reason tells you what to run, usually `pip install -r requirements-tts.txt` or `python speech.py download`; with `TTS_ENGINE=piper`, `pip install -r requirements-piper.txt` or `python speech.py download-piper`); and Amy must be in a voice channel. Remember she only speaks her chat replies to people who are in the call with her, and only in English.
 
 **Her voice or the music stutters while she talks:**
 
