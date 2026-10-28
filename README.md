@@ -1,10 +1,10 @@
 # Amy Chatbot V2
 
-A sophisticated Discord bot powered by local language models using Ollama. Amy acts as a personal assistant with the demeanor of a professional secretary - calm, courteous and to the point - ready to chat, answer questions, and run slash commands. (Since 2026-10-28 she keeps small talk to a sentence or two and skips the "anything else I can help with?" endings, while still giving full answers to real questions. If her style seems stuck after a change, `/forget` clears the channel's history she copies it from.)
+A sophisticated Discord bot powered by local language models using Ollama. Amy acts as a personal assistant with the demeanor of a professional secretary - calm, courteous and to the point - ready to chat and answer questions; the slash commands below do the rest. (Since 2026-10-28 she keeps small talk to a sentence or two and skips the "anything else I can help with?" endings, while still giving full answers to real questions. If her style seems stuck after a change, `/forget` clears the channel's history she copies it from.)
 
 ## Introduction
 
-Amy is an intelligent personal assistant bot that runs on your Discord server. She provides thoughtful responses with context awareness, remembering recent conversations to provide more relevant answers. Beyond conversation, Amy can execute various commands to perform specific tasks (full command list in 'Available Commands' section).
+Amy is an intelligent personal assistant bot that runs on your Discord server. She provides thoughtful responses with context awareness, remembering recent conversations to provide more relevant answers. Beyond conversation, Amy has slash commands for specific tasks (full list in the 'Available Commands' section).
 
 **Key Features:**
 
@@ -375,9 +375,8 @@ If you just want Amy quieter, prefer Discord's own per-user volume slider (right
 ## How It Runs
 
 1. The bot connects to your Discord server using your bot token
-2. When a message is received:
-   - If it starts with `/`, it's treated as a command and executed
-   - Otherwise, it's passed to Amy who responds using the Ollama model (if the bot is enabled)
+2. Commands come in as Discord slash commands (`/help`, `/play`, ...), not as message text
+   - Any ordinary message is passed to Amy, who responds using the Ollama model (if the bot is enabled)
 3. All conversations are saved to a local SQLite database (`amy_memory.db`) — history persists across restarts
 4. A background task runs every 24 hours and deletes conversation history older than `DB_PRUNE_DAYS` (default 30 days)
 5. Non-admin users are rate-limited to 5 chat messages per hour; excess messages receive a cooldown reply
@@ -386,7 +385,7 @@ If you just want Amy quieter, prefer Discord's own per-user volume slider (right
 8. Use `/toggle` (Admin only) to enable/disable bot chat responses without shutting down the bot. The choice is **saved**, so it survives a restart — if Amy is quiet after a restart, check whether she was toggled off
 9. Use `/status` (Admin only) to check bot state, Ollama connectivity, memory stats, and how many users are currently throttled
 10. Use `/model` (Admin only) to view or switch the active Ollama model at runtime — the new model is validated against Ollama's installed model list before switching. The choice is **saved** and restored on the next start. If it can't be loaded at startup, Amy asks Ollama whether it's still installed: only a model Ollama confirms is gone is replaced by the default, and only for that run — your saved choice is kept, so reinstalling the model brings it back. If Ollama simply isn't up yet (both starting at login, say), she keeps your choice and loads it on the first reply
-11. Use `/clear` (Admin only) to wipe conversation memory for a channel — Amy will ask for emoji confirmation first
+11. Use `/forget` (Admin only) to wipe conversation memory for a channel — Amy asks you to confirm with a button first
 12. Use `/join`, `/create` and `/leave` to control which voice channel Amy sits in; she auto-leaves 60s after the last person departs
 13. `/play` queues music and pulls Amy into your voice channel if she isn't already there; the queue advances automatically, and she disconnects 5 minutes after it runs dry
 
@@ -762,9 +761,9 @@ Long queues are not a factor — stream URLs are resolved one track at a time, i
 
 - Make sure you have the Discord role matching `ADMIN_ROLE_NAME` in `.env` (default: `Admin`), or that you are the server owner
 
-**`/clear` confirmation times out:**
+**`/forget` confirmation times out:**
 
-- You have 60 seconds to react with ✅ after typing `/clear`. If it expires, use `/clear` again.
+- You have 60 seconds to press Confirm after `/forget`. If it expires, run `/forget` again.
 
 **"Dice must have at least 1 side" error:**
 
@@ -772,14 +771,14 @@ Long queues are not a factor — stream URLs are resolved one track at a time, i
 
 **Commands not working:**
 
-- Make sure messages start with `/`
+- Pick the command from Discord's `/` autocomplete list - typing it as plain text does nothing
 - Use `/help` to see available commands
 
 ## Notes
 
 - Amy maintains conversation memory per Discord channel, stored persistently in `amy_memory.db`
 - All responses are generated locally using Ollama — no data is sent to external servers
-- Adjust `MAX_MEMORY_MESSAGES` in `database.py` to change how many messages are remembered per channel
+- Adjust `HISTORY_LIMIT` in `.env` to change how many recent messages Amy reads back per channel
 - Adjust `DB_PRUNE_DAYS` in `.env` to change how long conversation history is retained before automatic pruning
 - Messages longer than Discord's 2000-character limit are split across multiple messages automatically — no configuration needed
 - Voice is limited to guild voice channels; Discord does not expose DM or group-DM calls to bots

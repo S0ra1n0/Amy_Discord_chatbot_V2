@@ -77,9 +77,13 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **`piper_text` runs for Piper only**, inside `PiperEngine.synthesize`. It fixes what espeak-ng
   mispronounces in track lists ("feat.", "#3", "2 min", "1:05", and the `PIPER_NAMES`
   respellings). Names are respelt, never given as `[[ ... ]]` raw phonemes: Piper drops the full
-  stop after a raw block, and `piper_text` strips `[[` / `]]` so chat text can't inject one.
+  stop after a raw block, and `piper_text` strips every `[` and `]` (stripping pairs in one
+  pass let `[]][x][[]` rebuild a block) so chat text can't inject one.
   "feat." and "ft." are in `split_sentences`' abbreviations so a credit isn't cut in two before
-  `piper_text` sees it. The engine's output is at the voice's own rate (22.05 kHz);
+  `piper_text` sees it - including "(feat." / "[ft.", which is why the last word is compared
+  with any opening bracket stripped. Known, accepted edges of the "featuring" rewrite: a
+  capitalised word before "Feat." ("a Great Feat. Next...") is read as a credit, and lower-case
+  artists ("feat. bbno$") or "Song 2 feat. X" are left as "feat". The engine's output is at the voice's own rate (22.05 kHz);
   `to_discord_frames` resamples it like any other.
 - **Speech audio is normalised to `PEAK_TARGET`** before it leaves `speech.py`, leaving
   headroom for mixing over music (audio adds saturate rather than wrap).
@@ -314,7 +318,7 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   Never pass a looser `allowed_mentions` on an individual send. `websearch.neutralise_mentions`
   is the second layer, on web text.
 - **Messages over 2000 characters are rejected outright.** Send plain text through
-  `send_reply`, which splits. `/help` is around 1750 and grows with each command.
+  `send_reply`, which splits. `/help` is around 1,950 - close to the limit, so trim or split it before adding another command.
 - Discord caches the command list client-side. After clearing stale commands, check with the
   API; the client keeps showing them until it is restarted (Ctrl+R).
 

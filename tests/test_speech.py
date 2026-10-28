@@ -95,6 +95,12 @@ for label, text, want in [
      ["Now playing Firestone, by Kygo, feat. Conrad Sewell.", "Enjoy it while it lasts."]),
     ("'ft.' doesn't split a credit", "Now playing Get Lucky ft. Pharrell Williams. Enjoy it while it lasts.",
      ["Now playing Get Lucky ft. Pharrell Williams.", "Enjoy it while it lasts."]),
+    ("a bracketed '(feat.' doesn't split a credit",
+     "I recommend Levitating (feat. DaBaby) by Dua Lipa. Enjoy it while it lasts.",
+     ["I recommend Levitating (feat. DaBaby) by Dua Lipa.", "Enjoy it while it lasts."]),
+    ("a bracketed '[ft.' doesn't split a credit",
+     "Next up is Laugh Now Cry Later [ft. Lil Durk] by Drake. Enjoy it while it lasts.",
+     ["Next up is Laugh Now Cry Later [ft. Lil Durk] by Drake.", "Enjoy it while it lasts."]),
     ("nothing in, nothing out", "   ", []),
 ]:
     got = S(text)
@@ -523,6 +529,11 @@ check("...and says the polish is now off until restart", "until restart" in warn
 out2, warns2 = with_fake_run(hung_counting, lambda: eng.synthesize("Hello again."))
 check("...so the next sentence doesn't wait for FFmpeg again", len(hung_calls) == 1 and out2 == plain
       and eng.chain is None, (len(hung_calls), eng.chain))
+eng = loaded_engine("x")
+with_fake_run(failing_ffmpeg, lambda: eng.synthesize("Hello there."))   # uses up the one warning
+_, warns = with_fake_run(hung, lambda: eng.synthesize("Hello again."))
+check("a timeout after an earlier, different failure still logs that the polish is off",
+      len(warns) == 1 and "until restart" in warns[0], warns)
 
 print()
 print("=== download-piper checks what it fetched ===")

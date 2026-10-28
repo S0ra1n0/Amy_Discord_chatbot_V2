@@ -62,7 +62,11 @@ async def main():
     check("the voice's own sample rate is used (22050 Hz)", engine.rate == 22050, engine.rate)
     check("TTS_THREADS bounds onnxruntime's threads",
           engine._voice.session.get_session_options().intra_op_num_threads == THREADS)
-    check("no warnings while loading", not warnings.messages, warnings.messages)
+    # An FFmpeg build without rubberband (or the EQ filters) is supported: Amy warns and skips
+    # that part. Only other warnings mean something is wrong.
+    unexpected = [m for m in warnings.messages
+                  if "no rubberband filter" not in m and "skipping the soft EQ" not in m]
+    check("no unexpected warnings while loading", not unexpected, unexpected)
 
     if ffmpeg:
         check("with FFmpeg, a filter chain was planned", engine.chain is not None, engine.chain)

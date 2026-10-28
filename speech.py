@@ -208,7 +208,8 @@ def split_sentences(text: str) -> List[str]:
     carry = ""
     for piece in pieces:
         current = (carry + " " + piece).strip() if carry else piece
-        last_word = current.rsplit(" ", 1)[-1].lower()
+        # An opening bracket stays attached to the word: "(feat." must still count as "feat."
+        last_word = current.rsplit(" ", 1)[-1].lower().lstrip("([{\"'")
         if last_word in _ABBREVIATIONS or len(current) < MIN_SENTENCE_CHARS:
             carry = current
             continue
@@ -645,8 +646,12 @@ class PiperEngine(SpeechEngine):
         except subprocess.TimeoutExpired:
             # A hung FFmpeg would otherwise stall every sentence for the full timeout on the
             # one speech thread. Switch the polish off until restart.
+            # Logged on its own, not behind the once-only flag: an earlier, different failure
+            # mustn't hide from amy.log that the polish has now been switched off.
             self.chain = None
-            reason = f"timed out after {PIPER_FFMPEG_TIMEOUT:.0f}s; post-processing is now off until restart"
+            log.warning(f"Piper: FFmpeg timed out after {PIPER_FFMPEG_TIMEOUT:.0f}s - speaking "
+                        "unprocessed, post-processing is now off until restart")
+            return pcm
         except (OSError, subprocess.SubprocessError) as e:
             reason = str(e) or type(e).__name__
         if not self._ffmpeg_warned:

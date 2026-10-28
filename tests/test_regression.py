@@ -289,6 +289,14 @@ for _p in (_on, _off):
     assert "Remember: You are here" in _p, "the persona must survive assembly"
     assert _p.startswith("You are Amy"), "the opening must stay put"
 assert amy.system_prompt == (_on if amy.WEB_SEARCH else _off),     "the live prompt must match the running configuration"
+# Same rule for actions: chat can't run slash commands or keep reminders. The old prompt said
+# "Execute commands when instructed" and "Manage schedules, reminders" - inviting her to say
+# "done, playing it now" when nothing happened.
+_base = amy.BASE_SYSTEM_PROMPT.lower()
+assert "execute commands" not in _base and "reminder" not in _base, \
+    "the prompt must not promise actions chat can't perform"
+assert "cannot run bot actions" in _base and "/play" in _base, \
+    "the prompt must send her to the slash command instead"
 print("system prompt: OK (claims match the tools actually offered)")
 
 # ---- Review M4: a failed warm-up must not lose the admin's saved /model choice ---------

@@ -270,7 +270,6 @@ if not bot_enabled:
 if TTS and not voice_enabled:
     log.info("Restored saved state: voice is OFF (use /voice on to enable)")
 
-# Loaded in the background from on_ready, never here: a cold load takes ~9 seconds.
 def describe_voice() -> str:
     """The active engine's voice and settings, in one line (the log and /voice)."""
     if TTS_ENGINE == "piper":
@@ -287,6 +286,7 @@ def make_engine() -> speech.SpeechEngine:
     return speech.KokoroEngine(AMY_VOICE, speed=TTS_SPEED, threads=TTS_THREADS)
 
 
+# Loaded in the background from on_ready, never here: a cold load takes seconds.
 speaker: Optional[speech.Speaker] = (
     speech.Speaker(make_engine(), level=VOICE_LEVEL) if TTS else None)
 if speaker is not None:
