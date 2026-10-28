@@ -256,7 +256,7 @@ check("the shipped default is 25% below full", speech.DEFAULT_VOICE_LEVEL == 0.7
 print()
 print("=== Amy's chosen voice (Phase 1E) ===")
 check("the default is the blend chosen in the voice lab",
-      speech.DEFAULT_RECIPE == [("af_heart", 0.4), ("af_bella", 0.6)] and speech.DEFAULT_SPEED == 1.1)
+      speech.DEFAULT_RECIPE == [("af_heart", 0.4), ("af_bella", 0.6)] and speech.DEFAULT_SPEED == 1.05)
 check("its weights add up to 1", abs(sum(w for _, w in speech.DEFAULT_RECIPE) - 1.0) < 1e-9)
 check("it parses back to itself from the .env form",
       speech.parse_voice_recipe("af_heart:0.4,af_bella:0.6") == (speech.DEFAULT_RECIPE, None))

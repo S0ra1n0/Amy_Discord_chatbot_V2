@@ -195,7 +195,7 @@ Recipe = List[Tuple[str, float]]
 # 15 English female voices to a shortlist (heart, bella, isabella) to this blend of the two
 # top-graded ones (A and A-), with no accent mismatch. Used when AMY_VOICE is unset or invalid.
 DEFAULT_RECIPE: Recipe = [("af_heart", 0.4), ("af_bella", 0.6)]
-DEFAULT_SPEED = 1.1
+DEFAULT_SPEED = 1.05
 DEFAULT_RECIPE_NAME = "Amy's default voice (af_heart 40% + af_bella 60%)"
 
 
