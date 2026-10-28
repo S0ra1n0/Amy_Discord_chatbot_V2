@@ -56,6 +56,7 @@ kokoro_model/
 # Agent working notes - local only, not for people pulling the repo
 CLAUDE.md
 TTS_PLAN.md
+ROADMAP.md
 AGENTS.md
 .claude/
 
