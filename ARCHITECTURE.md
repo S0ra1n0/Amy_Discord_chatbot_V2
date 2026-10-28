@@ -346,6 +346,8 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **The system prompt must match the tools actually offered.** It once claimed a search tool
   unconditionally; with `WEB_SEARCH=false` Amy answered current-events questions from memory
   9 times out of 9 without saying she couldn't check. `build_system_prompt` assembles it.
+  The same goes for actions: chat can't run slash commands, so `BASE_SYSTEM_PROMPT` tells her
+  to name the command (e.g. `/play`) rather than claim it's done, and claims no reminders.
 - **Don't tell the model it has no internet.** "You do not know current events" made it say
   it couldn't access the web in 2 of 5 runs while holding search results. Saying it has a
   working search tool: 0 of 5.

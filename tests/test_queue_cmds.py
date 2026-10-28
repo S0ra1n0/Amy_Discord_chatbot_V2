@@ -1426,8 +1426,11 @@ try:
     p, vc, g, it = tts_setup(7103)
     it_owner = Interaction(owner, Guild(OWNER, owner, vc, guild_id=7103))
     out = slash("voice", it_owner, None)
+    # The active voice, whichever engine the developer's .env picks - a hard-coded Kokoro
+    # name failed as soon as .env said TTS_ENGINE=piper. Each engine's wording is pinned
+    # with controlled settings in test_config.
     check("/voice shows the status", "Voice: on" in out and "Engine: ready" in out
-          and "af_heart" in out, out)
+          and amy.describe_voice() in out, out)
     p.speech.add([b"\x00" * 3840] * 5)
     out = slash("voice", Interaction(owner, it_owner.guild),
                 app_commands.Choice(name="off", value="off"))

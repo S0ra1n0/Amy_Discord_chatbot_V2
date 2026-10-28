@@ -1,6 +1,6 @@
 # Amy Chatbot V2
 
-A sophisticated Discord bot powered by local language models using Ollama. Amy acts as a personal assistant with the demeanor of a professional secretary, ready to chat, answer questions, and execute commands.
+A sophisticated Discord bot powered by local language models using Ollama. Amy acts as a personal assistant with the demeanor of a professional secretary - calm, courteous and to the point - ready to chat, answer questions, and run slash commands. (Since 2026-10-28 she keeps small talk to a sentence or two and skips the "anything else I can help with?" endings, while still giving full answers to real questions. If her style seems stuck after a change, `/forget` clears the channel's history she copies it from.)
 
 ## Introduction
 
