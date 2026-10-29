@@ -84,7 +84,8 @@ print("=== slow commands defer (Discord's 3-second response limit) ===")
 # yt-dlp resolution and ollama.list() both take longer than 3s; without a defer the
 # interaction fails with "application did not respond".
 for name in ("play", "search", "status", "join", "leave", "create", "model",
-             "seek", "replay"):     # both re-resolve the stream URL before restarting
+             "seek", "replay",     # both re-resolve the stream URL before restarting
+             "lyrics"):      # asks LRCLIB over the network
     src = inspect.getsource(by_name[name].callback)
     check("/%-8s defers before slow work" % name, "response.defer(" in src)
 

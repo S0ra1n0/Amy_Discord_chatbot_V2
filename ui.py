@@ -7,7 +7,7 @@ the same property that makes music.render_queue and voice.decide_join_action tes
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import discord
 
@@ -188,6 +188,25 @@ def search_web_embed(query: str, results) -> discord.Embed:
         description=_clip(chr(10).join(lines), MAX_EMBED_DESC), colour=COLOUR_INFO)
     embed.set_author(name="Web search: %s" % _clip(query, 200))
     return embed
+
+
+def lyrics_embeds(heading: str, pages: List[str], truncated: bool,
+                  continues_note: str) -> List[discord.Embed]:
+    """
+    One embed per page of lyrics, titled with the matched "Artist - Title" so a wrong match is
+    visible. Sent one per message: Discord caps the TOTAL text of a message's embeds at 6000.
+    """
+    embeds = []
+    for i, page in enumerate(pages, start=1):
+        text = page
+        if truncated and i == len(pages):
+            text = "%s\n\n*%s*" % (page, continues_note)
+        suffix = " (%d/%d)" % (i, len(pages)) if len(pages) > 1 else ""
+        embed = discord.Embed(title=_clip(heading, MAX_EMBED_TITLE - len(suffix)) + suffix,
+                              description=_clip(text, MAX_EMBED_DESC), colour=COLOUR_INFO)
+        embed.set_footer(text="Lyrics from LRCLIB")
+        embeds.append(embed)
+    return embeds
 
 
 def voice_embed(description: str, colour: int = COLOUR_OK, heading: str = "Voice") -> discord.Embed:

@@ -16,6 +16,7 @@ one guards against.
 | `voice.py` | Voice connections and the join/restore decision tables | discord |
 | `ui.py` | Embeds, progress bar, the `Reply` wrapper | discord |
 | `websearch.py` | DuckDuckGo search, page fetching, the `web_search` tool definition | httpx |
+| `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
 | `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
@@ -354,9 +355,29 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   Never pass a looser `allowed_mentions` on an individual send. `websearch.neutralise_mentions`
   is the second layer, on web text.
 - **Messages over 2000 characters are rejected outright.** Send plain text through
-  `send_reply`, which splits. `/help` is around 1,950 - close to the limit, so trim or split it before adding another command.
+  `send_reply`, which splits. `/help` is around 1,970 - close to the limit, so trim or split it before adding another command.
 - Discord caches the command list client-side. After clearing stale commands, check with the
   API; the client keeps showing them until it is restarted (Ctrl+R).
+
+## Lyrics
+
+- **Lyrics come from LRCLIB through `lyrics.py` only**, with the same rules as the other
+  network code: `search_lrclib` is bounded by one overall `TIMEOUT` (httpx's own limits are per
+  read), sends a descriptive User-Agent, and turns every failure into `LyricsError`; the command
+  logs it at WARNING and answers politely, so a lookup can never crash a command. "No match" is
+  `None`, not an error. Tests fake `lyrics.search_lrclib`; nothing reaches the network.
+- **The match is shown, never assumed.** `choose_result` prefers the record within
+  `DURATION_TOLERANCE` seconds of the track's length (else the first usable); `find_lyrics` with a
+  known duration keeps searching (the free-text `q` after the artist pair) until a record is
+  within tolerance, and only then falls back to the first attempt's guess. And the embed is
+  titled with the matched "Artist - Title". Matching covers and remixes wrongly is expected.
+- **One embed per message.** Discord caps the total text of a message's embeds at 6000
+  characters, so three 4000-character pages in one message would be rejected; `music_lyrics`
+  sends each page as its own follow-up (`lyric_pages` caps at `MAX_PAGES`).
+- **Lyrics text is escaped before it is split** (`escape_markdown` inside `lyric_pages`): records
+  are community-submitted, and a masked link or spoiler would otherwise render. Escaping adds
+  characters, so splitting first could push a page over the embed limit.
+- **Lyrics are never spoken** and never go to the model: `music_lyrics` has no `announce`.
 
 ## The model (Ollama)
 

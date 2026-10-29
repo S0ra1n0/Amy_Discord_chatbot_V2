@@ -3,10 +3,8 @@
 
 HELP_EVERYONE = """**Commands — Everyone:**
 `/help` - Display command list and usage
-`/dice [sides] [amount]` - Roll dice (defaults to one 6-sided)
-  • Usage: `/dice`, `/dice 20`, or `/dice 6 3`
-`/rng [min] [max]` - Generate a random number between min and max
-  • Usage: `/rng 0 999`
+`/dice [sides] [amount]` - Roll dice (default: one 6-sided)
+`/rng [min] [max]` - Random number between min and max
 `/websearch [query] [recency]` - Search the web and show the results
   • Optional recency: past day, week, month or year
   • I also search on my own when needed
@@ -28,6 +26,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/skipto [position]` - Jump ahead to a queued track
 `/shuffle` - Shuffle the queued tracks
 `/nowplaying` - Show the current track
+`/lyrics [song]` - Lyrics for the current track, or search one
 `/loop [off|track|queue]` - Set repeat mode
 `/autoplay [on|off]` - Play related songs when the queue ends"""
 

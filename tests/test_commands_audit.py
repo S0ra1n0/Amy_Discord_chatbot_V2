@@ -45,7 +45,7 @@ expected = [
     "help", "dice", "rng", "join", "leave", "create", "play", "search",
     "pause", "resume", "skip", "stop", "queue", "nowplaying", "remove",
     "skipto", "shuffle", "loop", "clearqueue", "volume", "toggle", "status",
-    "model", "forget",
+    "model", "forget", "lyrics",
 ]
 for name in expected:
     check("/%s registered" % name, command(name) is not None)

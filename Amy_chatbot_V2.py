@@ -30,6 +30,7 @@ import music
 import mixer
 from music import LoopMode, MusicManager
 import websearch
+import lyrics
 import llm
 import logs
 import models
@@ -1783,6 +1784,44 @@ def _shown(query: str) -> str:
     return query if len(query) <= 100 else query[:100] + "..."
 
 
+async def music_lyrics(ctx: MusicContext, song: str = "") -> MusicResult:
+    """
+    Lyrics for the current track, or for `song` ("artist - title"). Network, so the slash
+    command defers first. Public like /queue; never spoken. Sends the pages itself (one
+    embed per message: Discord caps a message's embeds at 6000 characters in total).
+    """
+    song = song.strip()
+    duration: Optional[float] = None
+    asked = song
+    if song:
+        terms = lyrics.search_terms(song)
+    else:
+        current = ctx.player.current
+        if current is None:
+            return _info("Nothing is playing right now. "
+                         "Try `/lyrics <artist - title>` to look a song up.")
+        terms = lyrics.search_terms(current.title)
+        duration = current.duration
+        asked = current.title
+    try:
+        found = await lyrics.find_lyrics(terms, duration)
+    except lyrics.LyricsError as e:
+        log.warning("Lyrics lookup failed for %r: %s", terms.shown, e)
+        return _error("I couldn't reach the lyrics service just now. Try again in a moment.")
+    if found is None:
+        return _error("Couldn't find lyrics for **%s** (I searched for `%s`). "
+                      "Try `/lyrics <artist - title>`."
+                      % (_shown(asked.replace("**", "")),
+                         _shown(terms.shown.replace("`", "'"))))
+    if found.text is None:
+        return Reply(embed=ui.info_embed("**%s** is an instrumental, so there are no lyrics."
+                                         % _shown(found.heading), heading="Lyrics"))
+    pages, truncated = lyrics.lyric_pages(found.text)
+    for embed in ui.lyrics_embeds(found.heading, pages, truncated, lyrics.CONTINUES_NOTE):
+        await ctx.interaction.followup.send(embed=embed)
+    return ""
+
+
 async def music_search(ctx: MusicContext, query: str) -> MusicResult:
     query = query.strip()
     if not query:
@@ -2515,6 +2554,18 @@ async def slash_search(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     await send_reply(interaction,
                      await music_search(MusicContext.build(interaction, guild), query))
+
+
+@tree.command(name="lyrics", description="Show lyrics for the current song, or search for one")
+@app_commands.describe(song="Song to look up, like 'artist - title' (empty = the current track)")
+@app_commands.guild_only()
+async def slash_lyrics(interaction: discord.Interaction, song: str = "") -> None:
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer()
+    await send_reply(interaction,
+                     await music_lyrics(MusicContext.build(interaction, guild), song))
 
 
 @tree.command(name="pause", description="Pause playback")

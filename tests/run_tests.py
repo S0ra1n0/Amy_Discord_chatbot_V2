@@ -27,6 +27,7 @@ OFFLINE = [
     "test_voice.py",
     "test_ui.py",
     "test_queue_mgmt.py",
+    "test_lyrics.py",
     "test_queue_cmds.py",
     "test_autoplay.py",
     "test_voice_cmds.py",

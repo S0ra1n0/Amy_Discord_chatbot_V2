@@ -64,6 +64,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/shuffle`               | Shuffle the queued tracks (current track keeps playing)                   | In-channel |
 | `/clearqueue`            | Empty the queue without stopping the current track                        | Admin only |
 | `/nowplaying`            | Show the current track                                                    | Everyone   |
+| `/lyrics [song]`         | Show lyrics for the current track, or search for `artist - title`         | Everyone   |
 | `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
 | `/autoplay [on\|off]` | Keep playing related songs when the queue ends (remembered; no argument shows it) | In-channel |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
@@ -278,6 +279,27 @@ and either starts playing or adds it to the queue.
 > If the dropdown won't let you click it, the search has expired — run `/search` again.
 > The window was **60 seconds** in earlier versions, which could run out while you were
 > still reading the results.
+
+### Lyrics
+
+`/lyrics` shows the lyrics of the track that is playing; `/lyrics <artist - title>` looks up any
+song (you don't need to be in a voice channel for that). They come from
+[LRCLIB](https://lrclib.net), a free community database that needs no key, and the footer of
+every lyrics card says so. The card is titled with the song that was matched, so you can see at a
+glance when it's wrong - and it sometimes is, especially for covers, remixes and fan versions
+(a "Heat Abnormal (English Cover)" finds the original's lyrics). If it picks the wrong song,
+give it the artist and title yourself.
+
+Track titles are tidied before searching: brackets such as `(Official Video)` or `【...】`, a
+`feat.` credit and anything after `|` are dropped, and `Artist - Song` is split into artist and
+song. When Amy knows the track's length she prefers a match within 5 seconds of it - from either of
+her two searches (artist + title, then free text) - so a live cut or a 10-hour loop loses to the
+studio version whenever one turns up; if none is that close she shows the first result. Lyrics are shown as plain text (markdown in them, such as links or `*stars*`, is escaped so it
+appears literally). Plain lyrics are preferred; synced-only entries
+have their timestamps removed; instrumentals say so. Long lyrics are sent as up to 3 cards (about
+12,000 characters) and then point to lrclib.net. Like `/queue`, the answer is public. If LRCLIB
+is slow or down (8 second limit) you get a friendly message and the bot carries on. Amy never
+reads lyrics out loud.
 
 ### Position, seeking and replay
 
@@ -611,6 +633,7 @@ Amy_chatbot_V2/
 ├── music.py                # Track resolution, queues, and playback engine
 ├── ui.py                   # Embed builders and the reply wrapper
 ├── websearch.py            # DuckDuckGo search and the web_search tool
+├── lyrics.py               # /lyrics: title cleanup, LRCLIB lookup, paging
 ├── llm.py                  # Reasoning modes, model choice, system prompt (pure helpers)
 ├── config.py               # Reading settings: warns on bad values instead of crashing
 ├── models.py               # Which Ollama model is active: /model, probing, warm-up
@@ -647,11 +670,11 @@ code depends on (threading, playback state, Discord limits, model quirks) and wh
 ## Testing
 
 ```bash
-python tests/run_tests.py             # offline suites only (~20s)
+python tests/run_tests.py             # offline suites only (~50s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-28 suites covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+29 suites (21 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and

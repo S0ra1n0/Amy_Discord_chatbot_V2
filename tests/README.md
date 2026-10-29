@@ -26,7 +26,7 @@ import without one, and the offline tests never connect).
 ## Running
 
 ```bash
-python tests/run_tests.py             # offline only (~20s) — safe to run anywhere
+python tests/run_tests.py             # offline only (~50s) — safe to run anywhere
 python tests/run_tests.py --network   # + suites that reach YouTube and FFmpeg
 python tests/run_tests.py --live      # + starts the real bot against Discord
 python tests/run_tests.py --all       # everything
@@ -54,6 +54,7 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | `test_security.py` | the `MUSIC_DIR` sandbox — path traversal must stay blocked |
 | `test_commands_audit.py` | `/dice` caps, removed commands, `/stop` staying connected |
 | `test_slash.py` | the slash-command tree: naming rules, descriptions, bounds, admin gating, 3s defers |
+| `test_lyrics.py` | `/lyrics`: title -> artist/song terms (brackets, `【】`, feat., dashes), choosing a LRCLIB record (duration within 5 s, plain vs synced, instrumental, empty), timestamp stripping, page splitting and the 3-page cap, the HTTP call over `httpx.MockTransport` (503, bad JSON, hang), and `find_lyrics` preferring an in-tolerance record from either search, markdown escaping that keeps pages within the limit, the command end to end with the search faked (nothing playing, current track, explicit query, not found, timeout logged at WARNING, long song). Mutation-checked: duration choice, splitter limits, the usable-record filter, the not-found message |
 | `test_websearch.py` | result parsing, page-text extraction, domain dedup, recency inference, the tool contract |
 | `test_config.py` | parsing settings (bad values warn and fall back), and loading them end to end in a fresh process per scenario: `.env` values actually take effect, and a setting shadowed by the system environment is reported without leaking its value; `TTS_ENGINE` defaults to Kokoro, `TTS_ENGINE=piper` builds the Piper engine with the chosen voice's defaults and passes the `PIPER_*` settings and `TTS_THREADS` through, Piper is described without Kokoro-only settings, and startup imports no torch, kokoro, piper or onnxruntime; the startup log names the engine once ("Voice on: Piper ...", not "Piper, Piper") |
 | `test_llm.py` | `llm.py` on its own, with no bot, client or database: reasoning modes, leak detection, probe judging, startup model choice, system prompt assembly. Fails if importing `llm` pulls in Discord or Ollama |
