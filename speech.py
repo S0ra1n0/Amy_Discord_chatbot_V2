@@ -90,14 +90,14 @@ PIPER_SHA256 = {
     PIPER_VOICE_NAME + ".onnx": "1899f98e5fb8310154f3c2973f4b8a929ba7245e722b3d3a85680b833d95f10d",
     PIPER_VOICE_NAME + ".onnx.json": "e262c16d7f192f69d4edd6b4ef8a5915379e67495fcc402f1ab15eeb33da3d36",
 }
-# Amy's Piper voice, chosen by ear on 2026-10-28 (TTS_PLAN.md, T0.1 route 2): a little slower
-# than the model's own pace, a semitone up with the formants (the "body" of the voice) kept,
-# and a softened top end. noise_scale / noise_w are how much random variation the model adds
-# to the sound and to the rhythm; they stay fixed.
-DEFAULT_PIPER_LENGTH = 1.10          # length_scale: above 1 = slower
-DEFAULT_PIPER_PITCH = 1.0            # semitones; 0 = leave the pitch alone
-PIPER_NOISE_SCALE = 0.5
-PIPER_NOISE_W = 0.5
+# Amy's Piper voice, chosen by ear on 2026-10-28 (TTS_PLAN.md, T0.1 route 2), re-tuned
+# 2026-10-29 (route 3): steadier (less random variation), no pitch shift, slightly faster, with
+# a softened top end. noise_scale / noise_w are how much random variation the model adds to
+# the sound and to the rhythm; lower = steadier. They stay fixed.
+DEFAULT_PIPER_LENGTH = 1.05          # length_scale: above 1 = slower
+DEFAULT_PIPER_PITCH = 0.0            # semitones; 0 = leave the pitch alone (no rubberband step)
+PIPER_NOISE_SCALE = 0.333
+PIPER_NOISE_W = 0.333
 PIPER_FFMPEG_TIMEOUT = 20.0          # seconds, for one sentence through the filter chain
 
 
@@ -306,7 +306,7 @@ def resolve_piper_path(raw: Optional[str]) -> str:
 
 
 def format_piper(model_path: str, length: float, pitch: float, soft: bool) -> str:
-    """'Piper en_GB-cori-medium (length 1.10, pitch +1.0 st, soft EQ)', for /voice and the log."""
+    """'Piper en_GB-cori-medium (length 1.05, pitch unchanged, soft EQ on)', for /voice and the log."""
     name = os.path.basename(model_path)
     if name.endswith(".onnx"):
         name = name[:-5]

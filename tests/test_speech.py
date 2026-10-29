@@ -224,14 +224,19 @@ check("a relative path is from the project",
 absolute = os.path.join(tempfile.gettempdir(), "x.onnx")
 check("an absolute path is kept", speech.resolve_piper_path(absolute) == os.path.normpath(absolute))
 check("format: the shipped defaults",
-      speech.format_piper(speech.PIPER_MODEL, 1.1, 1.0, True)
-      == "Piper en_GB-cori-medium (length 1.10, pitch +1.0 st, soft EQ on)")
+      speech.format_piper(speech.PIPER_MODEL, 1.05, 0.0, True)
+      == "Piper en_GB-cori-medium (length 1.05, pitch unchanged, soft EQ on)")
+check("format: a pitch shift is shown",
+      speech.format_piper(speech.PIPER_MODEL, 1.05, 1.0, True)
+      == "Piper en_GB-cori-medium (length 1.05, pitch +1.0 st, soft EQ on)")
 check("format: no pitch, no soft EQ",
       speech.format_piper("x/voice.onnx", 1.0, 0.0, False)
       == "Piper voice (length 1.00, pitch unchanged, soft EQ off)")
 check("the code defaults reproduce the chosen voice",
-      speech.DEFAULT_PIPER_LENGTH == 1.10 and speech.DEFAULT_PIPER_PITCH == 1.0
-      and speech.PIPER_NOISE_SCALE == 0.5 and speech.PIPER_NOISE_W == 0.5)
+      speech.DEFAULT_PIPER_LENGTH == 1.05 and speech.DEFAULT_PIPER_PITCH == 0.0
+      and speech.PIPER_NOISE_SCALE == 0.333 and speech.PIPER_NOISE_W == 0.333)
+check("...and with the default pitch the chain has no rubberband step, only the soft EQ",
+      "rubberband" not in (speech.piper_filter_chain(speech.DEFAULT_PIPER_PITCH, True, True) or ""))
 
 print()
 print("=== piper_text: what espeak mispronounces ===")
@@ -292,7 +297,7 @@ print("=== piper_filter_chain ===")
 F = speech.piper_filter_chain
 SOFT = "equalizer=f=4500:t=q:w=1:g=-3,highshelf=f=6500:g=-3,deesser=i=0.4:m=0.5:f=0.5:s=o"
 PITCH = "rubberband=pitch=1.059463:formant=preserved"
-check("the chosen voice: +1 semitone with formants kept, then the soft EQ",
+check("a +1 semitone shift with formants kept, then the soft EQ",
       F(1.0, True, True) == PITCH + "," + SOFT, F(1.0, True, True))
 check("pitch only", F(1.0, False, True) == PITCH)
 check("soft only (pitch 0)", F(0.0, True, True) == SOFT)
