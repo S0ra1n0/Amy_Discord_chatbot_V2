@@ -405,7 +405,10 @@ never filtered. Presets:
 With no argument `/filter` shows the current one. Changing it while a song plays **restarts
 that song from where it is** with the new sound (a second or two of the stream is re-fetched,
 so you may hear a short repeat or gap, and Amy says "Switching to nightcore"); with nothing
-playing it is just stored for the next song. It then applies to every song until you change
+playing (or a track that can't be rebuilt, such as one without a link) it is just stored for the
+next song, and Amy says it will be on for the next song rather than that it changed. Two people
+choosing the same filter at once restart the song only once. If the restart itself fails, Amy
+says whether the song is still playing as it was or stopped. It then applies to every song until you change
 it, and is reset by `/leave`, **not** by `/stop`. It is not saved across a bot restart. Who may
 use it: the same people as `/loop` (in Amy's channel, or an admin). The player card shows a
 **Filter** field while one is on.

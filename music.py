@@ -856,13 +856,11 @@ class GuildPlayer:
         self.paused_at: Optional[float] = None
         self.seek_offset: float = 0.0
         # Audio filter (/filter): a FILTER_PRESETS name, kept across songs until changed or
-        # Amy leaves (reset); in memory only. `rate` is the speed of the source that is
-        # playing NOW (set by mark_started) - it can differ from the preset for the moment
-        # between a /filter and the restart that applies it.
+        # Amy leaves (reset); in memory only.
         self.filter_name: str = FILTER_OFF
-        self.rate: float = 1.0
         # The filter the playing source was BUILT with (set by _start). What the card shows
-        # and what `rate` belongs to; `filter_name` is only what the NEXT source will use.
+        # and what `rate` derives from; `filter_name` is only what the NEXT source will use
+        # (they differ for the moment between a /filter and the restart that applies it).
         self.active_filter: str = FILTER_OFF
         # One-shot, set when a saved queue is restored so the first track picks up where it
         # left off. Consumed by the next advance, like skip_requested.
@@ -878,13 +876,16 @@ class GuildPlayer:
         self.idle_task = None
 
     #----Position------
-    def mark_started(self, offset: float = 0.0, now: Optional[float] = None,
-                     rate: float = 1.0) -> None:
-        """A source just began playing, `offset` track seconds in, at speed `rate`."""
+    @property
+    def rate(self) -> float:
+        """Track seconds per wall second of the source playing NOW (its active_filter's)."""
+        return filter_rate(self.active_filter)
+
+    def mark_started(self, offset: float = 0.0, now: Optional[float] = None) -> None:
+        """A source just began playing, `offset` track seconds in (set active_filter first)."""
         self.started_at = time.monotonic() if now is None else now
         self.paused_at = None
         self.seek_offset = max(0.0, offset)
-        self.rate = rate
 
     def mark_paused(self, now: Optional[float] = None) -> None:
         """Freeze the clock. Ignored if already paused, so a double pause can't rewind."""
@@ -909,7 +910,6 @@ class GuildPlayer:
         self.started_at = None
         self.paused_at = None
         self.seek_offset = 0.0
-        self.rate = 1.0
         self.active_filter = FILTER_OFF
 
     def position(self, now: Optional[float] = None) -> float:
@@ -1173,8 +1173,8 @@ def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
             voice_client.stop()
         source = mixer.Mixer(source, player.speech, player.duck, player.on_hold_done)
     voice_client.play(source, after=on_finished)
-    player.mark_started(start_at, rate=filter_rate(filter_name))
     player.active_filter = filter_name
+    player.mark_started(start_at)
     log.info(f"Now playing: {track.title}"
              + (f" (from {format_duration(int(start_at))})" if start_at else "")
              + (f" [{filter_name}]" if filter_chain(filter_name) else ""))

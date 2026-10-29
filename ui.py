@@ -113,6 +113,20 @@ def now_playing_embed(
     return embed
 
 
+def player_card(player: music.GuildPlayer, paused: bool = False) -> discord.Embed:
+    """
+    The live card for the track playing on `player` - the one place its fields are copied, so
+    the pause button, the refreshed card and /nowplaying can't drift apart. The filter and rate
+    are the playing SOURCE's (active_filter), never the preset stored for the next one.
+    """
+    track = player.current
+    if track is None:
+        raise ValueError("player_card needs a current track")
+    return now_playing_embed(track, len(player.queue), player.loop_mode, player.volume,
+                             paused=paused, elapsed=player.position(),
+                             filter_name=player.active_filter, rate=player.rate)
+
+
 def queued_embed(track: Track, position: int) -> discord.Embed:
     """Confirmation that a single track joined the queue behind something already playing."""
     embed = discord.Embed(

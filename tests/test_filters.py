@@ -14,8 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import discord
 from discord import app_commands
 
-from _fakes import (Guild, Interaction, Member, RealVoiceChannel, VoiceClient, load_bot,
-                    seed_queue, text_of)
+from _fakes import (Guild, Interaction, Member, RealVoiceChannel, SentMessage, VoiceClient,
+                    load_bot, seed_queue, text_of)
 from _check import check, finish
 
 amy = load_bot()
@@ -109,7 +109,15 @@ check("paused clock still freezes under a rate",
       abs(music.elapsed_seconds(100.0, 104.0, 0.0, 999.0, 1.25) - 5.0) < 1e-9)
 
 pl = music.GuildPlayer(1)
-pl.mark_started(100.0, now=1000.0, rate=1.25)
+check("rate is a read-only property of the active filter",
+      isinstance(music.GuildPlayer.rate, property) and music.GuildPlayer.rate.fset is None and pl.rate == 1.0)
+pl.active_filter = "slowed"
+check("rate follows active_filter (slowed 0.8)", pl.rate == 0.8, pl.rate)
+pl.filter_name = "nightcore"
+check("...and ignores the stored preset", pl.rate == 0.8, pl.rate)
+pl.active_filter = "nightcore"
+pl.mark_started(100.0, now=1000.0)
+check("mark_started no longer takes a rate", "rate" not in music.GuildPlayer.mark_started.__code__.co_varnames)
 check("player.position scales by the active rate", abs(pl.position(now=1008.0) - 110.0) < 1e-9, pl.position(now=1008.0))
 pl.mark_paused(now=1008.0)
 pl.mark_resumed(now=1100.0)
@@ -118,7 +126,7 @@ check("...and it runs on at the rate after resuming", abs(pl.position(now=1108.0
 pl.mark_stopped()
 check("stopped: position 0 and rate back to 1", pl.position(now=5000.0) == 0.0 and pl.rate == 1.0)
 pl.mark_started(0.0, now=0.0)
-check("mark_started defaults to rate 1", pl.rate == 1.0 and pl.position(now=10.0) == 10.0)
+check("no active filter: rate 1", pl.rate == 1.0 and pl.position(now=10.0) == 10.0)
 
 print("-- starting a source sets the clock rate of the filter it was built with --")
 
@@ -197,7 +205,8 @@ check("slowed: 80 track s left ends in 100 wall s", music.end_timestamp(180, 260
 check("still None at/after the end", music.end_timestamp(260, 260, 1000.0, 1.25) is None)
 
 print("-- autoplay's played-enough uses the position (track seconds) --")
-pl.mark_started(0.0, now=0.0, rate=1.25)
+pl.active_filter = "nightcore"
+pl.mark_started(0.0, now=0.0)
 check("8 wall seconds of nightcore = 10 track seconds = played enough",
       music.played_enough(pl.position(now=8.0), 200))
 
@@ -239,18 +248,65 @@ _end = int(_re.search(r"<t:(\d+):R>", _txt).group(1))
 check("stored nightcore, source at rate 1: Ends uses 1.0 (560 s left)",
       abs(_end - (_time.time() + 560)) <= 3, (_end - _time.time()))
 check("...and no Filter field is shown", "Filter" not in _txt, _txt)
-_p.mark_started(0.0, now=_time.monotonic() - 40.0, rate=1.25)
 _p.active_filter = "nightcore"
+_p.mark_started(0.0, now=_time.monotonic() - 40.0)
 _txt = card_text(_p)
 _end = int(_re.search(r"<t:(\d+):R>", _txt).group(1))
 check("source really at nightcore: Ends uses 1.25 and the field says so",
       abs(_end - (_time.time() + 550 / 1.25)) <= 3 and "nightcore" in _txt, _txt)
 
-import inspect as _insp
-for _fn in (amy.refresh_now_playing, amy.PlayerControls.pause_button):
-    _src = _insp.getsource(_fn)
-    check("%s passes the playing source's filter and rate to the card" % _fn.__name__,
-          "filter_name=player.active_filter, rate=player.rate" in _src, _src[-300:])
+print("-- every live-card path (ui.player_card) reads the PLAYING source, behaviourally --")
+_p.filter_name = "slowed"                      # stored for the next song: must not show anywhere
+
+
+def _card_ok(embed, where):
+    f = {x.name: x.value for x in embed.fields}
+    end = int(_re.search(r"<t:(\d+):R>", f["Position"]).group(1))
+    check("%s: Filter field is the playing source's (nightcore, not the stored slowed)"
+          % where, f.get("Filter") == "nightcore", f)
+    check("%s: Ends uses the playing source's rate (550 s left at 1.25)" % where,
+          abs(end - (_time.time() + 550 / 1.25)) <= 3, end - _time.time())
+
+
+_card_ok(ui.player_card(_p, False), "ui.player_card")
+try:
+    ui.player_card(music.GuildPlayer(1))
+    _no_track_raises = False
+except ValueError:
+    _no_track_raises = True
+check("player_card without a track is an error, not a bogus card", _no_track_raises)
+
+
+class _Chan(discord.TextChannel):             # passes isinstance(channel, TextChannel) offline
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, *, embed=None, view=None, **kw):
+        self.sent.append(embed)
+        return None
+
+
+_chan, _real_gc = _Chan(), amy.bot.get_channel
+amy.bot.get_channel = lambda cid: _chan
+_p.text_channel_id = 555
+_p.now_playing_msg = None
+try:
+    asyncio.run(amy.refresh_now_playing(_ctx_it.guild))
+    _card_ok(_chan.sent[-1], "refresh_now_playing (new message)")
+    _msg = SentMessage()
+    _p.now_playing_msg = _msg
+    asyncio.run(amy.refresh_now_playing(_ctx_it.guild))
+    _card_ok(_msg.embed, "refresh_now_playing (edit in place)")
+
+    _it_btn = Interaction(Member(USER, CH, name="userA"), _ctx_it.guild)
+    _ctx_it.guild.voice_client._paused = True              # paused, so the button resumes
+    _p.mark_paused()
+    asyncio.run(amy.PlayerControls().pause_button.callback(_it_btn))
+    _card_ok(_it_btn.sent[-1].embed, "the pause/resume button")
+finally:
+    amy.bot.get_channel = _real_gc
+_txt = card_text(_p)
+check("/nowplaying: the same card", "nightcore" in _txt and "slowed" not in _txt, _txt)
 
 # ---- voice lines ---------------------------------------------------------------------------
 print()
@@ -258,6 +314,12 @@ print("=== spoken confirmations ===")
 check("filter lines are calm and name the preset",
       all("!" not in l and "{name}" in l for l in voicelines.LINES["filter"]), voicelines.LINES["filter"])
 check("filter_off lines are calm", all("!" not in l for l in voicelines.LINES["filter_off"]))
+check("filter_later lines are calm, name the preset and say 'next song'",
+      all("!" not in l and "{name}" in l and "next song" in l for l in voicelines.LINES["filter_later"]),
+      voicelines.LINES["filter_later"])
+check("filter_off_later lines are calm and don't claim the music changed now",
+      all("!" not in l and "next song" in l for l in voicelines.LINES["filter_off_later"]),
+      voicelines.LINES["filter_off_later"])
 
 # ---- /filter -------------------------------------------------------------------------------
 print()
@@ -328,7 +390,8 @@ try:
           len(restarts) == n + 1 and p.filter_name == "off" and said[-1][0] == "filter_off", (restarts, said))
 
     # position mapping while a speed filter runs: 8 wall s at 1.25 = 10 track s past the start
-    p.mark_started(100.0, now=music.time.monotonic() - 8.0, rate=1.25)
+    p.active_filter = "nightcore"
+    p.mark_started(100.0, now=music.time.monotonic() - 8.0)
     slash(it, "slowed")
     check("a running nightcore song restarts at its TRACK position (~110 s)",
           abs(restarts[-1][1] - 110.0) < 1.0, restarts[-1])
@@ -359,7 +422,53 @@ try:
     out = slash(it, "slowed")
     check("idle: stored, no restart", p.filter_name == "slowed" and not restarts, (p.filter_name, restarts))
     check("...told it applies from the next song", "next song" in out, out)
-    check("...and still confirmed out loud", said == [("filter", {"name": "slowed"})], said)
+    check("...and said as 'later', not as a change to the music (finding 4)",
+          said == [("filter_later", {"name": "slowed"})], said)
+    out = slash(it, "off")
+    check("idle + off: the 'off later' line", said[-1] == ("filter_off_later", {"name": "off"}), said)
+    said.clear()
+
+    # finding 2: a playing track with a non-http query (can't be rebuilt): stored, not an error
+    p, it, vc = world(9006)
+    p.current = music.Track(title="Odd", query="not a url", duration=100, requested_by="userA")
+    p.current.is_local = False
+    restarts.clear(); said.clear()
+    out = slash(it, "nightcore")
+    check("non-http track: the preset is stored, no restart", p.filter_name == "nightcore" and not restarts,
+          (p.filter_name, restarts))
+    check("...replied as 'applies from the next song', not an error", "next song" in out
+          and "couldn't" not in out.lower(), out)
+    check("...and spoken as 'later'", said == [("filter_later", {"name": "nightcore"})], said)
+
+    # finding 1: two identical /filter at once -> one restart, one announce
+    restarts.clear(); said.clear()
+    p, it, vc = world(9007)
+
+    async def two_at_once():
+        await p.lock.acquire()
+        ctx = amy.MusicContext.build(it, it.guild)
+        t1 = asyncio.ensure_future(amy.music_filter(ctx, "nightcore"))
+        t2 = asyncio.ensure_future(amy.music_filter(ctx, "nightcore"))
+        await asyncio.sleep(0.05)           # both pass the cheap check and queue on the lock
+        p.lock.release()
+        return text_of(await t1), text_of(await t2)
+
+    o1, o2 = asyncio.run(two_at_once())
+    check("concurrent identical /filter: exactly one restart", len(restarts) == 1, restarts)
+    check("...and one announce", [s[0] for s in said] == ["filter"], said)
+    check("...the loser just shows the status", "nightcore" in o1 and "nightcore" in o2, (o1, o2))
+
+    # finding 3: restart_at can fail AFTER vc.stop() - the message must not claim "still playing"
+    async def fails_after_stop(vc_, player, track, after, position):
+        vc_.stop()
+        raise RuntimeError("ffmpeg gone")
+    music.restart_at = fails_after_stop
+    p, it, vc = world(9008)
+    out = slash(it, "nightcore")
+    check("filter: failure after stop says playback stopped, not 'still playing'",
+          "stopped playing" in out and "still playing" not in out, out)
+    check("...and the preset is put back", p.filter_name == "off", p.filter_name)
+    music.restart_at = fake_restart
 
     # a /filter while an advance is LOADING the next song (lock held, nothing audible yet): it
     # must wait, and once the track is up restart it - the track captured the old filter.

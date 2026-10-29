@@ -37,7 +37,7 @@ HELP_ADMIN = """
 `/voice [on|off] [up_next]` - My voice in calls on/off, announce next song, or status
 `/toggle` - Enable/disable bot responses (remembered across restarts)
 `/forget` - Wipe conversation memory for this channel
-`/status` - Show bot, Ollama and voice status
+`/status` - Show bot, Ollama, voice and memory status
 `/model [name]` - Show or switch the model (remembered)
 `/create [name]` - Create a voice channel and join it
 `/volume [0-100]` - Show or set playback volume

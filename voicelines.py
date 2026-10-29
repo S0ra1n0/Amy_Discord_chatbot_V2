@@ -84,6 +84,11 @@ LINES = {
                "Volume's at {level} percent."],
     "filter": ["Switching to {name}.", "The {name} filter is on.", "Putting {name} on the music."],
     "filter_off": ["Filter off.", "Back to the normal sound.", "The music's back to normal."],
+    # Stored with nothing playing to change: say it applies later, not that the sound changed.
+    "filter_later": ["{name} will be on for the next song.", "I'll use {name} from the next song.",
+                     "The next song will have {name}."],
+    "filter_off_later": ["The filter will be off for the next song.", "No filter from the next song.",
+                         "The next song will play as normal."],
     "join": ["Hi everyone!", "Hello! I'm here.", "Hey, good to be here."],
     "leave": ["Bye for now!", "See you later!", "Goodbye, everyone."],
     "up_next": ["Up next, {t}.", "Next up is {t}.", "Here's {t} next."],

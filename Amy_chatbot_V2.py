@@ -1090,10 +1090,7 @@ class PlayerControls(discord.ui.View):
             await interaction.response.defer()
             return
         await interaction.response.edit_message(
-            embed=ui.now_playing_embed(player.current, len(player.queue),
-                                       player.loop_mode, player.volume, paused=paused,
-                                       elapsed=player.position(),
-                                       filter_name=player.active_filter, rate=player.rate),
+            embed=ui.player_card(player, paused),
             view=PlayerControls(paused=paused),
         )
 
@@ -1286,10 +1283,7 @@ async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
         embed = ui.now_playing_embed(last, stopped=True)
         view = None
     else:
-        embed = ui.now_playing_embed(player.current, len(player.queue),
-                                     player.loop_mode, player.volume, paused=paused,
-                                     elapsed=player.position(),
-                                     filter_name=player.active_filter, rate=player.rate)
+        embed = ui.player_card(player, paused)
         view = PlayerControls(paused=paused)
 
     if player.now_playing_msg is not None:
@@ -1775,9 +1769,7 @@ async def music_nowplaying(ctx: MusicContext) -> MusicResult:
         return _info("Nothing is playing right now.")
     paused = music.music_paused(ctx.vc)
     return Reply(
-        embed=ui.now_playing_embed(p.current, len(p.queue), p.loop_mode, p.volume,
-                                   paused=paused, elapsed=p.position(),
-                                   filter_name=p.active_filter, rate=p.rate),
+        embed=ui.player_card(p, paused),
         view=PlayerControls(paused=paused),
     )
 
@@ -2082,6 +2074,62 @@ async def music_replay(ctx: MusicContext) -> MusicResult:
     return await _restart_current(ctx, None)
 
 
+async def _restart_playing(
+    guild: discord.Guild,
+    vc: discord.VoiceClient,
+    player: music.GuildPlayer,
+    decide: Callable[[], Union[Tuple[music.Track, float], MusicResult]],
+    *,
+    failed: str,
+    stopped: str,
+    label: str,
+    filter_change: Optional[str] = None,
+) -> Optional[MusicResult]:
+    """
+    The one way to rebuild the playing source in place (/seek, /replay, /filter).
+
+    Takes the player lock and calls `decide()` UNDER it: it returns (track, position) to restart,
+    or a reply to give up with (nothing playing, already set...). Then restarts, with
+    `filter_change` (a preset name) stored on the player first and put back if the restart
+    fails or is overtaken. Returns the reply to send on any failure, or None once the new source
+    is playing and the card refreshed - the caller then announces and words its own success.
+    `failed` completes "I couldn't ...", `stopped` is the reply if /stop beat the restart.
+    """
+    loop = asyncio.get_running_loop()
+    after = music.make_after_callback(loop, lambda: advance_playback(guild))
+    # The lock is what makes this safe: stopping the old source fires the after-callback,
+    # which calls advance_playback and would otherwise pull the next track off the queue.
+    # Holding the lock keeps that advance waiting until the new source is playing, at which
+    # point its is_playing() guard returns.
+    async with player.lock:
+        decided = decide()
+        if not isinstance(decided, tuple):
+            return decided
+        track, target = decided
+        previous = player.filter_name
+        if filter_change is not None:
+            player.filter_name = filter_change
+        try:
+            moved = await music.restart_at(vc, player, track, after, target)
+        except Exception as e:
+            player.filter_name = previous
+            log.error(f"{label} failed on '{track.title}': {e}")
+            # The new source is built before the old one is touched, but restart_at can still
+            # fail after vc.stop() (while starting it): then nothing is playing and the
+            # after-callback moves on once the lock is released - so say which it is.
+            if music.music_active(vc, player):
+                return _error(f"I couldn't {failed}, so **{track.title}** is still playing "
+                              "as it was.")
+            return _error(f"I couldn't {failed}, and **{track.title}** stopped playing.")
+        if not moved:
+            player.filter_name = previous
+            return _info(stopped)
+
+    await refresh_now_playing(guild, paused=music.music_paused(vc))
+    await ensure_speaking(guild)    # a restart on paused music re-pauses; speech waiting resumes
+    return None
+
+
 async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicResult:
     """/seek to `position`, or /replay from the start when it is None."""
     vc = ctx.connected()
@@ -2110,25 +2158,11 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
                           f"({music.format_duration(track.duration)}). Use `/skip` to move on.")
         target = music.clamp_seek(float(seconds), track.duration)
 
-    loop = asyncio.get_running_loop()
-    after = music.make_after_callback(loop, lambda: advance_playback(guild))
-    try:
-        # The lock is what makes this safe: stopping the old source fires the
-        # after-callback, which calls advance_playback and would otherwise pull the
-        # next track off the queue. Holding the lock keeps that advance waiting until
-        # the new source is playing, at which point its is_playing() guard returns.
-        async with player.lock:
-            moved = await music.restart_at(vc, player, track, after, target)
-    except Exception as e:
-        # The new source is built before the old one is touched, so a failure here
-        # leaves the track playing where it was - and the message says exactly that.
-        log.error(f"Seek failed on '{track.title}': {e}")
-        return _error(f"I couldn't jump there, so **{track.title}** is still playing where it was.")
-    if not moved:
-        return _info("Playback was stopped, so I didn't jump.")
-
-    await refresh_now_playing(guild, paused=music.music_paused(vc))
-    await ensure_speaking(guild)    # a seek on paused music re-pauses; speech waiting resumes
+    failed = await _restart_playing(
+        guild, vc, player, lambda: (track, target), failed="jump there",
+        stopped="Playback was stopped, so I didn't jump.", label="Seek")
+    if failed is not None:
+        return failed
     if position is None:
         announce(guild, "replay", title=track.title)
     else:
@@ -2214,45 +2248,41 @@ async def music_filter(ctx: MusicContext, preset: Optional[str] = None) -> Music
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error(NOT_WITH_AMY)
-    event = "filter_off" if name == music.FILTER_OFF else "filter"
-    if name == player.filter_name:
+    off = name == music.FILTER_OFF
+    event, later = ("filter_off", "filter_off_later") if off else ("filter", "filter_later")
+    if name == player.filter_name:       # cheap early out; re-checked under the lock below
         return _info(filter_status(name))
 
     guild = ctx.guild
-    loop = asyncio.get_running_loop()
-    after = music.make_after_callback(loop, lambda: advance_playback(guild))
-    stored_only = False
-    async with player.lock:      # as /seek: the old source's after-callback must wait
-        # Decided UNDER the lock: while an advance is loading the next track it holds the
+
+    def decide() -> Union[Tuple[music.Track, float], MusicResult]:
+        # Runs UNDER the player lock. A concurrent identical /filter that waited for the lock
+        # lands here after the first has set the name, and must not restart again.
+        if name == player.filter_name:
+            return _info(filter_status(name))
+        # Also decided under the lock: while an advance is loading the next track it holds the
         # lock and nothing is audible yet, but that track will be built with the filter it
         # captured earlier - so wait for it, then restart it like any playing song.
         track = player.current
         if track is None or not music.music_active(vc, player):
             player.filter_name = name        # nothing playing: applies from the next song
-            stored_only = True
-        else:
-            if track.is_local is False and not track.query.startswith("http"):
-                return _error("I can't change the filter on this track.")
-            previous = player.filter_name
-            player.filter_name = name
-            try:
-                # position() is TRACK time, which is what -ss takes. Read under the lock,
-                # right before the restart, so the time spent waiting for it isn't lost.
-                target = music.clamp_seek(player.position(), track.duration)
-                moved = await music.restart_at(vc, player, track, after, target)
-            except Exception as e:
-                player.filter_name = previous    # the old source is still playing, unfiltered
-                log.error(f"Filter change failed on '{track.title}': {e}")
-                return _error(f"I couldn't change the filter, so **{track.title}** is still "
-                              "playing as it was.")
-            if not moved:
-                player.filter_name = previous    # keep the message true: nothing changed
-                return _info("Playback was stopped, so I didn't change the filter.")
-    if stored_only:
-        announce(guild, event, name=name)
-        return _info(filter_status(name) + " It applies from the next song.")
-    await refresh_now_playing(guild, paused=music.music_paused(vc))
-    await ensure_speaking(guild)
+            announce(guild, later, name=name)
+            return _info(filter_status(name) + " It applies from the next song.")
+        if track.is_local is False and not track.query.startswith("http"):
+            player.filter_name = name        # can't rebuild this one: the next song gets it
+            announce(guild, later, name=name)
+            return _info(filter_status(name) + " I can't change this track while it plays, "
+                         "so it applies from the next song.")
+        # position() is TRACK time, which is what -ss takes. Read under the lock, right
+        # before the restart, so the time spent waiting for it isn't lost.
+        return track, music.clamp_seek(player.position(), track.duration)
+
+    stored_or_failed = await _restart_playing(
+        guild, vc, player, decide, failed="change the filter",
+        stopped="Playback was stopped, so I didn't change the filter.",
+        label="Filter change", filter_change=name)
+    if stored_or_failed is not None:
+        return stored_or_failed
     announce(guild, event, name=name)
     return _info(filter_status(name))
 

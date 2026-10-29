@@ -450,6 +450,18 @@ try:
           [t.title for t in p.queue] == ["a"] and p.current.title == "Long song",
           ([t.title for t in p.queue], p.current))
 
+    # restart_at can fail AFTER vc.stop() (starting the new source): the old source is gone, so
+    # the message must not claim the track is still playing.
+    async def _seek_fails_after_stop(vc, player, track, after, position):
+        vc.stop()
+        raise RuntimeError("ffmpeg gone")
+    amy.music.restart_at = _seek_fails_after_stop
+    p, it = setup(USER, "userA", ["a"])
+    p.current = amy.music.Track(title="Long song", query="https://youtu.be/long", duration=600, requested_by="userA")
+    out = run_music(amy, "seek", ["1:30"], interaction=it)
+    check("M6b: a seek that fails after the old source stopped says playback stopped",
+          "stopped playing" in out and "still playing" not in out, out)
+
     # L1: a seek overtaken by /stop says so instead of claiming to have jumped.
     async def _seek_stopped(*a, **kw):
         return False

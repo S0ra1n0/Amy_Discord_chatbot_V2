@@ -254,12 +254,19 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   autoplay's `played_enough` (track seconds). The only wall-time use is `end_timestamp`, which
   divides the time left by the rate. `play_track` and `restart_at` capture `player.filter_name`
   BEFORE the resolve and pass that same name to `build_source` and `_start`, and `_start` records
-  it as `player.active_filter` with `player.rate`: those two describe the source that is really
-  playing, `filter_name` only what the NEXT source will use. The card reads `active_filter` and
-  `rate` (never `filter_name`), so it shows and times what is audible. `music_filter` decides
-  "playing or idle" UNDER `player.lock`: an advance loading a track holds it with nothing audible
-  yet, and that track has already captured the old filter, so the command waits and then
-  restarts it. A restart that fails or is overtaken by `/stop` puts `filter_name` back. A filter forces
+  it as `player.active_filter`; `player.rate` is a read-only property derived from it (never set
+  separately, so it can't disagree). `active_filter` describes the source that is really
+  playing, `filter_name` only what the NEXT source will use. Every live card is built by
+  `ui.player_card(player, paused)`, which reads `active_filter` and `rate` (never `filter_name`),
+  so it shows and times what is audible. `/seek`, `/replay` and `/filter` share one restart path,
+  `_restart_playing`: it takes `player.lock` and calls the command's `decide()` UNDER it. For
+  `/filter` that is where "same preset already set", "playing or idle" and "can't rebuild this
+  track" are decided: an advance loading a track holds the lock with nothing audible yet, and that
+  track has already captured the old filter, so the command waits and then restarts it; two
+  identical `/filter` at once restart once. Idle (or a non-http track) only stores the preset and
+  speaks the `filter_later` line, never the "changed" one. A restart that fails or is overtaken by
+  `/stop` puts `filter_name` back; because `restart_at` can fail after `vc.stop()`, the failure
+  reply checks `music_active` and says playback stopped instead of "still playing". A filter forces
   the PCM path in `build_source` (opus passthrough can't change samples). Filters touch the music
   source only, so Amy's voice, mixed in by the `Mixer`, is never filtered. The filter is per
   player, kept by `/stop`, cleared by `reset` (leaving), and not persisted.
