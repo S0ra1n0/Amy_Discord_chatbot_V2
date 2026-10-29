@@ -45,7 +45,7 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | ----- | ------ |
 | `test_music.py` | duration/volume parsing, loop modes, queue advance, `MusicManager` |
 | `test_voice.py` | channel-name sanitising, the `decide_join_action` and `decide_restore_action` truth tables, voice-channel DB |
-| `test_ui.py` | every embed builder, Discord's length limits, `PlayerControls` persistence rules and button order (Previous, Pause, Skip, Stop) |
+| `test_ui.py` | every embed builder, Discord's length limits, `PlayerControls` persistence rules and button order (Previous, Pause, Skip, Stop), the live `Ends <t:N:R>` line on the playing card (`music.end_timestamp` truth table; absent when paused, stopped, live or past the end) |
 | `test_queue_mgmt.py` | playlist-URL detection, pagination, remove/shuffle/skipto helpers, `/previous` history (recorded only when playback moves on, walks back without bouncing, no QUEUE-loop duplicates, bounded) |
 | `test_queue_cmds.py` | queue commands end-to-end through mocked Discord objects |
 | `test_voice_cmds.py` | voice command permissions and cooldowns |

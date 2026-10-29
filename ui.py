@@ -5,6 +5,7 @@ Kept free of bot state so every builder can be constructed and asserted offline,
 the same property that makes music.render_queue and voice.decide_join_action testable.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -55,12 +56,15 @@ def now_playing_embed(
     paused: bool = False,
     stopped: bool = False,
     elapsed: Optional[float] = None,
+    now: Optional[float] = None,
 ) -> discord.Embed:
     """
     The main player card. `stopped` renders the finished state after /stop or an empty queue.
 
     `elapsed` adds a progress bar. It is omitted on the finished card, where a position
     would be meaningless, and for tracks of unknown length it degrades to the elapsed time.
+    While playing, a second line gives the end as a Discord relative timestamp; `now`
+    (unix seconds, default the clock) is injectable for tests.
     """
     if stopped:
         heading, colour = "Playback finished", COLOUR_INFO
@@ -78,9 +82,14 @@ def now_playing_embed(
     embed.set_author(name=heading)
     if elapsed is not None and not stopped:
         # Full width, so it reads as a scrubber rather than another stat
-        embed.add_field(name="Position",
-                        value=music.progress_bar(elapsed, track.duration),
-                        inline=False)
+        value = music.progress_bar(elapsed, track.duration)
+        # Discord clients count this down themselves, so it stays live between redraws.
+        # Not while paused: the clock is stopped, and resume redraws the card.
+        ends = None if paused else music.end_timestamp(
+            elapsed, track.duration, time.time() if now is None else now)
+        if ends is not None:
+            value += f"\nEnds <t:{ends}:R>"
+        embed.add_field(name="Position", value=value, inline=False)
     else:
         embed.add_field(name="Duration",
                         value=music.format_duration(track.duration), inline=True)

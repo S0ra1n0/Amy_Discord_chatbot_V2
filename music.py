@@ -761,6 +761,18 @@ def progress_bar(elapsed: float, duration: Optional[int], width: int = 18) -> st
     filled = min(width - 1, int(fraction * width))
     bar = ("─" * filled) + "●" + ("─" * (width - 1 - filled))
     return f"{stamp} {bar} {format_duration(duration)}"
+
+
+def end_timestamp(elapsed: float, duration: Optional[int], now: float) -> Optional[int]:
+    """
+    Unix time at which the track will end, for Discord's live `<t:N:R>` markup.
+
+    None when the length is unknown (live stream) or the position is already at or past
+    the end, so the card never promises a time it cannot keep.
+    """
+    if not duration or duration <= 0 or elapsed >= duration:
+        return None
+    return int(round(now + duration - max(0.0, elapsed)))
 #--------------------------------------
 
 

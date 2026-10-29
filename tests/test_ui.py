@@ -142,4 +142,29 @@ _lp = [f for f in _live_stream.fields if f.name == "Position"][0]
 assert "live" in _lp.value, _lp.value
 print("now_playing progress bar: OK (replaces Duration, hidden when finished)")
 
+print()
+# Live end time: Discord renders <t:N:R> and counts down by itself between card redraws.
+check("end_timestamp normal", music.end_timestamp(63, 260, 1000.0) == 1197)
+check("end_timestamp rounds", music.end_timestamp(63.4, 260, 1000.0) == 1197
+      and music.end_timestamp(63.6, 260, 1000.0) == 1196)
+check("end_timestamp unknown duration is None",
+      music.end_timestamp(5, None, 1000.0) is None and music.end_timestamp(5, 0, 1000.0) is None)
+check("end_timestamp at/after end is None",
+      music.end_timestamp(260, 260, 1000.0) is None and music.end_timestamp(300, 260, 1000.0) is None)
+
+
+def _pos_value(**kw) -> str:
+    return [f for f in ui.now_playing_embed(_t, **kw).fields if f.name == "Position"][0].value
+
+
+_v = _pos_value(elapsed=63, now=1000.0)
+check("playing card has Ends line", _v.endswith("\nEnds <t:1197:R>"), _v)
+check("bar stays on first line", "1:03" in _v.split("\n")[0])
+check("paused card has no Ends line", "<t:" not in _pos_value(elapsed=63, paused=True, now=1000.0))
+check("live stream has no Ends line",
+      "<t:" not in [f for f in _live_stream.fields if f.name == "Position"][0].value)
+check("finished card has no timestamp",
+      "<t:" not in str([f.value for f in ui.now_playing_embed(_t, stopped=True, elapsed=63, now=1000.0).fields]))
+check("elapsed past end has no Ends line", "<t:" not in _pos_value(elapsed=999, now=1000.0))
+
 finish("ALL UI TESTS PASSED")

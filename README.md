@@ -292,6 +292,12 @@ the bar updates when the card is redrawn (on pause, resume, seek or a track chan
 than ticking live — a self-updating bar would mean editing the message every few seconds,
 which Discord rate-limits.
 
+So that the card still moves between redraws, a second line under the bar reads
+`Ends in 3 minutes`. It is Discord's relative-timestamp markup (`<t:UNIX:R>`), which your
+Discord app counts down by itself with no message edits. The end time is recomputed from
+the position on every redraw, so a seek, replay or resume corrects it. It is hidden while
+paused (the clock is stopped), on the finished card and for live streams.
+
 Seeking rebuilds the audio source with an FFmpeg input offset, because a playing source
 cannot be moved. `-ss` is passed *before* the input so FFmpeg seeks by container index
 instead of decoding and discarding everything up to that point — instant rather than several
