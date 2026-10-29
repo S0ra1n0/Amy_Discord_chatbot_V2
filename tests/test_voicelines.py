@@ -42,8 +42,25 @@ for event, lines in V.LINES.items():
 check("all %d events, every phrasing" % len(V.LINES), not bad, bad)
 for needed in ("play_now", "queued", "playlist", "skip", "previous", "pause", "resume", "stop",
                "shuffle", "loop_off", "loop_track", "loop_queue", "seek", "replay", "remove",
-               "skipto", "clearqueue", "volume", "join", "leave", "foreign"):
+               "skipto", "clearqueue", "volume", "join", "leave", "foreign", "up_next"):
     check("has a line for %s" % needed, needed in V.LINES)
+check("up_next is calm: no '!' and every phrasing names the song",
+      all("!" not in l and "{t}" in l for l in V.LINES["up_next"]), V.LINES["up_next"])
+check("up_next formats with a title",
+      V.confirmation("up_next", {"t": "Song X"}, random.Random(0)).count("Song X") == 1)
+
+print()
+print("=== should_announce_next: only when a song ends by itself and a different one starts ===")
+PREV, NXT = object(), object()
+base = dict(force_next=False, going_back=False, resumed=False)
+check("natural end, different track -> announce", V.should_announce_next(PREV, NXT, **base) is True)
+check("no previous track (the first one) -> no",
+      V.should_announce_next(None, NXT, **base) is False)
+check("nothing next -> no", V.should_announce_next(PREV, None, **base) is False)
+check("the same track again (TRACK loop) -> no", V.should_announce_next(PREV, PREV, **base) is False)
+for flag in ("force_next", "going_back", "resumed"):
+    check("%s flips it off" % flag,
+          V.should_announce_next(PREV, NXT, **{**base, flag: True}) is False)
 
 rng = random.Random(7)
 seen = {V.confirmation("pause", rng=rng) for _ in range(200)}

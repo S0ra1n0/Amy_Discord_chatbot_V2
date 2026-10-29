@@ -1452,6 +1452,32 @@ try:
     check("/voice on turns her back on", amy.voice_enabled is True
           and amy.db.get_bool_setting("voice_enabled", False) is True and amy.can_speak(g), out)
 
+    # /voice up_next: its own saved switch, independent of the voice switch
+    _real_up_next = amy.up_next_enabled
+    amy.up_next_enabled = True
+    out = slash("voice", Interaction(owner, it_owner.guild), None, None)
+    check("/voice status shows Up next: on", "Up next: on" in out, out)
+    out = slash("voice", Interaction(owner, it_owner.guild), None,
+                app_commands.Choice(name="off", value="off"))
+    check("/voice up_next:off turns the announcements off, saved",
+          amy.up_next_enabled is False and amy.db.get_bool_setting("up_next", True) is False, out)
+    check("...without touching the voice", amy.voice_enabled is True
+          and amy.db.get_bool_setting("voice_enabled", False) is True and amy.can_speak(g), out)
+    out = slash("voice", Interaction(owner, it_owner.guild), None, None)
+    check("...and the status shows Up next: off", "Up next: off" in out, out)
+    out = slash("voice", Interaction(owner, it_owner.guild),
+                app_commands.Choice(name="off", value="off"))
+    check("/voice off alone leaves the up_next switch as it was",
+          amy.voice_enabled is False and amy.up_next_enabled is False, out)
+    out = slash("voice", Interaction(owner, it_owner.guild),
+                app_commands.Choice(name="on", value="on"),
+                app_commands.Choice(name="on", value="on"))
+    check("both options at once set both",
+          amy.voice_enabled is True and amy.up_next_enabled is True
+          and amy.db.get_bool_setting("up_next", False) is True, out)
+    amy.up_next_enabled = _real_up_next
+    amy.db.set_bool_setting("up_next", _real_up_next)
+
     amy.speaker = None
     out = slash("voice", Interaction(owner, it_owner.guild), None)
     check("/voice without TTS set up says how to set it up", "not set up" in out
@@ -1463,6 +1489,95 @@ try:
     sp.close()
 finally:
     amy.speaker, amy.voice_enabled = _real_speaker2, _real_enabled
+
+# ---- "Up next" when a song changes by itself ------------------------------------------------
+print()
+print("=== advance_playback announces the next song only when one ends on its own ===")
+_real_play_t, _real_refresh_t, _real_announce = (amy.music.play_track, amy.refresh_now_playing,
+                                                 amy.announce)
+_real_up = amy.up_next_enabled
+_said = []
+
+
+async def _un_play(vc, player, track, after, start_at=0.0):
+    player.current = track
+    vc.stopped = False
+    return True
+
+
+_order = []          # "up_next" / "refresh" in the order they happened
+_during_refresh = []  # what to do while the (slow) card edit is awaited
+
+
+async def _un_refresh(*a, **kw):
+    _order.append("refresh")
+    await asyncio.sleep(0)               # the real one is a Discord edit: other commands run here
+    for fn in _during_refresh:
+        fn()
+
+
+def _un_run(gid, *, current="playing", queue=("next",), setup_fn=None, enabled=True):
+    p, vc, g, it = tts_setup(gid, titles=queue, current=current)
+    vc.stopped = True
+    if setup_fn:
+        setup_fn(p)
+    amy.up_next_enabled = enabled
+    _said.clear()
+    _order.clear()
+    asyncio.run(amy.advance_playback(g))
+    return list(_said)
+
+
+amy.music.play_track, amy.refresh_now_playing = _un_play, _un_refresh
+amy.announce = lambda guild, event, title=None, **kw: (_said.append((event, title)),
+                                                       _order.append("up_next"))
+try:
+    check("a song ending on its own announces the next one",
+          _un_run(7301) == [("up_next", "next")], list(_said))
+    check("the first track (nothing finished) is not announced",
+          _un_run(7302, current=None) == [])
+    check("a /skip is not announced (it speaks for itself)",
+          _un_run(7303, setup_fn=lambda p: setattr(p, "skip_requested", True)) == [])
+    check("a /previous is not announced",
+          _un_run(7304, queue=("earlier", "playing"),
+                  setup_fn=lambda p: setattr(p, "back_requested", True)) == [])
+    check("TRACK loop repeating the same song is not announced",
+          _un_run(7305, setup_fn=lambda p: setattr(p, "loop_mode", amy.music.LoopMode.TRACK)) == [])
+    _queue_loop = lambda p: setattr(p, "loop_mode", amy.music.LoopMode.QUEUE)
+    check("QUEUE loop wrapping round to a different song is announced",
+          _un_run(7306, current="last", queue=("first", "second"), setup_fn=_queue_loop)
+          == [("up_next", "first")])
+    check("a one-song QUEUE loop (the same song back again) is not announced",
+          _un_run(7310, current="solo", queue=(), setup_fn=_queue_loop) == [])
+    check("a restored queue (nothing finished, resume position set) is not announced",
+          _un_run(7307, current=None, setup_fn=lambda p: setattr(p, "resume_position", 42.0)) == [])
+    check("defensive guard: a mid-track start after a finished song is not announced either",
+          _un_run(7311, setup_fn=lambda p: setattr(p, "resume_position", 42.0)) == [])
+    check("the setting off silences it",
+          _un_run(7308, enabled=False) == [])
+
+    # Race: the card edit is slow and /skip or /stop lands during it. The line must already
+    # have been said before that await - never queued behind the Skipped/Stopped line.
+    _un_run(7312)
+    check("the announcement is made before the slow card edit",
+          _order == ["up_next", "refresh"], _order)
+    _during_refresh.append(lambda: setattr(amy.music_manager.player_for(7313),
+                                           "skip_requested", True))
+    _un_run(7313)
+    _during_refresh.clear()
+    check("a /skip landing during the card edit gets no later 'Up next'",
+          _said == [("up_next", "next")] and _order == ["up_next", "refresh"], (_said, _order))
+
+    async def _un_fail(vc, player, track, after, start_at=0.0):
+        raise RuntimeError("bad stream")
+    amy.music.play_track = _un_fail
+    check("a track that fails to start is not announced",
+          _un_run(7309, queue=("next",)) == [])
+    amy.music.play_track = _un_play
+finally:
+    amy.music.play_track, amy.refresh_now_playing, amy.announce = (
+        _real_play_t, _real_refresh_t, _real_announce)
+    amy.up_next_enabled = _real_up
 
 # ---- Phase 1F: two replies at once ---------------------------------------------------------
 print()

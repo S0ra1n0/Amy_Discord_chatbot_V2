@@ -157,6 +157,14 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   so `can_speak`, replies, confirmations and `/say` all go quiet together. The Shush button
   is removed from `PlayerControls` when there's no speaker at all (`TTS=off`) - decided once
   per process, so the registered persistent view and every card agree.
+- **"Up next" is spoken only when a song ends by itself**
+  (`voicelines.should_announce_next`): a different track follows one that finished - not a
+  `/skip`/`/skipto` (`force_next`), `/previous`, a restored mid-track start, or a repeat (same
+  track object). `advance_playback` announces right after `play_track` succeeds and BEFORE
+  the `refresh_now_playing` await: `/skip` and `/stop` don't take the player lock, so one
+  landing during that Discord edit would otherwise be followed by a stale "Up next". The
+  announce has its own try, so a speech failure is never taken for a bad track. `up_next`
+  (`/voice up_next:`, saved, default on) is independent of `voice_enabled`.
 - **`/leave` says goodbye after its permission check and before disconnecting**, waiting
   at most `GOODBYE_WAIT`; a refused `/leave` says nothing. Idle and empty-channel leaves
   don't say goodbye - nobody is listening.

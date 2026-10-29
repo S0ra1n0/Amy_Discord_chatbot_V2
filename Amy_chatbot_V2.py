@@ -265,6 +265,8 @@ bot_enabled: bool = db.get_bool_setting("bot_enabled", True)
 # /voice on|off (admins). Mutes her without unloading the engine, so turning it back on is
 # instant. Saved, like /toggle. Only matters when TTS=on loads the engine at all.
 voice_enabled: bool = db.get_bool_setting("voice_enabled", True)
+# /voice up_next on|off (admins): say "Up next, ..." when a song changes by itself. Saved.
+up_next_enabled: bool = db.get_bool_setting("up_next", True)
 if model_manager.current != DEFAULT_MODEL:
     log.info(f"Restored saved model: {model_manager.current}")
 if not bot_enabled:
@@ -1345,6 +1347,8 @@ async def advance_playback(guild: discord.Guild) -> None:
         # already arranged the queue. Both are one-shot.
         force_next, going_back = player.skip_requested, player.back_requested
         player.skip_requested = player.back_requested = False
+        previous = player.current           # what just finished (None for a first track)
+        resumed = player.resume_position > 0
         next_track = music.advance_with_history(
             player.current, player.queue, player.history, player.loop_mode,
             force_next=force_next, going_back=going_back,
@@ -1365,6 +1369,17 @@ async def advance_playback(guild: discord.Guild) -> None:
                 await finish_playback(guild, player)
                 return
             player.last_played = next_track
+            # Announce NOW, before any await: refresh_now_playing is a Discord edit that can
+            # take a while, and /skip, /skipto and /stop don't take the player lock - one
+            # landing in that wait would be followed by a stale "Up next, <skipped song>".
+            # A failure to speak must not be mistaken for a bad track either.
+            if up_next_enabled and voicelines.should_announce_next(
+                    previous, next_track, force_next=force_next, going_back=going_back,
+                    resumed=resumed):
+                try:
+                    announce(guild, "up_next", title=next_track.title)
+                except Exception:
+                    log.exception("Could not announce the next song")
             await refresh_now_playing(guild)
             snapshot_player(guild.id)   # record the new track and a fresh position
         except Exception as e:
@@ -2581,6 +2596,7 @@ def voice_status() -> str:
     engine = {"ready": "ready", "loading": "loading...", "off": "not started yet",
               "failed": f"failed - {speaker.problem}"}.get(speaker.state, speaker.state)
     return (f"\U0001F50A **Voice: {switch}**\n"
+            f"Up next: {'on' if up_next_enabled else 'off'}\n"
             f"Engine: {engine}\n"
             f"Voice: {describe_voice()}, "
             f"level {round(VOICE_LEVEL * 100)}%\n"
@@ -2588,28 +2604,42 @@ def voice_status() -> str:
 
 
 @tree.command(name="voice", description="Turn Amy's voice in calls on or off, or show its status")
-@app_commands.describe(state="on or off (leave empty to see the status)")
+@app_commands.describe(state="on or off (leave empty to see the status)",
+                       up_next="Say the next song's name when one ends by itself: on or off")
 @app_commands.choices(state=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+], up_next=[
     app_commands.Choice(name="on", value="on"),
     app_commands.Choice(name="off", value="off"),
 ])
 @admin_only()
 async def slash_voice(interaction: discord.Interaction,
-                      state: Optional[app_commands.Choice[str]] = None) -> None:
-    global voice_enabled
-    if state is None:
+                      state: Optional[app_commands.Choice[str]] = None,
+                      up_next: Optional[app_commands.Choice[str]] = None) -> None:
+    global voice_enabled, up_next_enabled
+    if state is None and up_next is None:
         await interaction.response.send_message(voice_status(), ephemeral=True)
         return
     if speaker is None:
         await deny(interaction, NO_VOICE)
         return
-    voice_enabled = state.value == "on"
-    db.set_bool_setting("voice_enabled", voice_enabled)   # survives a restart
-    if not voice_enabled and interaction.guild is not None:
-        shush(interaction.guild)                          # off means quiet now, not later
-    log.info("Voice is now " + state.value)
-    await interaction.response.send_message(
-        "\U0001F50A My voice is **on**." if voice_enabled else "\U0001F507 My voice is **off**.")
+    parts = []
+    if state is not None:
+        voice_enabled = state.value == "on"
+        db.set_bool_setting("voice_enabled", voice_enabled)   # survives a restart
+        if not voice_enabled and interaction.guild is not None:
+            shush(interaction.guild)                          # off means quiet now, not later
+        log.info("Voice is now " + state.value)
+        parts.append("\U0001F50A My voice is **on**." if voice_enabled
+                     else "\U0001F507 My voice is **off**.")
+    if up_next is not None:
+        up_next_enabled = up_next.value == "on"
+        db.set_bool_setting("up_next", up_next_enabled)       # survives a restart
+        log.info("Up-next announcements are now " + up_next.value)
+        parts.append("I'll say what's up next (when my voice is on)." if up_next_enabled
+                     else "I won't announce the next song.")
+    await interaction.response.send_message(" ".join(parts))
 
 
 @tree.command(name="toggle", description="Enable or disable Amy's chat replies")

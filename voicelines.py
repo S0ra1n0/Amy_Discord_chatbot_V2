@@ -84,6 +84,7 @@ LINES = {
                "Volume's at {level} percent."],
     "join": ["Hi everyone!", "Hello! I'm here.", "Hey, good to be here."],
     "leave": ["Bye for now!", "See you later!", "Goodbye, everyone."],
+    "up_next": ["Up next, {t}.", "Next up is {t}.", "Here's {t} next."],
     "foreign": ["I've answered that one in the chat.", "My reply's in the chat.",
                 "Check the chat for that one."],
 }
@@ -98,6 +99,19 @@ def confirmation(event: str, values: Optional[Mapping[str, object]] = None,
     choices = LINES[event]
     line = (rng or random).choice(choices)
     return line.format(**(values or {}))
+
+
+def should_announce_next(previous: object, next_track: object, *, force_next: bool,
+                         going_back: bool, resumed: bool) -> bool:
+    """
+    Whether a track change deserves a spoken "up next": a song finished on its own and a
+    DIFFERENT one starts. Never for the first track (nothing finished; /play already says
+    "Now playing"), a /skip or /skipto (`force_next`; they announce themselves), /previous
+    (`going_back`), a restored queue picking up mid-track (`resumed`), or a repeat (TRACK
+    loop, or a one-song QUEUE loop, hands back the same track object).
+    """
+    return (previous is not None and next_track is not None and next_track is not previous
+            and not force_next and not going_back and not resumed)
 
 
 # ---- Chat replies --------------------------------------------------------------------------------

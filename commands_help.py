@@ -33,7 +33,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 HELP_ADMIN = """
 **Commands — Admin only:**
 `/say [text]` - Make me say something in my voice channel
-`/voice [on|off]` - Turn my voice in calls on or off, or show its status
+`/voice [on|off] [up_next]` - My voice in calls on/off, announce next song, or status
 `/toggle` - Enable/disable bot responses (remembered across restarts)
 `/forget` - Wipe conversation memory for this channel
 `/status` - Show bot, Ollama, voice and memory status
