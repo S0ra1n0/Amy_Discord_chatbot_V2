@@ -381,7 +381,7 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   Never pass a looser `allowed_mentions` on an individual send. `websearch.neutralise_mentions`
   is the second layer, on web text.
 - **Messages over 2000 characters are rejected outright.** Send plain text through
-  `send_reply`, which splits. `/help` is around 1,970 - close to the limit, so trim or split it before adding another command.
+  `send_reply`, which splits. `/help` is the exception: it is embeds (`commands_help.help_pages` -> `ui.help_embeds`, one description per page, admins get a second), so it has 4,096 characters per description and 6,000 per message to grow into; `test_slash.py` guards both limits.
 - Discord caches the command list client-side. After clearing stale commands, check with the
   API; the client keeps showing them until it is restarted (Ctrl+R).
 

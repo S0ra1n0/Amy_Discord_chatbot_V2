@@ -118,6 +118,27 @@ for mod in sorted(glob.glob("*.py")):
 check("README links to it", "ARCHITECTURE.md" in readme)
 
 print()
+print("=== suite counts in the docs match the runner ===")
+# README said "27 suites" for a while after more were added. The runner's lists are the truth;
+# the wording may change, the numbers may not. History ("8 of the 14 offline suites") is skipped.
+import run_tests
+n_off, n_net, n_live = len(run_tests.OFFLINE), len(run_tests.NETWORK), len(run_tests.LIVE)
+n_all = n_off + n_net + n_live
+t_readme = open(os.path.join("tests", "README.md"), encoding="utf-8").read()
+summary = re.search(r"(\d+)\s+suites\s*\((\d+)\s+offline,\s*(\d+)\s+network,\s*(\d+)\s+live\)", readme)
+check("README states the suite breakdown at all", summary is not None)
+if summary:
+    got = tuple(int(g) for g in summary.groups())
+    check("README suite counts %s == runner (total, offline, network, live) %s"
+          % (got, (n_all, n_off, n_net, n_live)), got == (n_all, n_off, n_net, n_live), str(got))
+for name, text in (("README.md", readme), ("tests/README.md", t_readme), ("ARCHITECTURE.md", arch)):
+    for kind, want in (("offline", n_off), ("network", n_net), ("live", n_live)):
+        for m in re.finditer(r"(?<!of the )\b(\d+) %s suites?\b" % kind, text):
+            check("%s '%s' == %d" % (name, m.group(0), want), int(m.group(1)) == want, m.group(0))
+    for m in re.finditer(r"(?<!of the )\b(\d+) (?:test )?suites\b(?! \()", text):
+        check("%s '%s' == %d total" % (name, m.group(0), n_all), int(m.group(1)) == n_all, m.group(0))
+
+print()
 print("=== .gitignore patterns actually match ===")
 # gitignore has no end-of-line comments: "*.log.*   # rotated logs" is a pattern that
 # includes the comment text, so it matches nothing. Two lines were written that way and

@@ -1,0 +1,14 @@
+# Everything text is LF in the repo and in working copies (no CRLF warnings on Windows).
+* text=auto eol=lf
+
+# Never touch binaries.
+*.db binary
+*.onnx binary
+*.wav binary
+*.mp3 binary
+*.opus binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.ckpt binary
+*.pt binary

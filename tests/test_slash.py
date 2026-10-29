@@ -107,12 +107,6 @@ print("=== long replies split instead of being truncated or rejected ===")
 import asyncio
 from commands_help import HELP_EVERYONE, HELP_ADMIN
 
-full = HELP_EVERYONE + HELP_ADMIN
-print("        /help admin view is %d chars (limit %d)" % (len(full), amy.MAX_DISCORD_LEN))
-# It would still be delivered (split in two), but a /help in two messages reads badly. When a
-# new command pushes it over, tighten the wording - as was done for /voice and /shush.
-check("/help still fits in one message", len(full) <= amy.MAX_DISCORD_LEN, len(full))
-
 sent = []
 class Resp:
     def __init__(self): self._done = False
@@ -131,10 +125,52 @@ check("every part fits Discord's limit",
       all(len(c) <= amy.MAX_DISCORD_LEN for c in sent), [len(c) for c in sent])
 check("nothing is lost", sum(len(c) for c in sent) == len("x " * 3000))
 
-sent.clear()
-it2 = It()
-asyncio.run(amy.send_reply(it2, full, ephemeral=True))
-check("/help sends in one piece today", len(sent) == 1, len(sent))
-check("/help fits the limit", len(sent[0]) <= amy.MAX_DISCORD_LEN, len(sent[0]))
+print()
+print("=== /help is embeds: a description holds 4096, a plain message only 2000 ===")
+# It was plain text and sat at 1988/2000, so every new command meant trimming wording. As
+# embeds the limits are: description <= 4096, all embeds of one message <= 6000 in total.
+# Descriptions, not fields (a field value caps at 1024).
+import types
+
+class HelpResp:
+    def __init__(self): self.calls = []
+    async def send_message(self, **kw): self.calls.append(kw)
+
+def run_help(admin):
+    resp = HelpResp()
+    guild = types.SimpleNamespace(owner_id=1 if admin else 2, get_member=lambda uid: None)
+    it = types.SimpleNamespace(guild=guild, user=types.SimpleNamespace(id=1), response=resp)
+    asyncio.run(by_name["help"].callback(it))
+    return resp.calls
+
+for who, admin in (("everyone", False), ("admin", True)):
+    calls = run_help(admin)
+    check("/help (%s) sends one message" % who, len(calls) == 1, len(calls))
+    kw = calls[0]
+    check("/help (%s) is ephemeral" % who, kw.get("ephemeral") is True, kw)
+    embeds = kw.get("embeds", [])
+    descs = [e.description or "" for e in embeds]
+    print("        /help %s view: %s chars" % (who, [len(d) for d in descs]))
+    check("/help (%s) uses descriptions, not fields" % who,
+          bool(embeds) and all(not e.fields for e in embeds))
+    check("/help (%s) each description <= 4096" % who, all(len(d) <= 4096 for d in descs),
+          [len(d) for d in descs])
+    check("/help (%s) total <= 6000" % who, sum(len(d) for d in descs) <= 6000,
+          sum(len(d) for d in descs))
+    check("/help (%s) lists the everyone commands" % who, "`/play [song, URL, or file]`" in descs[0])
+    check("/help (%s) keeps markdown (bold heading, backticks)" % who,
+          descs[0].startswith("**Commands") and descs[0].count("`") % 2 == 0)
+    check("/help (%s) text is unchanged" % who,
+          descs == [HELP_EVERYONE] + ([HELP_ADMIN.strip()] if admin else []), "help text altered")
+    if admin:
+        check("/help (admin) has a second embed with the admin list",
+              len(descs) == 2 and "`/say [text]`" in descs[1], len(descs))
+    else:
+        check("/help (everyone) has one embed and no admin commands",
+              len(descs) == 1 and "`/say" not in descs[0] and "Admin only" not in descs[0],
+              len(descs))
+check("/help leaves headroom: full text under 6000 minus a 1500 margin",
+      len(HELP_EVERYONE) + len(HELP_ADMIN) < 6000 - 1500,
+      len(HELP_EVERYONE) + len(HELP_ADMIN))
 
 finish("ALL SLASH TESTS PASSED")

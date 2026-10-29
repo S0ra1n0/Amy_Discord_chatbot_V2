@@ -20,7 +20,7 @@ import discord
 from discord.ext import tasks
 from discord import app_commands
 
-from commands_help import HELP_EVERYONE, HELP_ADMIN
+from commands_help import help_pages
 from database import (DEFAULT_MAX_MESSAGES, MIN_MAX_MESSAGES, ConversationDB,
                       SchemaTooNewError)
 import config
@@ -2523,9 +2523,9 @@ async def simple_music(
 @tree.command(name="help", description="Show Amy's commands")
 async def slash_help(interaction: discord.Interaction) -> None:
     is_adm = is_admin_member(interaction.guild, interaction.user.id)
-    # Via send_reply so it splits if the command list outgrows 2000 characters
-    await send_reply(interaction, HELP_EVERYONE + (HELP_ADMIN if is_adm else ""),
-                     ephemeral=True)
+    # Embeds: a description holds 4096 characters, a plain message only 2000
+    await interaction.response.send_message(
+        embeds=ui.help_embeds(help_pages(is_adm)), ephemeral=True)
 
 
 @tree.command(name="dice", description="Roll dice")

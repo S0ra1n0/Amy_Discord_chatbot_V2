@@ -231,6 +231,16 @@ def lyrics_embeds(heading: str, pages: List[str], truncated: bool,
     return embeds
 
 
+def help_embeds(pages: List[str]) -> List[discord.Embed]:
+    """
+    One embed per help page, description only (a field value caps at 1024, a description at
+    4096). Discord also caps a message's embeds at 6000 characters in total, so the caller
+    sends them together only while the sum fits (tests/test_slash.py guards it).
+    """
+    return [discord.Embed(description=_clip(page, MAX_EMBED_DESC), colour=COLOUR_INFO)
+            for page in pages]
+
+
 def voice_embed(description: str, colour: int = COLOUR_OK, heading: str = "Voice") -> discord.Embed:
     """Generic card for join/leave/create replies."""
     embed = discord.Embed(description=_clip(description, MAX_EMBED_DESC), colour=colour)

@@ -42,3 +42,15 @@ HELP_ADMIN = """
 `/create [name]` - Create a voice channel and join it
 `/volume [0-100]` - Show or set playback volume
 `/clearqueue` - Empty the queue (current track keeps playing)"""
+
+
+def help_pages(is_admin: bool) -> list[str]:
+    """
+    The /help text as one page per embed description. Everyone gets the first; admins also
+    get the second. Descriptions hold 4096 characters (a plain message only 2000), so the
+    list can grow past what a text reply could carry.
+    """
+    pages = [HELP_EVERYONE]
+    if is_admin:
+        pages.append(HELP_ADMIN.strip())
+    return pages

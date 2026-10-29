@@ -703,7 +703,8 @@ python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
 30 suites (22 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
-and a docs audit that fails if a command is missing from the help text or this README.
+and a docs audit that fails if a command is missing from the help text or this README, or if the suite counts stated here drift from `tests/run_tests.py`.
+Line endings: the repo is LF everywhere (`.gitattributes`: `* text=auto eol=lf`), so commits carry no "LF will be replaced by CRLF" warnings; editors on Windows should keep LF.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and
 `pyright` on Windows (`.github/workflows/checks.yml`). The network and live tiers stay local,
@@ -844,7 +845,7 @@ Long queues are not a factor — stream URLs are resolved one track at a time, i
 - Messages longer than Discord's 2000-character limit are split across multiple messages automatically — no configuration needed
 - Voice is limited to guild voice channels; Discord does not expose DM or group-DM calls to bots
 - Amy self-deafens when joining voice (she never needs to receive audio)
-- Embeds are used for music and voice replies; chat, `/help`, `/status`, dice and `/rng` stay plain text
+- Embeds are used for music, voice and `/help` replies (the command list is an embed, so it has room to grow past 2,000 characters); chat, `/status`, dice and `/rng` stay plain text
 - Music requires **FFmpeg**; YouTube/SoundCloud sources additionally require **yt-dlp** (both covered in setup)
 - Stream URLs are resolved one track at a time, immediately before playing — YouTube links expire after a few hours, so resolving a long queue up front would leave later tracks pointing at dead links
 - At 100% volume audio is passed through as opus with no transcoding; below 100% it decodes to PCM so `PCMVolumeTransformer` can scale it, which costs more CPU
