@@ -328,9 +328,9 @@ def run_music(amy, command, args=None, user=None, guild=None, interaction=None):
 def run_voice(amy, command, args=None, user=None, guild=None, interaction=None):
     """Drive a voice command the way the slash layer does, returning flattened text."""
     interaction = interaction or Interaction(user, guild)
-    parts = [command] + [str(a) for a in (args or [])]
-    result = asyncio.run(
-        amy.execute_voice_command(command, parts, interaction, interaction.guild))
+    handler = getattr(amy, "voice_" + command)
+    extra = [" ".join(str(a) for a in args)] if command == "create" else []
+    result = asyncio.run(handler(interaction, interaction.guild, *extra))
     return text_of(result, interaction)
 
 

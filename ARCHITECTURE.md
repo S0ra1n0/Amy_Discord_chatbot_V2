@@ -308,6 +308,10 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 
 - **`guild.voice_client` is typed `VoiceProtocol`**, not `VoiceClient`, and `vc.channel` is a
   union. Narrow with `voice.get_voice_client()` / `voice.active_channel()`, or pyright fails.
+- **One typed handler per voice command** (`voice_join`, `voice_create`, `voice_leave`), each
+  taking the interaction and an already-narrowed guild; `/create`'s name is passed as a string
+  (whitespace collapsed, then `voice.sanitize_channel_name`). The slash commands call them
+  directly after `voice_gate`/`require_guild`/`defer`.
 
 ## Music commands
 

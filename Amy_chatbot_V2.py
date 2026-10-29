@@ -849,148 +849,140 @@ async def chat_streaming(
 #----------------------------------------------
 
 #----Voice Command Handlers------
-async def execute_voice_command(
-    command: str,
-    parts: List[str],
-    interaction: discord.Interaction,
-    guild: discord.Guild,
-) -> Union[str, Reply]:
-    """
-    Handle /join, /create and /leave.
+async def voice_join(interaction: discord.Interaction, guild: discord.Guild) -> Union[str, Reply]:
+    """/join. Takes an already-narrowed, non-optional guild so every access is type-safe."""
+    member = guild.get_member(interaction.user.id)
+    state = member.voice if member else None
+    if state is None or state.channel is None:
+        return Reply(embed=ui.error_embed("You're not in a voice channel. Join one first, then use `/join`."))
 
-    Takes an already-narrowed, non-optional guild so every access below is type-safe
-    rather than relying on a guard in a different branch.
-    """
-    if command == "join":
-        member = guild.get_member(interaction.user.id)
-        state = member.voice if member else None
-        if state is None or state.channel is None:
-            return Reply(embed=ui.error_embed("You're not in a voice channel. Join one first, then use `/join`."))
+    target = state.channel
+    perms = target.permissions_for(guild.me)
+    if not perms.connect:
+        return Reply(embed=ui.error_embed(f"I don't have permission to connect to **{target.name}**."))
+    if not perms.speak:
+        return Reply(embed=ui.error_embed(f"I can join **{target.name}**, but I'm not allowed to speak there."))
 
-        target = state.channel
-        perms = target.permissions_for(guild.me)
-        if not perms.connect:
-            return Reply(embed=ui.error_embed(f"I don't have permission to connect to **{target.name}**."))
-        if not perms.speak:
-            return Reply(embed=ui.error_embed(f"I can join **{target.name}**, but I'm not allowed to speak there."))
-
-        async with voice_manager.lock_for(guild.id):
-            vc = voice.get_voice_client(guild)
-            current = voice.active_channel(vc)
-            current_id = current.id if current else None
-            has_humans = voice.humans_in(current) > 0 if current else False
-
-            action = voice.decide_join_action(current_id, has_humans, target.id, is_admin_member(interaction.guild, interaction.user.id))
-
-            if action is voice.JoinAction.ALREADY_THERE:
-                return Reply(embed=ui.info_embed(f"I'm already in **{target.name}**."))
-            if action is voice.JoinAction.BLOCKED_OCCUPIED:
-                where = current.name if current else "another channel"
-                return Reply(embed=ui.error_embed(
-                    f"I'm currently in **{where}** with other people. "
-                    "Join that channel, or ask an admin to move me."
-                ))
-            try:
-                if action is voice.JoinAction.MOVE and vc is not None:
-                    await vc.move_to(target)
-                    verb = "Moved to"
-                else:
-                    await voice.connect_to(target)
-                    verb = "Joined"
-            except RuntimeError as e:
-                # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
-                # Report what it actually said rather than guessing which one.
-                log.error(f"Voice connect failed: {e}")
-                return Reply(embed=ui.error_embed(
-                    f"Voice support isn't fully installed on my host: {e}\n"
-                    "Fix: `pip install \"discord.py[voice]\"`"
-                ))
-            except (discord.ClientException, asyncio.TimeoutError) as e:
-                log.error(f"Voice connect failed: {e}")
-                return Reply(embed=ui.error_embed(f"I couldn't connect to **{target.name}**. Please try again."))
-
-        # A queue may be waiting with nothing playing - typically one restored quietly after
-        # a restart. Joining is the moment to start it. Outside the voice lock, since
-        # advance_playback can take seconds to resolve the first track.
-        player = music_manager.player_for(guild.id)
-        if player.text_channel_id is None:
-            player.text_channel_id = interaction.channel_id
-        waiting = await start_waiting_queue(guild)
-        note = f" Picking up {waiting} queued track(s)." if waiting else ""
-        announce(guild, "join")
-        return Reply(embed=ui.voice_embed(f"{verb} **{target.name}**.{note}"))
-
-    if command == "create":
-        if not is_admin_member(interaction.guild, interaction.user.id):
-            return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
-        if not guild.me.guild_permissions.manage_channels:
-            return Reply(embed=ui.error_embed("I need the **Manage Channels** permission to create a voice channel."))
-
-        # Only guild text channels have a category to inherit
-        category = interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None
-        name = voice.sanitize_channel_name(" ".join(parts[1:]))
-
-        async with voice_manager.lock_for(guild.id):
-            try:
-                channel = await guild.create_voice_channel(
-                    name,
-                    category=category,
-                    reason=f"/create requested by {interaction.user}",
-                )
-            except discord.Forbidden:
-                return Reply(embed=ui.error_embed("Discord refused that. Check my **Manage Channels** permission."))
-            except discord.HTTPException as e:
-                log.error(f"Channel creation failed: {e}")
-                return Reply(embed=ui.error_embed("I couldn't create that channel. Please try again."))
-
-            try:
-                vc = voice.get_voice_client(guild)
-                if vc is not None and vc.is_connected():
-                    await vc.move_to(channel)
-                else:
-                    await voice.connect_to(channel)
-            except Exception as e:
-                log.error(f"Could not join newly created channel: {e}")
-                # Channel exists but Amy couldn't join - don't orphan it
-                try:
-                    await channel.delete(reason="Amy could not join the channel she created")
-                except discord.HTTPException:
-                    pass
-                if isinstance(e, RuntimeError):
-                    # Missing voice dependency - say which, so it's actionable
-                    return Reply(embed=ui.error_embed(
-                        f"I created the channel but voice support isn't fully installed: {e}\n"
-                        "Fix: `pip install \"discord.py[voice]\"` (channel removed again)"
-                    ))
-                return Reply(embed=ui.error_embed("I created the channel but couldn't join it, so I removed it again."))
-
-            voice_manager.mark_created(channel.id, guild.id)
-            announce(guild, "join")
-            return Reply(embed=ui.voice_embed(
-                f"Created {channel.mention} and joined — hop in!", heading="Voice channel created"))
-
-    if command == "leave":
+    async with voice_manager.lock_for(guild.id):
         vc = voice.get_voice_client(guild)
         current = voice.active_channel(vc)
-        if current is None:
-            return Reply(embed=ui.error_embed("I'm not in a voice channel."))
+        current_id = current.id if current else None
+        has_humans = voice.humans_in(current) > 0 if current else False
 
-        member = guild.get_member(interaction.user.id)
-        in_same_channel = bool(
-            member and member.voice and member.voice.channel
-            and member.voice.channel.id == current.id
-        )
-        if not (is_admin_member(interaction.guild, interaction.user.id) or in_same_channel):
-            return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
+        action = voice.decide_join_action(current_id, has_humans, target.id, is_admin_member(interaction.guild, interaction.user.id))
 
-        await say_goodbye(guild)     # waits for it to play, at most GOODBYE_WAIT seconds
-        async with voice_manager.lock_for(guild.id):
-            left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
-        if not left:
-            return Reply(embed=ui.error_embed("I'm not in a voice channel."))
-        return Reply(embed=ui.voice_embed(f"Left **{left}**.", heading="Voice"))
+        if action is voice.JoinAction.ALREADY_THERE:
+            return Reply(embed=ui.info_embed(f"I'm already in **{target.name}**."))
+        if action is voice.JoinAction.BLOCKED_OCCUPIED:
+            where = current.name if current else "another channel"
+            return Reply(embed=ui.error_embed(
+                f"I'm currently in **{where}** with other people. "
+                "Join that channel, or ask an admin to move me."
+            ))
+        try:
+            if action is voice.JoinAction.MOVE and vc is not None:
+                await vc.move_to(target)
+                verb = "Moved to"
+            else:
+                await voice.connect_to(target)
+                verb = "Joined"
+        except RuntimeError as e:
+            # discord.py raises this when a voice dependency is missing (PyNaCl or davey).
+            # Report what it actually said rather than guessing which one.
+            log.error(f"Voice connect failed: {e}")
+            return Reply(embed=ui.error_embed(
+                f"Voice support isn't fully installed on my host: {e}\n"
+                "Fix: `pip install \"discord.py[voice]\"`"
+            ))
+        except (discord.ClientException, asyncio.TimeoutError) as e:
+            log.error(f"Voice connect failed: {e}")
+            return Reply(embed=ui.error_embed(f"I couldn't connect to **{target.name}**. Please try again."))
 
-    return f"Unknown voice command: `{command}`."
+    # A queue may be waiting with nothing playing - typically one restored quietly after
+    # a restart. Joining is the moment to start it. Outside the voice lock, since
+    # advance_playback can take seconds to resolve the first track.
+    player = music_manager.player_for(guild.id)
+    if player.text_channel_id is None:
+        player.text_channel_id = interaction.channel_id
+    waiting = await start_waiting_queue(guild)
+    note = f" Picking up {waiting} queued track(s)." if waiting else ""
+    announce(guild, "join")
+    return Reply(embed=ui.voice_embed(f"{verb} **{target.name}**.{note}"))
+
+
+async def voice_create(interaction: discord.Interaction, guild: discord.Guild,
+                       name: str = "") -> Union[str, Reply]:
+    """/create. `name` is whitespace-collapsed, then sanitised (blank -> the default name)."""
+    if not is_admin_member(interaction.guild, interaction.user.id):
+        return Reply(embed=ui.error_embed("You don't have permission to use this command. (Admin only)"))
+    if not guild.me.guild_permissions.manage_channels:
+        return Reply(embed=ui.error_embed("I need the **Manage Channels** permission to create a voice channel."))
+
+    # Only guild text channels have a category to inherit
+    category = interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None
+    name = voice.sanitize_channel_name(" ".join(name.split()))
+
+    async with voice_manager.lock_for(guild.id):
+        try:
+            channel = await guild.create_voice_channel(
+                name,
+                category=category,
+                reason=f"/create requested by {interaction.user}",
+            )
+        except discord.Forbidden:
+            return Reply(embed=ui.error_embed("Discord refused that. Check my **Manage Channels** permission."))
+        except discord.HTTPException as e:
+            log.error(f"Channel creation failed: {e}")
+            return Reply(embed=ui.error_embed("I couldn't create that channel. Please try again."))
+
+        try:
+            vc = voice.get_voice_client(guild)
+            if vc is not None and vc.is_connected():
+                await vc.move_to(channel)
+            else:
+                await voice.connect_to(channel)
+        except Exception as e:
+            log.error(f"Could not join newly created channel: {e}")
+            # Channel exists but Amy couldn't join - don't orphan it
+            try:
+                await channel.delete(reason="Amy could not join the channel she created")
+            except discord.HTTPException:
+                pass
+            if isinstance(e, RuntimeError):
+                # Missing voice dependency - say which, so it's actionable
+                return Reply(embed=ui.error_embed(
+                    f"I created the channel but voice support isn't fully installed: {e}\n"
+                    "Fix: `pip install \"discord.py[voice]\"` (channel removed again)"
+                ))
+            return Reply(embed=ui.error_embed("I created the channel but couldn't join it, so I removed it again."))
+
+        voice_manager.mark_created(channel.id, guild.id)
+        announce(guild, "join")
+        return Reply(embed=ui.voice_embed(
+            f"Created {channel.mention} and joined — hop in!", heading="Voice channel created"))
+
+
+async def voice_leave(interaction: discord.Interaction, guild: discord.Guild) -> Union[str, Reply]:
+    """/leave."""
+    vc = voice.get_voice_client(guild)
+    current = voice.active_channel(vc)
+    if current is None:
+        return Reply(embed=ui.error_embed("I'm not in a voice channel."))
+
+    member = guild.get_member(interaction.user.id)
+    in_same_channel = bool(
+        member and member.voice and member.voice.channel
+        and member.voice.channel.id == current.id
+    )
+    if not (is_admin_member(interaction.guild, interaction.user.id) or in_same_channel):
+        return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
+
+    await say_goodbye(guild)     # waits for it to play, at most GOODBYE_WAIT seconds
+    async with voice_manager.lock_for(guild.id):
+        left = await voice.leave_voice(guild, voice_manager, on_cleanup=cleanup_guild_music)
+    if not left:
+        return Reply(embed=ui.error_embed("I'm not in a voice channel."))
+    return Reply(embed=ui.voice_embed(f"Left **{left}**.", heading="Voice"))
 #--------------------------------------
 
 #----Reply Emoji------
@@ -2469,7 +2461,7 @@ async def slash_join(interaction: discord.Interaction) -> None:
         return
     await interaction.response.defer()
     await send_reply(interaction,
-                     await execute_voice_command("join", ["join"], interaction, guild))
+                     await voice_join(interaction, guild))
 
 
 @tree.command(name="leave", description="Make Amy leave her voice channel")
@@ -2482,7 +2474,7 @@ async def slash_leave(interaction: discord.Interaction) -> None:
         return
     await interaction.response.defer()
     await send_reply(interaction,
-                     await execute_voice_command("leave", ["leave"], interaction, guild))
+                     await voice_leave(interaction, guild))
 
 
 @tree.command(name="create", description="Create a voice channel and join it")
@@ -2494,9 +2486,8 @@ async def slash_create(interaction: discord.Interaction, name: str = "") -> None
     if guild is None:
         return
     await interaction.response.defer()
-    parts = ["create"] + (name.split() if name else [])
     await send_reply(interaction,
-                     await execute_voice_command("create", parts, interaction, guild))
+                     await voice_create(interaction, guild, name))
 
 
 @tree.command(name="play", description="Play a song, URL, or playlist")

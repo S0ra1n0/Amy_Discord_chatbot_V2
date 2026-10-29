@@ -48,7 +48,7 @@ A suite that can't run here exits with code **77** and the runner reports it as 
 | `test_ui.py` | every embed builder, Discord's length limits, `PlayerControls` persistence rules and button order (Previous, Pause, Skip, Stop), the live `Ends <t:N:R>` line on the playing card (`music.end_timestamp` truth table; absent when paused, stopped, live or past the end) |
 | `test_queue_mgmt.py` | playlist-URL detection, pagination, remove/shuffle/skipto helpers, `/previous` history (recorded only when playback moves on, walks back without bouncing, no QUEUE-loop duplicates, bounded) |
 | `test_queue_cmds.py` | queue commands end-to-end through mocked Discord objects |
-| `test_voice_cmds.py` | voice command permissions and cooldowns |
+| `test_voice_cmds.py` | voice command permissions and cooldowns, plus the `/join` and `/create` success paths (connects, whitespace-collapsed name, channel remembered) |
 | `test_autoplay.py` | autoplay: YouTube id extraction, `pick_autoplay` / `should_autoplay`, `related_tracks` with yt-dlp faked (requests a bounded Mix), `advance_playback` driven through a natural drain, and `/autoplay` |
 | `test_regression.py` | rate limiters, message splitting, `<think>`-tag stripping, history window, model warm-up, settings persistence, the slash error handler |
 | `test_security.py` | the `MUSIC_DIR` sandbox — path traversal must stay blocked |

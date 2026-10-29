@@ -69,11 +69,67 @@ target = VoiceChannel(10, "General")
 check("move when old channel empty",
       run_voice(amy, "join", interaction=scene(USER, target, empty)), "moved to")
 
+# 7b. /join from nowhere: actually connects to the caller's channel
+_joined = []
+
+
+async def _join_connect(channel):
+    _joined.append(channel)
+
+
+target = VoiceChannel(12, "Fresh")
+_orig_connect, _orig_announce = amy.voice.connect_to, amy.announce
+amy.voice.connect_to = _join_connect
+amy.announce = lambda g, kind, *a, **k: None
+amy.music_manager.cleanup(500)
+out = run_voice(amy, "join", interaction=scene(USER, target))
+amy.voice.connect_to, amy.announce = _orig_connect, _orig_announce
+check("/join success says joined", out, "joined")
+results.append(record("/join connects to the caller's channel", _joined == [target]))
+print(("PASS" if results[-1] else "FAIL"), "| /join connects to the caller's channel")
+
 # 8. /create without Manage Channels
 check("/create no Manage Channels",
       run_voice(amy, "create", ["Music"],
                 interaction=scene(OWNER, me_perms=Perms(manage_channels=False))),
       "manage channels")
+
+# 8b. /create success: whitespace in the name collapsed, channel made, joined, remembered
+class _Made:
+    def __init__(self, name):
+        self.id, self.name, self.mention = 777, name, "#" + name
+
+
+_made = {}
+_connected = []
+_announced = []
+sc = scene(OWNER)
+
+
+async def _create_voice_channel(name, category=None, reason=None):
+    _made["name"] = name
+    return _Made(name)
+
+
+async def _connect_to(channel):
+    _connected.append(channel)
+
+
+sc.guild.create_voice_channel = _create_voice_channel
+_orig_connect, _orig_announce = amy.voice.connect_to, amy.announce
+amy.voice.connect_to = _connect_to
+amy.announce = lambda g, kind, *a, **k: _announced.append(kind)
+out = run_voice(amy, "create", ["  Chill", "  room "], interaction=sc)
+amy.voice.connect_to, amy.announce = _orig_connect, _orig_announce
+check("/create success says created", out, "created")
+results.append(record("/create joins the new channel", len(_connected) == 1))
+print(("PASS" if results[-1] else "FAIL"), "| /create joins the new channel")
+results.append(record("/create collapses whitespace in the name",
+                      _made.get("name") == amy.voice.sanitize_channel_name("Chill room")))
+print(("PASS" if results[-1] else "FAIL"), "| /create collapses whitespace in the name", _made)
+results.append(record("/create remembers the channel as Amy-made",
+                      amy.voice_manager.is_bot_created(777)))
+print(("PASS" if results[-1] else "FAIL"), "| /create remembers the channel")
 
 # 9. /leave when not connected
 check("/leave not connected", run_voice(amy, "leave", interaction=scene(OWNER)),
