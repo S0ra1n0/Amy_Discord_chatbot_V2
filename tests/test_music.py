@@ -304,7 +304,7 @@ async def _ok_resolve(track):
     return "https://stream/" + track.title
 
 
-async def _ok_build(url, volume, ffmpeg, start_at=0.0):
+async def _ok_build(url, volume, ffmpeg, start_at=0.0, filter_name="off"):
     return _Src("%s@%s" % (url, start_at))
 
 
@@ -372,7 +372,7 @@ try:
     music.resolve_stream_url = _stop_during(pl)
     built = []
 
-    async def _tracking_build(url, volume, ffmpeg, start_at=0.0):
+    async def _tracking_build(url, volume, ffmpeg, start_at=0.0, filter_name="off"):
         src = _Src(url)
         built.append(src)
         return src

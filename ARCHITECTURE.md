@@ -245,6 +245,24 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **Position comes from the clock, not FFmpeg**, which exposes no playback cursor.
   `GuildPlayer.mark_started/paused/resumed/stopped` maintain it. **Every `vc.pause()` and
   `vc.resume()` call site must update it**, or the progress bar and `/seek` drift.
+- **Position is TRACK seconds, whatever the audio filter.** A speed filter (`/filter nightcore`
+  1.25, `slowed` 0.8; `music.FILTER_PRESETS` is the one table of chains and rates) moves through
+  the track at `rate` track seconds per wall second, so `elapsed_seconds` scales only the
+  wall-clock part by `GuildPlayer.rate` (the seek offset is already track time, and pauses
+  still freeze the clock). Everything reads that one number: the progress bar, `/seek` and
+  `-ss` (applied to the input, before the filter), the queue snapshot's `resume_position`, and
+  autoplay's `played_enough` (track seconds). The only wall-time use is `end_timestamp`, which
+  divides the time left by the rate. `play_track` and `restart_at` capture `player.filter_name`
+  BEFORE the resolve and pass that same name to `build_source` and `_start`, and `_start` records
+  it as `player.active_filter` with `player.rate`: those two describe the source that is really
+  playing, `filter_name` only what the NEXT source will use. The card reads `active_filter` and
+  `rate` (never `filter_name`), so it shows and times what is audible. `music_filter` decides
+  "playing or idle" UNDER `player.lock`: an advance loading a track holds it with nothing audible
+  yet, and that track has already captured the old filter, so the command waits and then
+  restarts it. A restart that fails or is overtaken by `/stop` puts `filter_name` back. A filter forces
+  the PCM path in `build_source` (opus passthrough can't change samples). Filters touch the music
+  source only, so Amy's voice, mixed in by the `Mixer`, is never filtered. The filter is per
+  player, kept by `/stop`, cleared by `reset` (leaving), and not persisted.
 - **Build the new source before touching the old one.** `music.prepare_source` does the slow
   resolve and build; `restart_at` only calls `vc.stop()` once it has a source in hand. It
   used to stop first, so a failed resolve dropped the track. It also re-pauses a paused track.
@@ -277,7 +295,8 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **Stream URLs expire** (about 6 hours). Metadata is resolved when a track is queued; the
   stream URL only when it plays. Never resolve a whole queue up front.
 - **At 100% volume Opus passes straight through**; below that it must be decoded to PCM,
-  which costs noticeably more CPU and can stutter. That's why the default volume is 1.0.
+  which costs noticeably more CPU and can stutter. That's why the default volume is 1.0. An
+  active audio filter decodes too, whatever the volume.
 
 ### FFmpeg
 

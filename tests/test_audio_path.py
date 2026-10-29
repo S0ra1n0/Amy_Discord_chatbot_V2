@@ -58,6 +58,24 @@ if _ff:
             assert _frames > 0,                 "local .%s (%s) produced no audio - %d/10 frames" % (_ext, _label, _frames)
             print("  local .%-4s %-7s -> %d/10 frames" % (_ext, _label, _frames))
         os.remove(_path)
+    # Audio filters: a filtered source decodes (no passthrough, even at full volume) and its
+    # length is the track's divided by the preset's rate; -ss is in TRACK time. 6 s tone,
+    # started 2 s in: 4 track seconds -> 4 / rate seconds of 20 ms frames.
+    _wav = os.path.join(_dir, "filter.wav")
+    _sp.run([_ff, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-ac", "2",
+             "-ar", "44100", _wav], capture_output=True, check=True)
+    for _name, (_chain, _fr) in music.FILTER_PRESETS.items():
+        _src = asyncio.run(music.build_source(_wav, 1.0, _ff, 2.0, _name))
+        _n = 0
+        while _src.read():
+            _n += 1
+        _src.cleanup()
+        _expect = 4.0 / _fr / 0.02
+        print("  filter %-10s -> %d frames (expected ~%d)" % (_name, _n, _expect))
+        assert abs(_n - _expect) <= 12, "filter %s: %d frames, expected ~%d" % (_name, _n, _expect)
+        if _chain:
+            assert isinstance(_src, discord.PCMVolumeTransformer), "a filter must not pass opus through"
+    os.remove(_wav)
     os.rmdir(_dir)
 else:
     print("  SKIP local file decoding (no ffmpeg)")

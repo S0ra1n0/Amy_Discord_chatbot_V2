@@ -60,7 +60,7 @@ def count_of(n: int, thing: str) -> str:
 
 # ---- Confirmations --------------------------------------------------------------------------------
 # {t} = speakable title, {n} = a count, {pos} = queue position, {at} = a spoken time,
-# {level} = volume percent, {name} = playlist name. Every phrasing must make sense on its own.
+# {level} = volume percent, {name} = playlist name (or the audio filter's name). Every phrasing must make sense on its own.
 LINES = {
     "play_now": ["Now playing {t}.", "Here's {t}.", "Starting {t}."],
     "queued": ["Added {t}. It's number {pos} in the queue.", "{t} is queued, number {pos}.",
@@ -82,6 +82,8 @@ LINES = {
     "clearqueue": ["Cleared {n} from the queue.", "Queue cleared.", "Emptied the queue."],
     "volume": ["Volume {level} percent.", "Setting the volume to {level} percent.",
                "Volume's at {level} percent."],
+    "filter": ["Switching to {name}.", "The {name} filter is on.", "Putting {name} on the music."],
+    "filter_off": ["Filter off.", "Back to the normal sound.", "The music's back to normal."],
     "join": ["Hi everyone!", "Hello! I'm here.", "Hey, good to be here."],
     "leave": ["Bye for now!", "See you later!", "Goodbye, everyone."],
     "up_next": ["Up next, {t}.", "Next up is {t}.", "Here's {t} next."],

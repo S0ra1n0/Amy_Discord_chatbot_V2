@@ -690,17 +690,19 @@ async def resolve_stream_url(track: Track) -> str:
 # seek offset is added back.
 
 def elapsed_seconds(started_at: Optional[float], paused_at: Optional[float],
-                    seek_offset: float, now: float) -> float:
+                    seek_offset: float, now: float, rate: float = 1.0) -> float:
     """
-    How far into the track we are, in seconds.
+    How far into the track we are, in TRACK seconds.
 
     `started_at` is when the current source began, `paused_at` freezes the clock while
-    paused, and `seek_offset` is where in the track that source was told to start.
+    paused, and `seek_offset` is where in the track that source was told to start. `rate` is
+    the audio filter's speed (nightcore 1.25): the track advances `rate` seconds per wall
+    second, so only the wall-clock part is scaled - the seek offset is already track time.
     """
     if started_at is None:
         return 0.0
     end = paused_at if paused_at is not None else now
-    return max(0.0, seek_offset + (end - started_at))
+    return max(0.0, seek_offset + (end - started_at) * rate)
 
 
 def parse_timestamp(text: str) -> Optional[int]:
@@ -763,16 +765,56 @@ def progress_bar(elapsed: float, duration: Optional[int], width: int = 18) -> st
     return f"{stamp} {bar} {format_duration(duration)}"
 
 
-def end_timestamp(elapsed: float, duration: Optional[int], now: float) -> Optional[int]:
+def end_timestamp(elapsed: float, duration: Optional[int], now: float,
+                  rate: float = 1.0) -> Optional[int]:
     """
     Unix time at which the track will end, for Discord's live `<t:N:R>` markup.
+
+    `elapsed` and `duration` are track seconds; the end in WALL time is the time left divided
+    by `rate` (nightcore ends sooner, slowed later).
 
     None when the length is unknown (live stream) or the position is already at or past
     the end, so the card never promises a time it cannot keep.
     """
     if not duration or duration <= 0 or elapsed >= duration:
         return None
-    return int(round(now + duration - max(0.0, elapsed)))
+    return int(round(now + (duration - max(0.0, elapsed)) / (rate if rate > 0 else 1.0)))
+
+
+#----Audio filters------
+# /filter presets: name -> (FFmpeg -af chain, rate). `rate` is how fast the track moves
+# through its own length (see elapsed_seconds). Music only: Amy's voice is mixed in AFTER
+# the music source, so it never passes through these. Speed-changing presets resample to
+# 48 kHz first, so asetrate always starts from a known rate whatever the file is, and back
+# to 48 kHz after, which is what Discord wants. Chains verified against the FFmpeg here by
+# feeding a sine tone through each: output length == input / rate (slowed is ~70 ms longer:
+# the echo tail).
+FILTER_OFF: str = "off"
+FILTER_PRESETS: Dict[str, Tuple[str, float]] = {
+    FILTER_OFF: ("", 1.0),
+    # Low shelf +9 dB at 100 Hz, then a limiter so the boost can't clip
+    "bass boost": ("bass=g=9:f=100:w=0.6,alimiter=limit=0.95", 1.0),
+    # 48000 * 1.25 = 60000: speed and pitch up together
+    "nightcore": ("aresample=48000,asetrate=60000,aresample=48000", 1.25),
+    # 48000 * 0.8 = 38400, plus a light echo
+    "slowed": ("aresample=48000,asetrate=38400,aresample=48000,aecho=0.8:0.85:70:0.25", 0.8),
+}
+
+
+def filter_chain(name: str) -> str:
+    """The FFmpeg -af chain for a preset; "" for off or an unknown name."""
+    return FILTER_PRESETS.get(name, FILTER_PRESETS[FILTER_OFF])[0]
+
+
+def filter_rate(name: str) -> float:
+    """How fast a preset moves through the track (1.0 for off or an unknown name)."""
+    return FILTER_PRESETS.get(name, FILTER_PRESETS[FILTER_OFF])[1]
+
+
+def normalise_filter(name: Optional[str]) -> Optional[str]:
+    """A preset name as stored ("bass boost"), or None when `name` is not a preset."""
+    key = " ".join((name or "").lower().split())
+    return key if key in FILTER_PRESETS else None
 #--------------------------------------
 
 
@@ -813,6 +855,15 @@ class GuildPlayer:
         self.started_at: Optional[float] = None
         self.paused_at: Optional[float] = None
         self.seek_offset: float = 0.0
+        # Audio filter (/filter): a FILTER_PRESETS name, kept across songs until changed or
+        # Amy leaves (reset); in memory only. `rate` is the speed of the source that is
+        # playing NOW (set by mark_started) - it can differ from the preset for the moment
+        # between a /filter and the restart that applies it.
+        self.filter_name: str = FILTER_OFF
+        self.rate: float = 1.0
+        # The filter the playing source was BUILT with (set by _start). What the card shows
+        # and what `rate` belongs to; `filter_name` is only what the NEXT source will use.
+        self.active_filter: str = FILTER_OFF
         # One-shot, set when a saved queue is restored so the first track picks up where it
         # left off. Consumed by the next advance, like skip_requested.
         self.resume_position: float = 0.0
@@ -827,11 +878,13 @@ class GuildPlayer:
         self.idle_task = None
 
     #----Position------
-    def mark_started(self, offset: float = 0.0, now: Optional[float] = None) -> None:
-        """A source just began playing, `offset` seconds into the track."""
+    def mark_started(self, offset: float = 0.0, now: Optional[float] = None,
+                     rate: float = 1.0) -> None:
+        """A source just began playing, `offset` track seconds in, at speed `rate`."""
         self.started_at = time.monotonic() if now is None else now
         self.paused_at = None
         self.seek_offset = max(0.0, offset)
+        self.rate = rate
 
     def mark_paused(self, now: Optional[float] = None) -> None:
         """Freeze the clock. Ignored if already paused, so a double pause can't rewind."""
@@ -856,11 +909,13 @@ class GuildPlayer:
         self.started_at = None
         self.paused_at = None
         self.seek_offset = 0.0
+        self.rate = 1.0
+        self.active_filter = FILTER_OFF
 
     def position(self, now: Optional[float] = None) -> float:
-        """Seconds into the current track, excluding any time spent paused."""
+        """TRACK seconds into the current track (not wall seconds), excluding paused time."""
         return elapsed_seconds(self.started_at, self.paused_at, self.seek_offset,
-                               time.monotonic() if now is None else now)
+                               time.monotonic() if now is None else now, self.rate)
 
     def stop_all(self) -> None:
         """
@@ -893,6 +948,7 @@ class GuildPlayer:
         self.now_playing_msg = None
         self.last_played = None
         self.history.clear()      # leaving voice ends the session
+        self.filter_name = FILTER_OFF   # /stop keeps the filter; leaving does not
         self.mark_stopped()
 
 
@@ -1021,8 +1077,15 @@ def seek_before_options(start_at: float, source: str = "") -> str:
     return " ".join(parts)
 
 
+def source_options(filter_name: str = FILTER_OFF) -> str:
+    """FFmpeg's output options: video off, plus the preset's -af chain when a filter is on."""
+    chain = filter_chain(filter_name)
+    return f"{FFMPEG_OPTIONS} -af {chain}" if chain else FFMPEG_OPTIONS
+
+
 async def build_source(
-    stream_url: str, volume: float, ffmpeg: Optional[str], start_at: float = 0.0
+    stream_url: str, volume: float, ffmpeg: Optional[str], start_at: float = 0.0,
+    filter_name: str = FILTER_OFF,
 ) -> discord.AudioSource:
     """
     Build an audio source, picking the cheapest path that still honours `volume`.
@@ -1037,11 +1100,16 @@ async def build_source(
 
     `start_at` begins playback that many seconds into the track, which is how /seek and
     /replay work - there is no way to move an already-playing source, so they rebuild it.
+    `start_at` is TRACK time (-ss is applied to the input, before any filter).
+
+    A filter (`filter_name`, see FILTER_PRESETS) changes the samples, so it can never take the
+    opus-passthrough path: it always decodes to PCM, where /volume works as well.
     """
     executable = ffmpeg or "ffmpeg"
     before = seek_before_options(start_at, stream_url)
+    options = source_options(filter_name)
 
-    if volume >= OPUS_PASSTHROUGH_THRESHOLD:
+    if volume >= OPUS_PASSTHROUGH_THRESHOLD and not filter_chain(filter_name):
         try:
             # This is what from_probe does internally, split open so the probed bitrate can
             # be clamped before it reaches libopus - see clamp_bitrate.
@@ -1053,7 +1121,7 @@ async def build_source(
                 bitrate=clamp_bitrate(bitrate),
                 executable=executable,
                 before_options=before,
-                options=FFMPEG_OPTIONS,
+                options=options,
             )
         except Exception as e:
             # Probing can fail on odd sources; PCM always works
@@ -1063,13 +1131,13 @@ async def build_source(
         stream_url,
         executable=executable,
         before_options=before,
-        options=FFMPEG_OPTIONS,
+        options=options,
     )
     return discord.PCMVolumeTransformer(source, volume=volume)
 
 
-async def prepare_source(track: Track, volume: float,
-                         start_at: float = 0.0) -> discord.AudioSource:
+async def prepare_source(track: Track, volume: float, start_at: float = 0.0,
+                         filter_name: str = FILTER_OFF) -> discord.AudioSource:
     """
     Resolve `track` and build its audio source - the slow part, seconds over the network.
 
@@ -1077,7 +1145,7 @@ async def prepare_source(track: Track, volume: float,
     touching what is already playing: if this raises, nothing has been disturbed.
     """
     stream_url = await resolve_stream_url(track)
-    return await build_source(stream_url, volume, find_ffmpeg(), start_at)
+    return await build_source(stream_url, volume, find_ffmpeg(), start_at, filter_name)
 
 
 def _discard(source: discord.AudioSource) -> None:
@@ -1090,8 +1158,11 @@ def _discard(source: discord.AudioSource) -> None:
 
 def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
            source: discord.AudioSource, on_finished: Callable[[Optional[Exception]], None],
-           start_at: float) -> None:
-    """Hand a ready source to the voice client and record it on the player."""
+           start_at: float, filter_name: str = FILTER_OFF) -> None:
+    """
+    Hand a ready source to the voice client and record it on the player. `filter_name` is the
+    filter the source was BUILT with (not necessarily the player's now): it sets the clock rate.
+    """
     player.current = track
     player.cancel_idle()
     if player.speech is not None:
@@ -1102,9 +1173,11 @@ def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
             voice_client.stop()
         source = mixer.Mixer(source, player.speech, player.duck, player.on_hold_done)
     voice_client.play(source, after=on_finished)
-    player.mark_started(start_at)
+    player.mark_started(start_at, rate=filter_rate(filter_name))
+    player.active_filter = filter_name
     log.info(f"Now playing: {track.title}"
-             + (f" (from {format_duration(int(start_at))})" if start_at else ""))
+             + (f" (from {format_duration(int(start_at))})" if start_at else "")
+             + (f" [{filter_name}]" if filter_chain(filter_name) else ""))
 
 
 async def play_track(
@@ -1122,12 +1195,13 @@ async def play_track(
     moment the source was ready.
     """
     generation = player.generation
-    source = await prepare_source(track, player.volume, start_at)
+    filter_name = player.filter_name      # captured: the source and its clock must agree
+    source = await prepare_source(track, player.volume, start_at, filter_name)
     if player.generation != generation:
         _discard(source)
         log.info(f"Not starting {track.title}: playback was stopped while it loaded")
         return False
-    _start(voice_client, player, track, source, on_finished, start_at)
+    _start(voice_client, player, track, source, on_finished, start_at, filter_name)
     return True
 
 
@@ -1155,13 +1229,15 @@ async def restart_at(
     """
     generation = player.generation
     was_paused = music_paused(voice_client)
-    source = await prepare_source(track, player.volume, position)   # raises: nothing changed
+    filter_name = player.filter_name      # captured: the source and its clock must agree
+    # raises: nothing changed
+    source = await prepare_source(track, player.volume, position, filter_name)
     if player.generation != generation:
         _discard(source)
         log.info(f"Not seeking {track.title}: playback was stopped while it loaded")
         return False
     voice_client.stop()
-    _start(voice_client, player, track, source, on_finished, position)
+    _start(voice_client, player, track, source, on_finished, position, filter_name)
     if was_paused:
         voice_client.pause()
         player.mark_paused()

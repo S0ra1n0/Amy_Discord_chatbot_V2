@@ -57,6 +57,8 @@ def now_playing_embed(
     stopped: bool = False,
     elapsed: Optional[float] = None,
     now: Optional[float] = None,
+    filter_name: str = music.FILTER_OFF,
+    rate: Optional[float] = None,
 ) -> discord.Embed:
     """
     The main player card. `stopped` renders the finished state after /stop or an empty queue.
@@ -64,7 +66,10 @@ def now_playing_embed(
     `elapsed` adds a progress bar. It is omitted on the finished card, where a position
     would be meaningless, and for tracks of unknown length it degrades to the elapsed time.
     While playing, a second line gives the end as a Discord relative timestamp; `now`
-    (unix seconds, default the clock) is injectable for tests.
+    (unix seconds, default the clock) is injectable for tests. `elapsed` is TRACK seconds;
+    under a speed-changing filter the end time is scaled by `rate` (the speed of the source
+    that is really playing; default: the named filter's), and a "Filter" field shows
+    `filter_name` while one is on. Callers pass the player's active_filter and rate.
     """
     if stopped:
         heading, colour = "Playback finished", COLOUR_INFO
@@ -86,7 +91,8 @@ def now_playing_embed(
         # Discord clients count this down themselves, so it stays live between redraws.
         # Not while paused: the clock is stopped, and resume redraws the card.
         ends = None if paused else music.end_timestamp(
-            elapsed, track.duration, time.time() if now is None else now)
+            elapsed, track.duration, time.time() if now is None else now,
+            music.filter_rate(filter_name) if rate is None else rate)
         if ends is not None:
             value += f"\nEnds <t:{ends}:R>"
         embed.add_field(name="Position", value=value, inline=False)
@@ -100,6 +106,8 @@ def now_playing_embed(
         embed.add_field(name="Up next", value=f"{queue_len} track(s)", inline=True)
     if loop_mode is not LoopMode.OFF:
         embed.add_field(name="Loop", value=loop_mode.value, inline=True)
+    if not stopped and music.filter_chain(filter_name):
+        embed.add_field(name="Filter", value=filter_name, inline=True)
     if track.thumbnail:
         embed.set_thumbnail(url=track.thumbnail)
     return embed

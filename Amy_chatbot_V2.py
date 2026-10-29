@@ -1092,7 +1092,8 @@ class PlayerControls(discord.ui.View):
         await interaction.response.edit_message(
             embed=ui.now_playing_embed(player.current, len(player.queue),
                                        player.loop_mode, player.volume, paused=paused,
-                                       elapsed=player.position()),
+                                       elapsed=player.position(),
+                                       filter_name=player.active_filter, rate=player.rate),
             view=PlayerControls(paused=paused),
         )
 
@@ -1287,7 +1288,8 @@ async def refresh_now_playing(guild: discord.Guild, stopped: bool = False,
     else:
         embed = ui.now_playing_embed(player.current, len(player.queue),
                                      player.loop_mode, player.volume, paused=paused,
-                                     elapsed=player.position())
+                                     elapsed=player.position(),
+                                     filter_name=player.active_filter, rate=player.rate)
         view = PlayerControls(paused=paused)
 
     if player.now_playing_msg is not None:
@@ -1774,7 +1776,8 @@ async def music_nowplaying(ctx: MusicContext) -> MusicResult:
     paused = music.music_paused(ctx.vc)
     return Reply(
         embed=ui.now_playing_embed(p.current, len(p.queue), p.loop_mode, p.volume,
-                                   paused=paused, elapsed=p.position()),
+                                   paused=paused, elapsed=p.position(),
+                                   filter_name=p.active_filter, rate=p.rate),
         view=PlayerControls(paused=paused),
     )
 
@@ -2185,6 +2188,73 @@ async def music_loop(ctx: MusicContext, mode: LoopMode) -> MusicResult:
     ctx.player.loop_mode = mode
     announce(ctx.guild, f"loop_{mode.value}")
     return _info(f"Loop set to **{mode.value}**.")
+
+
+def filter_status(name: str) -> str:
+    if music.filter_chain(name):
+        return f"Audio filter: **{name}** (music only). `/filter off` turns it off."
+    return "Audio filter: **off**. Try `/filter bass boost`, `nightcore` or `slowed`."
+
+
+async def music_filter(ctx: MusicContext, preset: Optional[str] = None) -> MusicResult:
+    """
+    Show the audio filter, or (preset given) change it - with /loop's permission rule.
+    Playing: restart the current song at its current position with the new chain (under the
+    player lock, like /seek). Idle: just store it for the next song. Slow: the restart
+    re-resolves the stream, so the slash command defers first.
+    """
+    player = ctx.player
+    if preset is None:
+        return _info(filter_status(player.filter_name))
+    name = music.normalise_filter(preset)
+    if name is None:
+        return _error("I don't know that filter. Choose: " + ", ".join(music.FILTER_PRESETS) + ".")
+    vc = ctx.connected()
+    if vc is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    event = "filter_off" if name == music.FILTER_OFF else "filter"
+    if name == player.filter_name:
+        return _info(filter_status(name))
+
+    guild = ctx.guild
+    loop = asyncio.get_running_loop()
+    after = music.make_after_callback(loop, lambda: advance_playback(guild))
+    stored_only = False
+    async with player.lock:      # as /seek: the old source's after-callback must wait
+        # Decided UNDER the lock: while an advance is loading the next track it holds the
+        # lock and nothing is audible yet, but that track will be built with the filter it
+        # captured earlier - so wait for it, then restart it like any playing song.
+        track = player.current
+        if track is None or not music.music_active(vc, player):
+            player.filter_name = name        # nothing playing: applies from the next song
+            stored_only = True
+        else:
+            if track.is_local is False and not track.query.startswith("http"):
+                return _error("I can't change the filter on this track.")
+            previous = player.filter_name
+            player.filter_name = name
+            try:
+                # position() is TRACK time, which is what -ss takes. Read under the lock,
+                # right before the restart, so the time spent waiting for it isn't lost.
+                target = music.clamp_seek(player.position(), track.duration)
+                moved = await music.restart_at(vc, player, track, after, target)
+            except Exception as e:
+                player.filter_name = previous    # the old source is still playing, unfiltered
+                log.error(f"Filter change failed on '{track.title}': {e}")
+                return _error(f"I couldn't change the filter, so **{track.title}** is still "
+                              "playing as it was.")
+            if not moved:
+                player.filter_name = previous    # keep the message true: nothing changed
+                return _info("Playback was stopped, so I didn't change the filter.")
+    if stored_only:
+        announce(guild, event, name=name)
+        return _info(filter_status(name) + " It applies from the next song.")
+    await refresh_now_playing(guild, paused=music.music_paused(vc))
+    await ensure_speaking(guild)
+    announce(guild, event, name=name)
+    return _info(filter_status(name))
 
 
 def autoplay_status() -> str:
@@ -2684,6 +2754,23 @@ async def slash_shuffle(interaction: discord.Interaction) -> None:
 async def slash_loop(interaction: discord.Interaction,
                      mode: app_commands.Choice[str]) -> None:
     await simple_music(interaction, music_loop, LoopMode(mode.value))
+
+
+@tree.command(name="filter", description="Change how the music sounds (music only)")
+@app_commands.describe(preset="off, bass boost, nightcore or slowed (empty shows the current one)")
+@app_commands.choices(preset=[app_commands.Choice(name=n, value=n) for n in music.FILTER_PRESETS])
+@app_commands.guild_only()
+async def slash_filter(interaction: discord.Interaction,
+                       preset: Optional[app_commands.Choice[str]] = None) -> None:
+    if not await voice_gate(interaction):
+        return
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    # Changing it restarts the song, which re-resolves the stream URL (slow)
+    await interaction.response.defer()
+    await send_reply(interaction, await music_filter(
+        MusicContext.build(interaction, guild), None if preset is None else preset.value))
 
 
 @tree.command(name="autoplay", description="Keep playing related songs when the queue ends")

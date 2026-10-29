@@ -2,7 +2,7 @@
 """Help command text for the Amy chatbot"""
 
 HELP_EVERYONE = """**Commands — Everyone:**
-`/help` - Display command list and usage
+`/help` - Show the command list
 `/dice [sides] [amount]` - Roll dice (default: one 6-sided)
 `/rng [min] [max]` - Random number between min and max
 `/websearch [query] [recency]` - Search the web and show the results
@@ -28,7 +28,8 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/nowplaying` - Show the current track
 `/lyrics [song]` - Lyrics for the current track, or search one
 `/loop [off|track|queue]` - Set repeat mode
-`/autoplay [on|off]` - Play related songs when the queue ends"""
+`/autoplay [on|off]` - Play related songs when the queue ends
+`/filter [preset]` - Bass boost, nightcore, slowed or off"""
 
 HELP_ADMIN = """
 **Commands — Admin only:**
@@ -36,8 +37,8 @@ HELP_ADMIN = """
 `/voice [on|off] [up_next]` - My voice in calls on/off, announce next song, or status
 `/toggle` - Enable/disable bot responses (remembered across restarts)
 `/forget` - Wipe conversation memory for this channel
-`/status` - Show bot, Ollama, voice and memory status
-`/model [name]` - Show the model, or switch to another installed one (remembered)
-`/create [name]` - Create a new voice channel and join it
+`/status` - Show bot, Ollama and voice status
+`/model [name]` - Show or switch the model (remembered)
+`/create [name]` - Create a voice channel and join it
 `/volume [0-100]` - Show or set playback volume
 `/clearqueue` - Empty the queue (current track keeps playing)"""

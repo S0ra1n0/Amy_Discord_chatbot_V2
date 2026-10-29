@@ -67,6 +67,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/lyrics [song]`         | Show lyrics for the current track, or search for `artist - title`         | Everyone   |
 | `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
 | `/autoplay [on\|off]` | Keep playing related songs when the queue ends (remembered; no argument shows it) | In-channel |
+| `/filter [off\|bass boost\|nightcore\|slowed]` | Change how the music sounds (no argument shows it); see [Audio filters](#audio-filters) | In-channel |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
 
 ### Web search
@@ -391,6 +392,30 @@ Amy keeps **one** now-playing card per server and edits it in place as tracks ch
 than posting a new message for every track in a long queue. `/nowplaying` always posts a
 fresh card if the old one has scrolled away.
 
+### Audio filters
+
+`/filter` changes how the **music** sounds. Amy's own voice is mixed in afterwards, so it is
+never filtered. Presets:
+
+- **bass boost** - a low shelf of +9 dB around 100 Hz, followed by a limiter so the boost can't clip.
+- **nightcore** - 25% faster, which also raises the pitch.
+- **slowed** - 20% slower and lower, with a light echo.
+- **off** - the normal sound.
+
+With no argument `/filter` shows the current one. Changing it while a song plays **restarts
+that song from where it is** with the new sound (a second or two of the stream is re-fetched,
+so you may hear a short repeat or gap, and Amy says "Switching to nightcore"); with nothing
+playing it is just stored for the next song. It then applies to every song until you change
+it, and is reset by `/leave`, **not** by `/stop`. It is not saved across a bot restart. Who may
+use it: the same people as `/loop` (in Amy's channel, or an admin). The player card shows a
+**Filter** field while one is on.
+
+A filter forces Amy to decode the audio instead of copying YouTube's opus stream (see
+[Volume and audio quality](#volume-and-audio-quality)), so it costs the same extra CPU as
+playing below 100%. Positions are always in **track** time: under nightcore a 4:00 song
+reaches its end after 3:12 of real time, the progress bar and `Ends in` line follow that,
+`/seek 1:30` means 1:30 into the song, and a saved queue resumes at the right place.
+
 ### Volume and audio quality
 
 Volume defaults to **100%**, and that's deliberate. At full volume Amy copies the opus stream from YouTube straight to Discord with no decoding or re-encoding — far less CPU, which is the main cause of stuttering.
@@ -674,7 +699,7 @@ python tests/run_tests.py             # offline suites only (~50s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-29 suites (21 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+30 suites (22 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and

@@ -85,7 +85,8 @@ print("=== slow commands defer (Discord's 3-second response limit) ===")
 # interaction fails with "application did not respond".
 for name in ("play", "search", "status", "join", "leave", "create", "model",
              "seek", "replay",     # both re-resolve the stream URL before restarting
-             "lyrics"):      # asks LRCLIB over the network
+             "lyrics",       # asks LRCLIB over the network
+             "filter"):      # restarts the song, re-resolving the stream
     src = inspect.getsource(by_name[name].callback)
     check("/%-8s defers before slow work" % name, "response.defer(" in src)
 
@@ -93,7 +94,7 @@ print()
 print("=== guild-only where a guild is required ===")
 GUILD_ONLY = {"join", "leave", "create", "play", "search", "pause", "resume", "skip",
               "stop", "queue", "nowplaying", "remove", "skipto", "shuffle", "loop",
-              "clearqueue", "volume", "forget", "seek", "replay", "previous", "say", "shush", "autoplay"}
+              "clearqueue", "volume", "forget", "seek", "replay", "previous", "say", "shush", "autoplay", "filter"}
 for name in sorted(GUILD_ONLY):
     c = by_name[name]
     allowed = getattr(c, "allowed_contexts", None)
