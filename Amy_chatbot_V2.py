@@ -41,17 +41,28 @@ import voicelines
 from llm import (  # noqa: F401
     _REASONING_OPENERS,
     build_system_prompt,
+    CHAT_ERROR_MESSAGE,
     extract_model_names,
+    final_message_text,
+    final_reply,
+    find_split_index,
     get_display_text,
     judge_probe_reply,
     KNOWLEDGE_WITH_SEARCH,
     KNOWLEDGE_WITHOUT_SEARCH,
+    live_message_text,
     looks_like_reasoning,
     normalise_think_mode,
+    plan_overflow,
     startup_model_choice,
+    STREAM_CHUNK_LIMIT,
     strip_think_tags,
+    system_with_time,
     THINK_MODES,
     think_value,
+    tool_call_query,
+    tool_round_call,
+    tool_round_messages,
 )
 import ui
 from ui import Reply
@@ -61,19 +72,6 @@ from ui import Reply
 MAX_DICE_SIDES: int = 1000     # Guard rails for /dice - the roll runs on the
 MAX_DICE_AMOUNT: int = 100     # event loop, so an unbounded amount freezes the bot
 MAX_DISCORD_LEN: int = 2000
-STREAM_CHUNK_LIMIT: int = 1990  # Leaves room for the streaming cursor suffix
-
-def find_split_index(text: str, limit: int) -> int:
-    """Find an index <= limit to split text at, preferring a newline or space boundary."""
-    if len(text) <= limit:
-        return len(text)
-    split_at = text.rfind('\n', 0, limit)
-    if split_at == -1:
-        split_at = text.rfind(' ', 0, limit)
-    if split_at <= 0:
-        return limit
-    return split_at + 1
-
 #--------------------------------------
 
 #----Setup Discord Bot and Ollama Model------
@@ -678,13 +676,8 @@ async def chat_streaming(
     # Only the most recent turns are replayed; the full conversation stays in the database.
     history = db.get_messages(server_id, channel_id, limit=HISTORY_LIMIT)
 
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    current_day = datetime.now().strftime("%A")
-    system_with_time = (
-        f"{system_prompt}\n\n[IMPORTANT] Current date and time: {current_time} ({current_day}). "
-        "Use this information when answering questions about time."
-    )
-    messages = [{"role": "system", "content": system_with_time}] + history
+    messages = [{"role": "system",
+                 "content": system_with_time(system_prompt, datetime.now())}] + history
 
     def stream_worker(convo, offer_tools: bool) -> None:
         """Pump one Ollama stream into the queue. Tool calls are captured, not queued."""
@@ -731,17 +724,13 @@ async def chat_streaming(
     async def flush_overflow(display: str) -> None:
         """While pending text overflows the Discord limit, finalize the active message and start a new one."""
         nonlocal active_msg, committed_len
-        pending = display[committed_len:]
-        while len(pending) > STREAM_CHUNK_LIMIT:
-            idx = find_split_index(pending, STREAM_CHUNK_LIMIT)
-            chunk = pending[:idx]
+        for chunk in plan_overflow(display, committed_len):
             try:
                 await active_msg.edit(content=chunk)
             except discord.HTTPException:
                 pass
-            committed_len += idx
+            committed_len += len(chunk)
             active_msg = await active_msg.channel.send("⏳ Thinking...")
-            pending = display[committed_len:]
 
     async def consume_stream(convo, offer_tools: bool) -> None:
         """Run one streaming pass, editing the live message as tokens arrive."""
@@ -757,10 +746,8 @@ async def chat_streaming(
             if now - last_edit >= STREAM_EDIT_INTERVAL:
                 display = get_display_text(accumulated)
                 await flush_overflow(display)
-                pending = display[committed_len:]
-                content = (pending + " ▌") if pending else "⏳ Thinking..."
                 try:
-                    await active_msg.edit(content=content)
+                    await active_msg.edit(content=live_message_text(display, committed_len))
                     last_edit = now
                 except discord.HTTPException:
                     pass
@@ -770,13 +757,9 @@ async def chat_streaming(
     # we run it and stream a second pass with the findings appended.
     await consume_stream(messages, offer_tools=WEB_SEARCH)
 
-    calls = error_flag.get("tool_calls") or []
-    if calls and not error_flag["occurred"]:
-        call = calls[0]                      # one search per message - no tool loops
-        args = call["function"].get("arguments") or {}
-        if not isinstance(args, dict):
-            args = {}
-        query = args.get("query") or user_message
+    call = tool_round_call(error_flag.get("tool_calls") or [], error_flag["occurred"])
+    if call is not None:                     # one search per message - no tool loops
+        query = tool_call_query(call, user_message)
         # Freshness is inferred from the query wording rather than asked of the model - a
         # second tool parameter measurably cost search decisions (see websearch.py).
         recency = websearch.infer_recency(query)
@@ -799,12 +782,9 @@ async def chat_streaming(
             await websearch.enrich(results)
         # tool_name ties the result back to the call. Without it the model treats the
         # results as an unattributed blob and may insist it has no web access at all.
-        messages = messages + [
-            {"role": "assistant", "content": "", "tool_calls": [call]},
-            {"role": "tool",
-             "tool_name": websearch.WEB_SEARCH_TOOL["function"]["name"],
-             "content": websearch.format_for_model(query, results, recency=recency)},
-        ]
+        messages = tool_round_messages(
+            messages, call, websearch.WEB_SEARCH_TOOL["function"]["name"],
+            websearch.format_for_model(query, results, recency=recency))
 
         # Reset for the second pass; the first produced a tool call, not prose
         accumulated = ""
@@ -815,35 +795,20 @@ async def chat_streaming(
     if error_flag["occurred"]:
         db.pop_last_message(server_id, channel_id)
         try:
-            await active_msg.edit(
-                content="I apologize, but I'm currently having trouble connecting to my knowledge system. Please try again in a moment."
-            )
+            await active_msg.edit(content=CHAT_ERROR_MESSAGE)
         except discord.HTTPException:
             pass
         return None
 
-    final_response = strip_think_tags(accumulated)
-    if not final_response:
-        # Empty output almost always means the model hit its token ceiling rather than
-        # having nothing to say, so don't tell the user to rephrase - it won't help.
-        if error_flag.get("done_reason") == "length":
-            log.warning("Model hit its token limit before producing an answer")
-            final_response = (
-                "I ran out of room before I could finish that answer. "
-                "Try asking for something shorter, or ask an admin to raise my limit."
-            )
-        else:
-            final_response = (
-                "I apologize, but I couldn't produce an answer for that one. "
-                "Could you try asking a different way?"
-            )
+    final_response, hit_limit = final_reply(accumulated, error_flag.get("done_reason"))
+    if hit_limit:
+        log.warning("Model hit its token limit before producing an answer")
 
     db.store_message(server_id, channel_id, "assistant", final_response)
 
     await flush_overflow(final_response)
-    pending = final_response[committed_len:]
     try:
-        await active_msg.edit(content=pending if pending else "✅ Done.")
+        await active_msg.edit(content=final_message_text(final_response, committed_len))
     except discord.HTTPException as e:
         log.error(f"Failed to edit final message: {e}")
     return final_response

@@ -132,5 +132,84 @@ for prompt in (on, off):
     assert prompt.index("Knowledge:") < prompt.index("Remember:")
 print("build_system_prompt: OK (claims match the tools offered)")
 
+# ---- Streaming a chat reply: the decisions between Ollama and Discord -------------------
+from datetime import datetime
+
+LIM = llm.STREAM_CHUNK_LIMIT
+assert LIM == 1990
+
+# Overflow planning: nothing until the uncommitted text is OVER the limit.
+assert llm.plan_overflow("", 0) == []
+assert llm.plan_overflow("x" * LIM, 0) == [], "exactly at the limit still fits"
+assert llm.plan_overflow("x" * (LIM + 1), 0) == ["x" * LIM], "one over splits off a full page"
+_two = llm.plan_overflow("x" * (LIM * 2 + 5), 0)
+assert _two == ["x" * LIM, "x" * LIM], "two pages finalized, 5 characters stay pending: %r" % [len(p) for p in _two]
+# committed_len moves the window: only the uncommitted tail counts.
+assert llm.plan_overflow("x" * (LIM + 500), 500) == []
+assert llm.plan_overflow("x" * (LIM + 501), 500) == ["x" * LIM]
+# Splits prefer a boundary, and the pieces always rebuild the original text.
+_text = ("word " * 900).strip()
+_pieces = llm.plan_overflow(_text, 0)
+assert _pieces and all(len(p) <= LIM for p in _pieces)
+assert "".join(_pieces) + _text[sum(map(len, _pieces)):] == _text
+assert _pieces[0].endswith(" "), "split on a space, not mid-word"
+assert llm.find_split_index("hello world", 2000) == 11
+assert llm.find_split_index("x" * 2500, 1990) == 1990
+print("plan_overflow: OK (exactly at limit, one over, multi-page, committed window)")
+
+# Live and final message text.
+assert llm.live_message_text("", 0) == "⏳ Thinking..."
+assert llm.live_message_text("Hi", 0) == "Hi ▌"
+assert llm.live_message_text("Hi there", 3) == "there ▌"
+assert llm.live_message_text("Hi", 2) == "⏳ Thinking...", "nothing uncommitted yet"
+assert llm.final_message_text("Hi there", 0) == "Hi there"
+assert llm.final_message_text("Hi there", 3) == "there"
+assert llm.final_message_text("Hi", 2) == "✅ Done.", "everything already committed"
+
+# Think tags split across chunks: the display never shows a half-open block or a stray tag.
+_acc = ""
+_seen = []
+for _chunk in ["<th", "ink>plan", " it</thi", "nk>Hel", "lo"]:
+    _acc += _chunk
+    _seen.append(llm.get_display_text(_acc))
+assert _seen[0] == "<th", "a tag that has not finished yet is just text"
+assert _seen[1] == _seen[2] == "", "an open think block shows nothing: %r" % _seen
+assert _seen[3] == "Hel" and _seen[4] == "Hello", _seen
+assert llm.final_reply(_acc, "stop") == ("Hello", False)
+print("think tags across chunks: OK")
+
+# Empty answers: explain the cause, and only the token ceiling is flagged.
+assert llm.final_reply("", "length") == (llm.OUT_OF_ROOM_MESSAGE, True)
+assert llm.final_reply("<think>all of it</think>", "length") == (llm.OUT_OF_ROOM_MESSAGE, True)
+assert llm.final_reply("", "stop") == (llm.NO_ANSWER_MESSAGE, False)
+assert llm.final_reply("  ", None) == (llm.NO_ANSWER_MESSAGE, False)
+assert llm.final_reply("Four.", "length") == ("Four.", False), "an answer is never replaced"
+assert "ran out of room" in llm.OUT_OF_ROOM_MESSAGE and "different way" in llm.NO_ANSWER_MESSAGE
+assert "trouble connecting" in llm.CHAT_ERROR_MESSAGE
+print("final_reply: OK (length vs stop, think-only output, real answer kept)")
+
+# Tool-call round: which call, which query, what the second pass is sent.
+_call = {"function": {"name": "web_search", "arguments": {"query": "weather in Hue"}}}
+assert llm.tool_round_call([], False) is None
+assert llm.tool_round_call([_call], True) is None, "a failed pass never searches"
+assert llm.tool_round_call([_call, {"function": {}}], False) is _call, "first call only"
+assert llm.tool_call_query(_call, "ask") == "weather in Hue"
+assert llm.tool_call_query({"function": {"arguments": {}}}, "ask") == "ask"
+assert llm.tool_call_query({"function": {}}, "ask") == "ask"
+assert llm.tool_call_query({"function": {"arguments": "garbage"}}, "ask") == "ask"
+_base = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+_second = llm.tool_round_messages(_base, _call, "web_search", "RESULTS")
+assert _base == [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}], "input untouched"
+assert _second[:2] == _base
+assert _second[2] == {"role": "assistant", "content": "", "tool_calls": [_call]}
+assert _second[3] == {"role": "tool", "tool_name": "web_search", "content": "RESULTS"}, \
+    "the result must carry tool_name or the model ignores it"
+print("tool round helpers: OK")
+
+_sys = llm.system_with_time("PROMPT", datetime(2026, 10, 29, 13, 5, 9))
+assert _sys.startswith("PROMPT\n\n[IMPORTANT] Current date and time: 2026-10-29 13:05:09 (Thursday). ")
+assert _sys.endswith("when answering questions about time.")
+print("system_with_time: OK")
+
 print()
 print("ALL LLM TESTS PASSED")

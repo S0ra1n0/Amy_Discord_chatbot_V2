@@ -17,7 +17,7 @@ one guards against.
 | `ui.py` | Embeds, progress bar, the `Reply` wrapper | discord |
 | `websearch.py` | DuckDuckGo search, page fetching, the `web_search` tool definition | httpx |
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
-| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt | **nothing external** |
+| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
@@ -207,7 +207,7 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `database.py` once read `HISTORY_LIMIT` at import, about 60 lines before `.env` loaded, so
   the `.env` value was silently ignored for its whole life. Settings are parsed in the bot,
   after `load_dotenv`, with `config.parse_*`, and passed in. `database.py` reads no
-  environment variables at all. `test_config.py` imports the bot in a fresh process per
+  environment variables at all. `test_config.py` re-imports the bot freshly per
   scenario to catch a regression.
 - **A bad value warns and falls back**, never crashes and never silently flips. A setting in
   `.env` that the system environment overrides is reported by name only, never by value,
@@ -427,6 +427,13 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   without generating). It must never block and must swallow errors. An idle model is unloaded
   after about 5 minutes and reloading costs ~4.3s, hence the keep-alive on every call.
 - **Tool results need `tool_name`**, or the model ignores its own search results.
+- **`chat_streaming` only does the I/O.** The worker thread, the queue, the 1.5 s edit throttle
+  and the Discord calls stay in the bot; every decision is a pure `llm.py` helper:
+  `plan_overflow` (which pieces to finalize once pending text passes `STREAM_CHUNK_LIMIT`),
+  `live_message_text` / `final_message_text`, `final_reply` (empty answer: token ceiling vs
+  ordinary stop), `tool_round_call` / `tool_call_query` / `tool_round_messages` (one search,
+  never a loop) and `system_with_time`. `test_llm.py` pins them; `test_regression.py` drives
+  the whole function over scripted streams.
 
 ## Web search
 

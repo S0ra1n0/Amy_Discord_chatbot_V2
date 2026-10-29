@@ -662,7 +662,7 @@ Amy_chatbot_V2/
 ├── ui.py                   # Embed builders and the reply wrapper
 ├── websearch.py            # DuckDuckGo search and the web_search tool
 ├── lyrics.py               # /lyrics: title cleanup, LRCLIB lookup, paging
-├── llm.py                  # Reasoning modes, model choice, system prompt (pure helpers)
+├── llm.py                  # Reasoning modes, model choice, system prompt, streamed-reply decisions (pure helpers)
 ├── config.py               # Reading settings: warns on bad values instead of crashing
 ├── models.py               # Which Ollama model is active: /model, probing, warm-up
 ├── logs.py                 # Logging: the console, plus a rotating amy.log
@@ -698,7 +698,7 @@ code depends on (threading, playback state, Discord limits, model quirks) and wh
 ## Testing
 
 ```bash
-python tests/run_tests.py             # offline suites only (~50s)
+python tests/run_tests.py             # offline suites only (~27s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 

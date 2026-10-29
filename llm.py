@@ -12,7 +12,8 @@ to import the entire bot, which builds a Discord client and opens its database.
 """
 
 import re
-from typing import Any, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 THINK_MODES = ("false", "true", "auto")
 
@@ -167,3 +168,109 @@ def startup_model_choice(saved: str, default: str, loaded: bool,
     if saved == default or loaded or installed is None:
         return saved
     return saved if saved in installed else default
+
+
+# ---- Streaming a chat reply ---------------------------------------------------------------
+# The decisions chat_streaming makes between Ollama and Discord, as pure functions. The thread,
+# the queue and every Discord call stay in the bot.
+STREAM_CHUNK_LIMIT: int = 1990   # Discord's 2000, minus room for the streaming cursor suffix
+
+CHAT_ERROR_MESSAGE = (
+    "I apologize, but I'm currently having trouble connecting to my knowledge system. "
+    "Please try again in a moment."
+)
+OUT_OF_ROOM_MESSAGE = (
+    "I ran out of room before I could finish that answer. "
+    "Try asking for something shorter, or ask an admin to raise my limit."
+)
+NO_ANSWER_MESSAGE = (
+    "I apologize, but I couldn't produce an answer for that one. "
+    "Could you try asking a different way?"
+)
+
+
+def find_split_index(text: str, limit: int) -> int:
+    """Find an index <= limit to split text at, preferring a newline or space boundary."""
+    if len(text) <= limit:
+        return len(text)
+    split_at = text.rfind('\n', 0, limit)
+    if split_at == -1:
+        split_at = text.rfind(' ', 0, limit)
+    if split_at <= 0:
+        return limit
+    return split_at + 1
+
+
+def system_with_time(system_prompt: str, now: datetime) -> str:
+    """The system prompt with the current date and time appended, so she can answer about it."""
+    return (
+        f"{system_prompt}\n\n[IMPORTANT] Current date and time: "
+        f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({now.strftime('%A')}). "
+        "Use this information when answering questions about time."
+    )
+
+
+def plan_overflow(display: str, committed_len: int,
+                  limit: int = STREAM_CHUNK_LIMIT) -> List[str]:
+    """
+    The pieces to finalize into their own Discord messages, in order, because the text not yet
+    committed (display[committed_len:]) is longer than limit. Empty while it still fits. The
+    caller adds len(piece) to committed_len for each piece it finalizes.
+    """
+    pieces: List[str] = []
+    pending = display[committed_len:]
+    while len(pending) > limit:
+        idx = find_split_index(pending, limit)
+        pieces.append(pending[:idx])
+        pending = pending[idx:]
+    return pieces
+
+
+def live_message_text(display: str, committed_len: int) -> str:
+    """What the live message shows mid-stream: the uncommitted text and a cursor."""
+    pending = display[committed_len:]
+    return (pending + " ▌") if pending else "⏳ Thinking..."
+
+
+def final_message_text(final_response: str, committed_len: int) -> str:
+    """What the last message holds once the stream is over."""
+    pending = final_response[committed_len:]
+    return pending if pending else "✅ Done."
+
+
+def tool_round_call(tool_calls: List[Any], errored: bool) -> Optional[Any]:
+    """The one tool call to run after a pass (no tool loops), or None for a plain reply."""
+    if errored or not tool_calls:
+        return None
+    return tool_calls[0]
+
+
+def tool_call_query(call: Any, user_message: str) -> str:
+    """The search query a tool call asks for, falling back to the user's own message."""
+    args = call["function"].get("arguments") or {}
+    if not isinstance(args, dict):
+        args = {}
+    return args.get("query") or user_message
+
+
+def tool_round_messages(messages: List[Dict[str, Any]], call: Any, tool_name: str,
+                        result_text: str) -> List[Dict[str, Any]]:
+    """The conversation for the second pass: the call, then its result tied back by tool_name."""
+    return messages + [
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "tool_name": tool_name, "content": result_text},
+    ]
+
+
+def final_reply(accumulated: str, done_reason: Optional[str]) -> Tuple[str, bool]:
+    """
+    The reply to store and show, and whether the model hit its token limit. Empty output almost
+    always means the ceiling rather than having nothing to say, so that case says so instead of
+    telling the user to rephrase.
+    """
+    text = strip_think_tags(accumulated)
+    if text:
+        return text, False
+    if done_reason == "length":
+        return OUT_OF_ROOM_MESSAGE, True
+    return NO_ANSWER_MESSAGE, False

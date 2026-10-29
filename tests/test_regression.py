@@ -527,5 +527,100 @@ try:
 finally:
     amy.ollama.chat, amy.model_manager.current, amy.WEB_SEARCH = _saved_chat
 
+# ---- chat_streaming end to end: tool round, empty answers, overflow, a dead Ollama -----------
+# Only the plain reply was driven before; the second pass after a tool call, the empty-answer
+# explanations and the error path were exercised by nothing.
+import httpx as _httpx
+
+
+class _Msg2(_FakeMsg):
+    def __init__(self):
+        super().__init__()
+        self.sent = []
+        self.first = self
+
+    async def send(self, content=None, **kw):
+        nxt = _Msg2()
+        nxt.first = self.first
+        self.first.sent.append(nxt)
+        return nxt
+
+
+def _drive(script, user="q", search=False, chan=4343):
+    """Run chat_streaming over scripted streams (one list of chunks, or an exception, per pass)."""
+    calls = []
+
+    def fake_chat(**kw):
+        calls.append(kw)
+        step = script[len(calls) - 1]
+        if isinstance(step, Exception):
+            raise step
+        return iter(step)
+
+    saved = (amy.ollama.chat, amy.WEB_SEARCH)
+    amy.ollama.chat, amy.WEB_SEARCH = fake_chat, search
+    try:
+        msg = _Msg2()
+        out = _asyncio.run(amy.chat_streaming(user, "srv", chan, msg))
+    finally:
+        amy.ollama.chat, amy.WEB_SEARCH = saved
+    return out, msg, calls
+
+
+def _chunk(content="", reason=None, tool_calls=None):
+    m = {"content": content}
+    if tool_calls:
+        m["tool_calls"] = tool_calls
+    c = {"message": m}
+    if reason:
+        c["done_reason"] = reason
+    return c
+
+
+# empty answer, token ceiling vs ordinary stop
+_out, _m, _ = _drive([[_chunk("", "length")]])
+assert _out == amy.llm.OUT_OF_ROOM_MESSAGE and _m.edits[-1] == _out, "FAIL length: %r" % _m.edits[-1:]
+_out, _m, _ = _drive([[_chunk("<think>hm</think>", "stop")]])
+assert _out == amy.llm.NO_ANSWER_MESSAGE, "FAIL stop: %r" % _out
+# overflow: a long reply is split over several messages, nothing lost
+_long = "word " * 900
+_out, _m, _ = _drive([[_chunk(_long, "stop")]])
+assert len(_m.sent) >= 2 and _m.edits[-1] != "", "FAIL overflow: %d extra messages" % len(_m.sent)
+_pages = [_m.edits[-1]] + [s.edits[-1] for s in _m.sent]
+assert "".join(_pages) == _out and all(len(p) <= 2000 for p in _pages), "FAIL overflow pages"
+# Ollama unreachable: the apology, nothing stored for the unanswered question, None returned
+_out, _m, _ = _drive([_httpx.ConnectError("down")], user="lost question", chan=4344)
+assert _out is None and _m.edits[-1] == amy.CHAT_ERROR_MESSAGE, "FAIL connect error: %r" % _m.edits
+assert all(x["content"] != "lost question" for x in amy.db.get_messages("srv", 4344, limit=50)), \
+    "FAIL error path must pop the stored question"
+# tool call: pass one asks for a search, pass two (no tools) answers with the results appended
+_searched = []
+
+
+async def _fake_search(query, recency=None, with_content=True):
+    _searched.append(query)
+    return [amy.websearch.SearchResult("T", "https://example.com/a", "S")]
+
+
+async def _fake_enrich(results):
+    return None
+
+
+_saved_ws = (amy.websearch.search, amy.websearch.enrich)
+amy.websearch.search, amy.websearch.enrich = _fake_search, _fake_enrich
+try:
+    _tc = [{"function": {"name": "web_search", "arguments": {"query": "weather Hue"}}}]
+    _out, _m, _calls = _drive([[_chunk("", None, _tc)], [_chunk("It is sunny.", "stop")]],
+                              user="weather?", search=True, chan=4345)
+finally:
+    amy.websearch.search, amy.websearch.enrich = _saved_ws
+assert _searched == ["weather Hue"], "FAIL tool call must run the search: %r" % _searched
+assert len(_calls) == 2, "FAIL second pass missing after a tool call: %d passes" % len(_calls)
+assert "tools" in _calls[0] and "tools" not in _calls[1], "FAIL tools offered on pass two"
+assert _calls[1]["messages"][-1]["role"] == "tool" and \
+    _calls[1]["messages"][-1]["tool_name"] == "web_search"
+assert _out == "It is sunny." and _m.edits[-1] == "It is sunny.", "FAIL answer: %r" % _out
+print("chat_streaming end to end: OK (empty answers, overflow, connect error, tool round)")
+
 print()
 print("ALL REGRESSION TESTS PASSED")
