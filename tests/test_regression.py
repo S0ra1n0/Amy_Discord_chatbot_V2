@@ -299,6 +299,24 @@ assert "cannot run bot actions" in _base and "/play" in _base, \
     "the prompt must send her to the slash command instead"
 print("system prompt: OK (claims match the tools actually offered)")
 
+# ---- The prompt names the bans concretely (live feedback: too much, too energetic) ------
+# qwen3.5:2b ignored "only ask when needed": it closed every reply with an offer of help or
+# "How is your day going?", opened with "Hello!", and invented /start. Explicit bans and a
+# list of REAL commands follow better; calm_reply is the net underneath.
+import re
+assert "exclamation" in _base, "the prompt must ban exclamation marks"
+assert "never open with a greeting" in _base, "the prompt must ban greeting openers"
+assert "how their day is going" in _base, "the prompt must ban asking the user how they are"
+assert "anything else i can help with" in _base, "the prompt must ban closing offers of help"
+assert "i'm at your service" not in _base, "the quoted example was being parroted"
+_real_cmds = {c.name for c in amy.tree.get_commands()}
+_named = set(re.findall(r"(?:^|(?<=\s))/([a-z]+)", amy.BASE_SYSTEM_PROMPT))   # "and/or", URLs don't count
+assert _named and _named <= _real_cmds, "the prompt names commands that don't exist: %s" % (_named - _real_cmds)
+assert {"join", "leave", "play", "skip", "loop", "queue", "volume", "shush", "say", "help"} <= _named
+assert "never name a command that is not in this list" in _base
+assert _on.rstrip().endswith("respect their time.") and _on.index("Knowledge:") < _on.index("Remember: You are here")
+print("system prompt bans: OK")
+
 # ---- Review M4: a failed warm-up must not lose the admin's saved /model choice ---------
 # warm_model used to treat ANY preload failure as "the saved model was uninstalled", switch
 # to the default, and persist that. Ollama simply not being up yet at login was enough to

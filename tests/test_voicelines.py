@@ -89,14 +89,60 @@ kind, line = V.plan_reply("Hôm nay trời đẹp quá, bạn khỏe không?",
                           random.Random(0))
 check("Vietnamese -> a short English line instead", kind == "foreign" and line in V.LINES["foreign"],
       (kind, line))
-check("a short reply is read as written, cleaned",
-      V.plan_reply("Sure! The answer is **4**.") == ("read", "Sure! The answer is 4."))
+check("a short reply is read as written, cleaned and calmed",
+      V.plan_reply("Sure! The answer is **4**.") == ("read", "Sure. The answer is 4."))
 edge = "a" * (V.SHORT_REPLY_CHARS - 1) + "."
 check("exactly at the limit is still read", V.plan_reply(edge)[0] == "read")
 longer = " ".join("This is sentence %d of a long answer." % i for i in range(20))
 kind, text = V.plan_reply(longer)
 check("a long reply is paraphrased", kind == "paraphrase")
 check("...and the whole cleaned reply goes to the paraphrase, uncut", len(text) > 400, len(text))
+
+print()
+print("=== calm_reply (what is spoken; the written reply is untouched) ===")
+for filler in ("How about you?", "How is your day going?", "How are you doing today?",
+               "Is there anything else I can help you with?", "Is there anything I can assist with?",
+               "Is there anything else?", "Can I help you with anything else?",
+               "How can I help you today?", "Let me know if you need anything else.",
+               "I'm at your service.", "And you?", "How's your week been so far?"):
+    got = V.calm_reply("It has been fine. " + filler)
+    check("trailing %r is dropped" % filler, got == "It has been fine.", got)
+check("two fillers in a row both go", V.calm_reply(
+    "Fine, thank you. How about you? Is there anything else I can help with?") == "Fine, thank you.")
+check("the real reply that prompted this",
+      V.calm_reply("It has been fine. Thank you for asking. How is your day going? "
+                   "Is there anything I can assist with?") == "It has been fine. Thank you for asking.")
+mid = "Is it the red one? Then it costs 5 dollars. It ships Monday."
+check("a real question in the middle is kept", V.calm_reply(mid) == mid)
+check("a real trailing question is kept",
+      V.calm_reply("I found two. Which one do you want?") == "I found two. Which one do you want?")
+check("a non-filler 'anything' question is kept",
+      V.calm_reply("Done. Is there anything in the oven?") == "Done. Is there anything in the oven?")
+check("a reply that is only a question is kept", V.calm_reply("How about you?") == "How about you?")
+check("only fillers -> the first sentence survives, never empty",
+      V.calm_reply("Is there anything else? How can I help?") == "Is there anything else?")
+for keep in ("How is your setup?", "How was your build?", "Let me know if you have any errors when you run it.",
+             "Let me know if you need the file."):
+    got = V.calm_reply("Run it now. " + keep)
+    check("genuine follow-up %r is kept" % keep, got == "Run it now. " + keep, got)
+check("'Let me know if you need anything else.' still goes",
+      V.calm_reply("Run it now. Let me know if you have any other questions.") == "Run it now.")
+check("empty stays empty without crashing", V.calm_reply("") == "")
+check("a spoken '!=' is not turned into '.='", V.calm_reply("Use a != b here!") == "Use a != b here.")
+check("'!' becomes '.'", V.calm_reply("Hello! It is going well!") == "Hello. It is going well.")
+check("'?!' becomes '?'", V.calm_reply("Really?! Yes.") == "Really? Yes.")
+check("'!!!' becomes one '.'", V.calm_reply("Great!!! Next.") == "Great. Next.")
+
+print()
+print("=== plan_reply calms the CLEANED text (markdown must be stripped first) ===")
+md = "Here are the steps.\n- Open settings.\n> Note: it restarts.\n\nIs there anything else I can help with?"
+check("bullets and quotes lose their markers, trailing filler goes",
+      V.plan_reply(md) == ("read", "Here are the steps. Open settings. Note: it restarts."), V.plan_reply(md))
+check("a heading line is not left as '##'",
+      V.plan_reply("Done.\n## Next steps\nRun it") == ("read", "Done. Next steps. Run it."),
+      V.plan_reply("Done.\n## Next steps\nRun it"))
+check("inline code `a != b` keeps its '!' (cleaned as before, not 'a.= b')",
+      V.plan_reply("Use `a != b` here.") == ("read", "Use a!= b here."), V.plan_reply("Use `a != b` here."))
 
 print()
 print("=== fallback_summary ===")
@@ -115,6 +161,8 @@ check("empty -> fallback", V.judge_paraphrase("   ") is None)
 check("a good paraphrase is kept, cleaned",
       V.judge_paraphrase("The Great Wall is about **21,196** km long.") ==
       "The Great Wall is about 21,196 km long.")
+check("the paraphrase is calmed: '!' and a closing offer go",
+      V.judge_paraphrase("Sure! It ships Monday! Anything else I can help with?") == "Sure. It ships Monday.")
 check("think tags are stripped", V.judge_paraphrase("<think>hmm</think>It's four.") == "It's four.")
 check("leaked reasoning -> fallback",
       V.judge_paraphrase("Okay, the user wants me to shorten this. Let me think.") is None)

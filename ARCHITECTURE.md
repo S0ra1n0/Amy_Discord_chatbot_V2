@@ -121,6 +121,13 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **What Amy says lives in `voicelines.py`, pure.** Confirmations are plain text with
   several phrasings, never a model call (instant). Every phrasing of every event is checked
   by `test_voicelines.py` to format cleanly into speakable English.
+- **A chat reply is calmed before it is spoken, not before it is written.** `voicelines.calm_reply`
+  drops trailing stock filler (closing offers of help, "How about you?") and turns "!" into "."
+  in `speak_reply`. It runs on the CLEANED text (inside `plan_reply`, and on the output of
+  `judge_paraphrase`), never on raw markdown: it joins sentences with spaces, which would defeat
+  the line-anchored bullet/heading/quote stripping. The 2b chat model ignores soft prompt lines,
+  so the prompt names the bans and this is the net underneath. It never touches `/say` or music
+  lines, and never empties a reply.
 - **Chat replies are spoken only to someone in the call with her** (`in_call_with_amy`),
   checked in `on_message`, and always in the background (`music.spawn(speak_reply(...))`):
   the text reply is already out, and the paraphrase plus synthesis take seconds.

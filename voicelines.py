@@ -121,13 +121,59 @@ PARAPHRASE_SYSTEM = (
     "You are Amy. Below is an answer YOU already wrote in a chat. Say the same answer out "
     "loud, shorter: one or two spoken sentences, at most 40 words. Keep every fact exactly "
     "as written - same numbers, same days, same yes or no. Do not reply to it, do not add "
-    "opinions or questions, do not change its meaning. No lists, markdown, links or emoji.")
+    "opinions or questions, do not change its meaning. No lists, markdown, links or emoji. "
+    "No exclamation marks.")
 
 
 def paraphrase_request(cleaned: str) -> str:
     """The user message for the paraphrase call: the answer, fenced off as Amy's own. Pure."""
     fence = '"""'
     return f"My written answer:\n{fence}\n{cleaned}\n{fence}\nSay it out loud, shorter."
+
+
+# Stock closing filler a small model keeps adding however the prompt is worded: offers of help
+# and questions thrown back at the listener. Matched against a whole sentence, normalised
+# (lower case, no punctuation or emoji), so "Is there anything else I can help with?" matches but
+# "Is there anything in the oven?" does not.
+_FILLER = re.compile(
+    r"(?:and you|how about you|what about you"
+    r"|how (?:are|were) you(?: doing| feeling)?(?: (?:today|tonight|now|this \w+))?"
+    r"|how (?:is|was|has|s) your (?:day|week|evening|weekend|morning|afternoon|night)"
+    r"(?: (?:going|been))?(?: (?:so far|today))?"
+    r"|how (?:is|s) (?:it going|everything|life)(?: with you)?(?: today)?"
+    r"|(?:(?:is|was) there )?anything(?: else)?(?: (?:that )?(?:i|we) can)?(?: (?:help|assist))?"
+    r"(?: (?:you|with))*(?: (?:today|now))?"
+    r"|(?:can|may) i (?:help|assist) you(?: with anything(?: else)?)?(?: today)?"
+    r"|how can i (?:help|assist)(?: you)?(?: today)?"
+    r"|what can i do for you(?: today)?"
+    r"|(?:please )?(?:let me know|feel free to ask)"
+    r"(?: if (?:you (?:need|have|want)|there(?:s| is)) "
+    r"(?:anything(?: else)?|any (?:other )?(?:help|questions?|trouble)|more (?:help|questions?)))?"
+    r"|(?:i m|i am) (?:always )?(?:here|at your service)(?: to help)?(?: you)?)")
+
+
+def _is_filler(sentence: str) -> bool:
+    plain = sentence.replace("’", "'").replace("'", " ")
+    plain = " ".join(re.sub(r"[^a-z ]+", " ", plain.lower()).split())
+    return bool(_FILLER.fullmatch(plain))
+
+
+def calm_reply(reply: str) -> str:
+    """
+    A chat reply as Amy should SPEAK it, calmer than the text. Pure; the written reply is
+    untouched. Drops trailing stock filler (closing offers of help, "How about you?", "How is
+    your day going?") - only at the end, and never the first sentence, so something is always
+    left - then turns "!" into "." because Piper reads it with extra energy. A real question
+    in the middle, or a reply that is only a question, is kept. Call it on CLEANED text: it
+    joins sentences with spaces, so on raw markdown it would defeat the line-anchored
+    bullet/heading/quote stripping in `speech.clean_for_speech`.
+    """
+    sentences = re.split(r"(?<=[.!?])\s+", reply.strip())
+    while len(sentences) > 1 and _is_filler(sentences[-1]):
+        sentences.pop()
+    text = " ".join(sentences)
+    text = re.sub(r"\?+!+|!+\?+", "?", text)
+    return re.sub(r"!+(?!=)", ".", text)       # not the "!" of a spoken "a != b"
 
 
 def plan_reply(reply: str, rng: Optional[random.Random] = None) -> Tuple[str, str]:
@@ -138,7 +184,7 @@ def plan_reply(reply: str, rng: Optional[random.Random] = None) -> Tuple[str, st
       ("read", text)        - short enough to read as written
       ("paraphrase", text)  - too long: `text` is the cleaned reply to paraphrase
     """
-    cleaned = speech.clean_for_speech(reply, max_chars=10_000)
+    cleaned = calm_reply(speech.clean_for_speech(reply, max_chars=10_000))   # clean first
     if not cleaned:
         return "nothing", ""
     if not speech.is_english(cleaned):
@@ -171,4 +217,4 @@ def judge_paraphrase(text: Optional[str]) -> Optional[str]:
         return None
     if not speech.is_english(cleaned) or llm.looks_like_reasoning(cleaned):
         return None
-    return cleaned
+    return calm_reply(cleaned)      # the model adds "!" and closing offers here too

@@ -1198,13 +1198,21 @@ try:
     amy.model_manager.paraphrase = _fake_paraphrase
     try:
         _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, "Sure! It's **4**.")))
-        check("a short reply is read as written, cleaned", said == ["Sure! It's 4."], said)
+        check("a short reply is read as written, cleaned, '!' calmed to '.'", said == ["Sure. It's 4."], said)
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(
+            it.guild, "It has been fine. How is your day going? Is there anything I can assist with?")))
+        check("speak_reply drops trailing filler (calm_reply is wired in)",
+              said == ["It has been fine."], said)
         long_reply = " ".join("This is sentence %d of a long answer." % i for i in range(20))
         _para["value"] = "It's a long answer with twenty sentences."
         _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
         check("a long reply is paraphrased by the model", said == [_para["value"]], said)
         check("...which is given the whole reply, fenced as Amy's own",
               _para["asked"].startswith("My written answer:") and "sentence 19" in _para["asked"])
+        _para["value"] = "Sure! It ships Monday! Anything else I can help with?"
+        _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
+        check("a paraphrase is calmed too: no '!', no closing offer",
+              said == ["Sure. It ships Monday."], said)
         _para["value"] = None
         _, said = said_after(lambda: asyncio.run(amy.speak_reply(it.guild, long_reply)))
         check("no paraphrase (slow or failed) -> the opening sentences and a pointer to the chat",
