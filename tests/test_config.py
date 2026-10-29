@@ -2,14 +2,13 @@
 Reading settings from .env: parsing, bad values, and the order things load in.
 
 The parsers in config.py are pure and tested directly. The loading behaviour is tested by
-importing the bot in a fresh process per scenario (tests/_config_probe.py), because the
-bot reads its settings at import time - which is exactly where the bug lived: database.py
-read HISTORY_LIMIT before the bot had loaded .env, so the setting never worked.
+freshly importing the bot per scenario (tests/_config_probe.py: one worker process, the bot
+module re-executed with a clean environment each time), because the bot reads its settings
+at import time - which is exactly where the bug lived: database.py read HISTORY_LIMIT before
+the bot had loaded .env, so the setting never worked.
 """
 import io
-import json
 import os
-import subprocess
 import sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -65,24 +64,7 @@ check("nothing set twice -> nothing reported", config.shadowed_settings({}, in_f
 
 
 # ---- loading, end to end ----------------------------------------------------------------
-def probe(dotenv_values, extra_env=None):
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("HISTORY_LIMIT", "DB_PRUNE_DAYS", "WEB_SEARCH", "OLLAMA_THINK",
-                        "OLLAMA_KEEP_ALIVE", "DISCORD_TOKEN", "TTS", "AMY_VOICE",
-                        "TTS_SPEED", "TTS_THREADS", "DUCK_LEVEL", "VOICE_LEVEL",
-                        "TTS_ENGINE", "PIPER_VOICE", "PIPER_LENGTH", "PIPER_PITCH",
-                        "PIPER_SOFT")}
-    env.update(extra_env or {})
-    env["AMY_PROBE_SCENARIO"] = json.dumps({"dotenv": dotenv_values})
-    env["PYTHONIOENCODING"] = "utf-8"
-    r = subprocess.run([sys.executable, os.path.join(TESTS, "_config_probe.py")], env=env,
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
-    result = None
-    for line in r.stdout.splitlines():
-        if line.startswith("PROBE_RESULT "):
-            result = json.loads(line[len("PROBE_RESULT "):])
-    return r.returncode, result, r.stdout + r.stderr
-
+from _config_probe import probe   # one worker process, a fresh import of the bot per call
 
 print()
 print("=== HISTORY_LIMIT in .env is honoured ===")
