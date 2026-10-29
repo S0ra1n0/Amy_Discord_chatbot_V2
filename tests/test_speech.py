@@ -224,19 +224,22 @@ check("a relative path is from the project",
 absolute = os.path.join(tempfile.gettempdir(), "x.onnx")
 check("an absolute path is kept", speech.resolve_piper_path(absolute) == os.path.normpath(absolute))
 check("format: the shipped defaults",
-      speech.format_piper(speech.PIPER_MODEL, 1.05, 0.0, True)
-      == "Piper en_GB-cori-medium (length 1.05, pitch unchanged, soft EQ on)")
+      speech.format_piper(speech.PIPER_MODEL, 1.07, 0.0, True)
+      == "Piper en_GB-cori-medium (length 1.07, pitch unchanged, voice EQ on)")
 check("format: a pitch shift is shown",
       speech.format_piper(speech.PIPER_MODEL, 1.05, 1.0, True)
-      == "Piper en_GB-cori-medium (length 1.05, pitch +1.0 st, soft EQ on)")
-check("format: no pitch, no soft EQ",
+      == "Piper en_GB-cori-medium (length 1.05, pitch +1.0 st, voice EQ on)")
+check("format: no pitch, no voice EQ",
       speech.format_piper("x/voice.onnx", 1.0, 0.0, False)
-      == "Piper voice (length 1.00, pitch unchanged, soft EQ off)")
+      == "Piper voice (length 1.00, pitch unchanged, voice EQ off)")
 check("the code defaults reproduce the chosen voice",
-      speech.DEFAULT_PIPER_LENGTH == 1.05 and speech.DEFAULT_PIPER_PITCH == 0.0
-      and speech.PIPER_NOISE_SCALE == 0.333 and speech.PIPER_NOISE_W == 0.333)
-check("...and with the default pitch the chain has no rubberband step, only the soft EQ",
-      "rubberband" not in (speech.piper_filter_chain(speech.DEFAULT_PIPER_PITCH, True, True) or ""))
+      speech.DEFAULT_PIPER_LENGTH == 1.07 and speech.DEFAULT_PIPER_PITCH == 1.5
+      and speech.PIPER_NOISE_SCALE == 0.25 and speech.PIPER_NOISE_W == 0.25)
+check("...and the default chain is the +1.5 st quality shift, then the 1 kHz EQ and de-esser",
+      speech.piper_filter_chain(speech.DEFAULT_PIPER_PITCH, True, True)
+      == "rubberband=pitch=1.090508:formant=preserved:pitchq=quality:transients=crisp:window=short"
+         ":smoothing=off:channels=together,equalizer=f=1000:t=q:w=0.9:g=2.5,"
+         "deesser=i=0.3:m=0.5:f=0.5:s=o")
 
 print()
 print("=== piper_text: what espeak mispronounces ===")
@@ -295,17 +298,18 @@ check("empty in, empty out", T("") == "" and T("   ") == "")
 print()
 print("=== piper_filter_chain ===")
 F = speech.piper_filter_chain
-SOFT = "equalizer=f=4500:t=q:w=1:g=-3,highshelf=f=6500:g=-3,deesser=i=0.4:m=0.5:f=0.5:s=o"
-PITCH = "rubberband=pitch=1.059463:formant=preserved"
-check("a +1 semitone shift with formants kept, then the soft EQ",
+SOFT = "equalizer=f=1000:t=q:w=0.9:g=2.5,deesser=i=0.3:m=0.5:f=0.5:s=o"
+RB_OPTS = ":formant=preserved:pitchq=quality:transients=crisp:window=short:smoothing=off:channels=together"
+PITCH = "rubberband=pitch=1.059463" + RB_OPTS
+check("a +1 semitone shift with formants kept, then the voice EQ",
       F(1.0, True, True) == PITCH + "," + SOFT, F(1.0, True, True))
 check("pitch only", F(1.0, False, True) == PITCH)
-check("soft only (pitch 0)", F(0.0, True, True) == SOFT)
-check("no rubberband -> the pitch part is dropped, the soft EQ kept", F(1.0, True, False) == SOFT)
+check("voice EQ only (pitch 0: no rubberband step)", F(0.0, True, True) == SOFT)
+check("no rubberband -> the pitch part is dropped, the voice EQ kept", F(1.0, True, False) == SOFT)
 check("nothing to do -> None", F(0.0, False, True) is None and F(1.0, False, False) is None
       and F(0.0, False, False) is None)
 check("a negative shift lowers the pitch (2 ** (-2/12))",
-      F(-2.0, False, True) == "rubberband=pitch=0.890899:formant=preserved", F(-2.0, False, True))
+      F(-2.0, False, True) == "rubberband=pitch=0.890899" + RB_OPTS, F(-2.0, False, True))
 LISTING = """Filters:
   T.. = Timeline support
   .S. = Slice threading
@@ -404,12 +408,12 @@ def listing_run(names):
 
 print()
 print("=== PiperEngine decides its filter chain from what FFmpeg really has ===")
-ALL = ["rubberband", "equalizer", "highshelf", "deesser"]
+ALL = ["rubberband", "equalizer", "deesser"]
 e = speech.PiperEngine("v.onnx", pitch=1.0, soft=True, ffmpeg="ffmpeg-x")
 chain, warns = with_fake_run(listing_run(ALL), e._plan_chain)
 check("full FFmpeg -> the whole chain, no warnings", chain == PITCH + "," + SOFT and not warns, (chain, warns))
-chain, warns = with_fake_run(listing_run(["equalizer", "highshelf", "deesser"]), e._plan_chain)
-check("no rubberband -> soft EQ only, one warning", chain == SOFT and len(warns) == 1 and "rubberband" in warns[0],
+chain, warns = with_fake_run(listing_run(["equalizer", "deesser"]), e._plan_chain)
+check("no rubberband -> voice EQ only, one warning", chain == SOFT and len(warns) == 1 and "rubberband" in warns[0],
       (chain, warns))
 chain, warns = with_fake_run(listing_run(["rubberband"]), e._plan_chain)
 check("no EQ filters -> pitch only, one warning", chain == PITCH and len(warns) == 1, (chain, warns))

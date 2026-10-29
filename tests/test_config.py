@@ -202,10 +202,10 @@ check("the engine defaults to Kokoro", res is not None and res["TTS_ENGINE"] == 
       and res["engine"] == "Kokoro", res and (res["TTS_ENGINE"], res["engine"]))
 code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper"})
 check("TTS_ENGINE=piper builds the Piper engine", res is not None and res["engine"] == "Piper", res)
-check("...with the chosen voice as its defaults (length 1.05, no pitch shift, soft EQ on)",
-      res is not None and res["PIPER_LENGTH"] == 1.05 and res["PIPER_PITCH"] == 0.0
-      and res["PIPER_SOFT"] is True and res["engine_settings"]["length"] == 1.05
-      and res["engine_settings"]["pitch"] == 0.0 and res["engine_settings"]["soft"] is True, res)
+check("...with the chosen voice as its defaults (length 1.07, +1.5 st, voice EQ on)",
+      res is not None and res["PIPER_LENGTH"] == 1.07 and res["PIPER_PITCH"] == 1.5
+      and res["PIPER_SOFT"] is True and res["engine_settings"]["length"] == 1.07
+      and res["engine_settings"]["pitch"] == 1.5 and res["engine_settings"]["soft"] is True, res)
 check("...the cori voice in piper_model/ and the shared TTS_THREADS",
       res is not None and res["PIPER_VOICE"].endswith(os.path.join("piper_model", "en_GB-cori-medium.onnx"))
       and res["engine_settings"]["model_path"] == res["PIPER_VOICE"]
@@ -242,7 +242,7 @@ check("...and says so at startup", any("[WARNING]" in l and "TTS_ENGINE" in l
 code, res, out = probe({"TTS": "on", "TTS_ENGINE": "piper", "PIPER_LENGTH": "9", "PIPER_PITCH": "fast",
                         "PIPER_SOFT": "maybe"})
 check("bad Piper numbers are clamped or defaulted, never a crash",
-      res is not None and res["PIPER_LENGTH"] == 2.0 and res["PIPER_PITCH"] == 0.0
+      res is not None and res["PIPER_LENGTH"] == 2.0 and res["PIPER_PITCH"] == 1.5
       and res["PIPER_SOFT"] is True, res)
 check("...each named in a warning", all(any("[WARNING]" in l and n in l for l in out.splitlines())
                                         for n in ("PIPER_LENGTH", "PIPER_PITCH", "PIPER_SOFT")), out[-400:])

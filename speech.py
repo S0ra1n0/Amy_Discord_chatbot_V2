@@ -91,13 +91,14 @@ PIPER_SHA256 = {
     PIPER_VOICE_NAME + ".onnx.json": "e262c16d7f192f69d4edd6b4ef8a5915379e67495fcc402f1ab15eeb33da3d36",
 }
 # Amy's Piper voice, chosen by ear on 2026-10-28 (TTS_PLAN.md, T0.1 route 2), re-tuned
-# 2026-10-29 (route 3): steadier (less random variation), no pitch shift, slightly faster, with
-# a softened top end. noise_scale / noise_w are how much random variation the model adds to
+# 2026-10-29 by ear (route 3, then route 5: sample 11): a little slower (1.07), steadier and
+# calmer (low noise), +1.5 semitones with the formants kept, and a mid presence lift instead of
+# the old dulling EQ. noise_scale / noise_w are how much random variation the model adds to
 # the sound and to the rhythm; lower = steadier. They stay fixed.
-DEFAULT_PIPER_LENGTH = 1.05          # length_scale: above 1 = slower
-DEFAULT_PIPER_PITCH = 0.0            # semitones; 0 = leave the pitch alone (no rubberband step)
-PIPER_NOISE_SCALE = 0.333
-PIPER_NOISE_W = 0.333
+DEFAULT_PIPER_LENGTH = 1.07          # length_scale: above 1 = slower
+DEFAULT_PIPER_PITCH = 1.5            # semitones; 0 = leave the pitch alone (no rubberband step)
+PIPER_NOISE_SCALE = 0.25
+PIPER_NOISE_W = 0.25
 PIPER_FFMPEG_TIMEOUT = 20.0          # seconds, for one sentence through the filter chain
 
 
@@ -306,12 +307,12 @@ def resolve_piper_path(raw: Optional[str]) -> str:
 
 
 def format_piper(model_path: str, length: float, pitch: float, soft: bool) -> str:
-    """'Piper en_GB-cori-medium (length 1.05, pitch unchanged, soft EQ on)', for /voice and the log."""
+    """'Piper en_GB-cori-medium (length 1.05, pitch unchanged, voice EQ on)', for /voice and the log."""
     name = os.path.basename(model_path)
     if name.endswith(".onnx"):
         name = name[:-5]
     pitch_text = f"pitch {pitch:+.1f} st" if pitch else "pitch unchanged"
-    return f"Piper {name} (length {length:.2f}, {pitch_text}, soft EQ {'on' if soft else 'off'})"
+    return f"Piper {name} (length {length:.2f}, {pitch_text}, voice EQ {'on' if soft else 'off'})"
 
 
 # ---- Piper: text fixes and the audio filter chain ---------------------------------------------
@@ -383,27 +384,36 @@ def piper_text(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# The pieces of the chain (route 5, sample 11). Pitch quality "quality", a short window and crisp
+# transients keep consonants clear after the shift; formant=preserved keeps the voice's "body".
+RUBBERBAND_OPTIONS = (":formant=preserved:pitchq=quality:transients=crisp:window=short"
+                      ":smoothing=off:channels=together")
+VOICE_EQ = "equalizer=f=1000:t=q:w=0.9:g=2.5"
+DEESSER = "deesser=i=0.3:m=0.5:f=0.5:s=o"
+
+
 def piper_filter_chain(pitch_semitones: float, soft: bool, has_rubberband: bool) -> Optional[str]:
     """
     The FFmpeg -af chain applied to Piper's audio, or None when there is nothing to do. Pure.
 
     Pitch: rubberband shifts it by `pitch_semitones` and keeps the formants (the vocal-tract
-    "body"), so she sounds higher, not smaller. Needs an FFmpeg built with rubberband; without
-    it the pitch step is dropped. Soft: a gentle cut around 4.5 kHz, a shelf above 6.5 kHz, and
-    a de-esser take the edge off the "s" sounds and hiss.
+    "body"), so she sounds higher, not smaller; its quality options (short window, crisp
+    transients, no smoothing) keep consonants clear. Needs an FFmpeg built with rubberband;
+    without it the pitch step is dropped. `soft` is the voice-EQ switch (PIPER_SOFT): +2.5 dB
+    around 1 kHz brings the voice forward, and a light de-esser keeps the "s" sounds in check.
+    Order: pitch, then EQ, then de-esser.
     """
     parts: List[str] = []
     if pitch_semitones and has_rubberband:
-        parts.append(f"rubberband=pitch={2 ** (pitch_semitones / 12):.6f}:formant=preserved")
+        parts.append(f"rubberband=pitch={2 ** (pitch_semitones / 12):.6f}" + RUBBERBAND_OPTIONS)
     if soft:
-        parts.append("equalizer=f=4500:t=q:w=1:g=-3")
-        parts.append("highshelf=f=6500:g=-3")
-        parts.append("deesser=i=0.4:m=0.5:f=0.5:s=o")
+        parts.append(VOICE_EQ)
+        parts.append(DEESSER)
     return ",".join(parts) if parts else None
 
 
 _FILTER_LINE = re.compile(r"^\s*[A-Z.]{2,3}\s+(\S+)\s+\S+->\S+", re.M)
-SOFT_FILTERS = ("equalizer", "highshelf", "deesser")
+VOICE_EQ_FILTERS = ("equalizer", "deesser")
 
 
 def parse_ffmpeg_filters(listing: str) -> set:
@@ -608,7 +618,7 @@ class PiperEngine(SpeechEngine):
         if not self.pitch and not self.soft:
             return None
         if not self.ffmpeg:
-            log.warning("Piper: FFmpeg not found - speaking without the pitch/soft-EQ polish")
+            log.warning("Piper: FFmpeg not found - speaking without the pitch/voice-EQ polish")
             return None
         try:
             listing = subprocess.run(
@@ -616,15 +626,15 @@ class PiperEngine(SpeechEngine):
                 errors="replace", timeout=PIPER_FFMPEG_TIMEOUT, creationflags=_NO_WINDOW).stdout
         except (OSError, subprocess.SubprocessError) as e:
             log.warning(f"Piper: couldn't ask FFmpeg for its filters ({e}) - "
-                        "speaking without the pitch/soft-EQ polish")
+                        "speaking without the pitch/voice-EQ polish")
             return None
         names = parse_ffmpeg_filters(listing)
         has_rubberband = "rubberband" in names
         soft = self.soft
         if self.pitch and not has_rubberband:
             log.warning("Piper: this FFmpeg has no rubberband filter - skipping the pitch shift")
-        if soft and not all(f in names for f in SOFT_FILTERS):
-            log.warning("Piper: this FFmpeg lacks equalizer/highshelf/deesser - skipping the soft EQ")
+        if soft and not all(f in names for f in VOICE_EQ_FILTERS):
+            log.warning("Piper: this FFmpeg lacks equalizer/deesser - skipping the voice EQ")
             soft = False
         return piper_filter_chain(self.pitch, soft, has_rubberband)
 

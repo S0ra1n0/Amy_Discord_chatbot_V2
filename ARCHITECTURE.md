@@ -74,7 +74,8 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `speech.py` never imports `music.py`) which filters it has. No FFmpeg, no `rubberband` or no
   EQ filters each drop that step with one warning; a failed or hung run (`PIPER_FFMPEG_TIMEOUT`)
   returns the unprocessed audio, once-warned. The chain is built by the pure
-  `piper_filter_chain`; FFmpeg runs without `shell=True` and without a console window.
+  `piper_filter_chain` (pitch with rubberband's quality options, then the voice EQ and
+  de-esser; `PIPER_SOFT` is the voice-EQ switch, its name kept from an earlier EQ); FFmpeg runs without `shell=True` and without a console window.
 - **`piper_text` runs for Piper only**, inside `PiperEngine.synthesize`. It fixes what espeak-ng
   mispronounces in track lists ("feat.", "#3", "2 min", "1:05", and the `PIPER_NAMES`
   respellings). Names are respelt, never given as `[[ ... ]]` raw phonemes: Piper drops the full

@@ -65,7 +65,7 @@ async def main():
     # An FFmpeg build without rubberband (or the EQ filters) is supported: Amy warns and skips
     # that part. Only other warnings mean something is wrong.
     unexpected = [m for m in warnings.messages
-                  if "no rubberband filter" not in m and "skipping the soft EQ" not in m]
+                  if "no rubberband filter" not in m and "skipping the voice EQ" not in m]
     check("no unexpected warnings while loading", not unexpected, unexpected)
 
     if ffmpeg:
