@@ -622,5 +622,87 @@ assert _calls[1]["messages"][-1]["role"] == "tool" and \
 assert _out == "It is sunny." and _m.edits[-1] == "It is sunny.", "FAIL answer: %r" % _out
 print("chat_streaming end to end: OK (empty answers, overflow, connect error, tool round)")
 
+# ---- P1: a stream that ends inside an open <think> block never leaks the reasoning -----------
+_out, _m, _ = _drive([[_chunk("<think>secret reasoning", "length")]], chan=4346)
+assert _out == amy.llm.OUT_OF_ROOM_MESSAGE, "FAIL open think + length: %r" % _out
+assert "secret" not in _m.edits[-1], "FAIL open think leaked to Discord: %r" % _m.edits[-1]
+assert all("secret" not in x["content"] for x in amy.db.get_messages("srv", 4346, limit=50)), \
+    "FAIL open think leaked into the stored history"
+
+# ---- P2: the second pass pages from the start of its own answer ------------------------------
+_tc2 = [{"function": {"name": "web_search", "arguments": {"query": "long one"}}}]
+_pass1 = "alpha " * 400                               # ~2400 visible chars: one page is finalized
+_saved_ws = (amy.websearch.search, amy.websearch.enrich)
+_saved_iv = amy.STREAM_EDIT_INTERVAL
+amy.websearch.search, amy.websearch.enrich = _fake_search, _fake_enrich
+amy.STREAM_EDIT_INTERVAL = 0                          # flush pages while pass one streams
+try:
+    _out, _m, _ = _drive([[_chunk(_pass1[:1500]), _chunk(_pass1[1500:]), _chunk("", None, _tc2)],
+                          [_chunk("Short answer.", "stop")]],
+                         user="long?", search=True, chan=4347)
+finally:
+    amy.websearch.search, amy.websearch.enrich = _saved_ws
+    amy.STREAM_EDIT_INTERVAL = _saved_iv
+assert _out == "Short answer.", "FAIL pass two answer: %r" % _out
+assert len(_m.sent) >= 1, "FAIL pass one should have finalized a page"
+assert _m.sent[-1].edits[-1] == "Short answer.", \
+    "FAIL pass two answer truncated by the stale committed_len: %r" % _m.sent[-1].edits[-1:]
+
+
+# ---- P3: a page that cannot be sent (rate limit, permissions) must not escape chat_streaming --
+class _Resp:
+    status = 403
+    reason = "Forbidden"
+
+
+class _NoSendMsg(_FakeMsg):
+    async def send(self, content=None, **kw):
+        raise _dc.HTTPException(_Resp(), "no permission")
+
+
+def _drive_nosend(script, user, chan):
+    calls = []
+
+    def fake_chat(**kw):
+        calls.append(kw)
+        step = script[len(calls) - 1]
+        if isinstance(step, Exception):
+            raise step
+        return iter(step)
+
+    saved = (amy.ollama.chat, amy.WEB_SEARCH)
+    amy.ollama.chat, amy.WEB_SEARCH = fake_chat, False
+    try:
+        msg = _NoSendMsg()
+        out = _asyncio.run(amy.chat_streaming(user, "srv", chan, msg))
+    finally:
+        amy.ollama.chat, amy.WEB_SEARCH = saved
+    return out, msg
+
+
+# complete reply: stays stored and is returned; first page was finalized, nothing overwrote it
+_out, _m = _drive_nosend([[_chunk(_long, "stop")]], "paged", 4348)
+assert _out is not None and len(_out) > 2000, "FAIL complete reply must still be returned: %r" % (_out,)
+assert _m.edits[-1] == _out[:len(_m.edits[-1])], "FAIL finished page must not be overwritten"
+assert any(x["content"] == _out for x in amy.db.get_messages("srv", 4348, limit=50)), \
+    "FAIL complete reply must stay stored"
+# stream cut after the failed page: question popped, None returned
+def _cut_stream():
+    yield _chunk("word " * 300)
+    yield _chunk("word " * 300)         # edit interval is 0 below, so a page flushes mid-stream
+    raise _httpx.ConnectError("down")
+
+
+_saved_iv = amy.STREAM_EDIT_INTERVAL
+amy.STREAM_EDIT_INTERVAL = 0
+try:
+    _out, _m = _drive_nosend([_cut_stream()], "cut question", 4349)
+finally:
+    amy.STREAM_EDIT_INTERVAL = _saved_iv
+assert _out is None, "FAIL cut stream must return None: %r" % (_out,)
+assert all(x["content"] != "cut question" for x in amy.db.get_messages("srv", 4349, limit=50)), \
+    "FAIL cut stream must pop the stored question"
+print("chat_streaming P1-P3: OK (open think, second-pass window, unsendable page)")
+
 print()
 print("ALL REGRESSION TESTS PASSED")

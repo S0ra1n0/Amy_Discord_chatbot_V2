@@ -718,6 +718,13 @@ The model hit its token ceiling before writing anything. This happens with reaso
 that over-think a question. Make sure `OLLAMA_THINK=false` in `.env` (the default), or raise
 the limit with a larger model. Rephrasing the question usually won't help.
 
+A reasoning model that runs out of tokens in the middle of its thinking no longer leaks that
+thinking: an unfinished `<think>` block is dropped like a finished one, so you get this message
+instead. Long replies are split over several Discord messages; if Discord refuses a further
+message (rate limit, missing Send Messages permission) Amy stops after the last one that went
+through, logs a warning in `amy.log`, and still remembers the full reply. After a web search the
+answer is paged from its own start, whatever Amy wrote before searching.
+
 **Amy takes 30+ seconds to reply:**
 
 Almost always the reasoning phase. Set `OLLAMA_THINK=false` in `.env`. In testing this took a

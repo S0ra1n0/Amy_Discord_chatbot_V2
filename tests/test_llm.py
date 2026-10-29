@@ -184,6 +184,12 @@ assert llm.final_reply("<think>all of it</think>", "length") == (llm.OUT_OF_ROOM
 assert llm.final_reply("", "stop") == (llm.NO_ANSWER_MESSAGE, False)
 assert llm.final_reply("  ", None) == (llm.NO_ANSWER_MESSAGE, False)
 assert llm.final_reply("Four.", "length") == ("Four.", False), "an answer is never replaced"
+# A reply cut off inside an open <think> block: raw reasoning must never come out.
+assert llm.strip_think_tags("<think>reasoning") == "", "FAIL open think block must be dropped"
+assert llm.strip_think_tags("Hi<think>reasoning") == "Hi", "FAIL open trailing think block"
+assert llm.final_reply("<think>reasoning", "length") == (llm.OUT_OF_ROOM_MESSAGE, True), "FAIL open think + length"
+assert llm.final_reply("<think>reasoning", "stop") == (llm.NO_ANSWER_MESSAGE, False), "FAIL open think + stop"
+assert llm.final_reply("<think>a</think>Answer<think>more", "length") == ("Answer", False), "FAIL answer then open think"
 assert "ran out of room" in llm.OUT_OF_ROOM_MESSAGE and "different way" in llm.NO_ANSWER_MESSAGE
 assert "trouble connecting" in llm.CHAT_ERROR_MESSAGE
 print("final_reply: OK (length vs stop, think-only output, real answer kept)")

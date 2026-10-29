@@ -720,17 +720,27 @@ async def chat_streaming(
     committed_len = 0  # Length of display text already finalized into prior messages
     accumulated = ""
     last_edit = time.monotonic()
+    paging_broken = False  # A new page could not be sent: stop paging and stop touching messages
 
     async def flush_overflow(display: str) -> None:
         """While pending text overflows the Discord limit, finalize the active message and start a new one."""
-        nonlocal active_msg, committed_len
+        nonlocal active_msg, committed_len, paging_broken
+        if paging_broken:
+            return
         for chunk in plan_overflow(display, committed_len):
             try:
                 await active_msg.edit(content=chunk)
             except discord.HTTPException:
                 pass
             committed_len += len(chunk)
-            active_msg = await active_msg.channel.send("⏳ Thinking...")
+            try:
+                active_msg = await active_msg.channel.send("⏳ Thinking...")
+            except discord.HTTPException as e:
+                # Rate limit or missing permission. The active message now holds a finished
+                # page, so leave it alone from here on; the rest of the reply is still stored.
+                log.warning(f"Could not send a further page of the reply: {e}")
+                paging_broken = True
+                return
 
     async def consume_stream(convo, offer_tools: bool) -> None:
         """Run one streaming pass, editing the live message as tokens arrive."""
@@ -746,11 +756,12 @@ async def chat_streaming(
             if now - last_edit >= STREAM_EDIT_INTERVAL:
                 display = get_display_text(accumulated)
                 await flush_overflow(display)
-                try:
-                    await active_msg.edit(content=live_message_text(display, committed_len))
-                    last_edit = now
-                except discord.HTTPException:
-                    pass
+                if not paging_broken:
+                    try:
+                        await active_msg.edit(content=live_message_text(display, committed_len))
+                        last_edit = now
+                    except discord.HTTPException:
+                        pass
         await future  # Re-raise any thread exception
 
     # Pass one. Tools are offered only when search is enabled; if the model asks to search
@@ -786,8 +797,11 @@ async def chat_streaming(
             messages, call, websearch.WEB_SEARCH_TOOL["function"]["name"],
             websearch.format_for_model(query, results, recency=recency))
 
-        # Reset for the second pass; the first produced a tool call, not prose
+        # Reset for the second pass; the first produced a tool call, not prose. Pages already
+        # sent for pass-one prose stay as they are; the new answer pages from its own start
+        # in the active message, so the window restarts at 0.
         accumulated = ""
+        committed_len = 0
         error_flag["tool_calls"] = []
         error_flag["done_reason"] = None
         await consume_stream(messages, offer_tools=False)
@@ -795,7 +809,10 @@ async def chat_streaming(
     if error_flag["occurred"]:
         db.pop_last_message(server_id, channel_id)
         try:
-            await active_msg.edit(content=CHAT_ERROR_MESSAGE)
+            if paging_broken:      # the active message is a finished page: don't overwrite it
+                await active_msg.channel.send(CHAT_ERROR_MESSAGE)
+            else:
+                await active_msg.edit(content=CHAT_ERROR_MESSAGE)
         except discord.HTTPException:
             pass
         return None
@@ -807,10 +824,11 @@ async def chat_streaming(
     db.store_message(server_id, channel_id, "assistant", final_response)
 
     await flush_overflow(final_response)
-    try:
-        await active_msg.edit(content=final_message_text(final_response, committed_len))
-    except discord.HTTPException as e:
-        log.error(f"Failed to edit final message: {e}")
+    if not paging_broken:
+        try:
+            await active_msg.edit(content=final_message_text(final_response, committed_len))
+        except discord.HTTPException as e:
+            log.error(f"Failed to edit final message: {e}")
     return final_response
 #----------------------------------------------
 

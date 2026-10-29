@@ -66,8 +66,14 @@ def think_value(mode: str) -> Optional[bool]:
 
 
 def strip_think_tags(text: str) -> str:
-    """Remove complete <think>...</think> blocks emitted by qwen3 models."""
-    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    """
+    Remove <think>...</think> blocks emitted by qwen3 models, and a trailing block that was
+    never closed (generation stopped at the token limit mid-reasoning), so raw reasoning can
+    never be posted, stored or spoken.
+    """
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL)
+    return text.strip()
 
 
 def get_display_text(accumulated: str) -> str:
@@ -76,9 +82,7 @@ def get_display_text(accumulated: str) -> str:
     Hides complete think blocks and also hides any incomplete (still-open) think block,
     so the user sees nothing while qwen3 is reasoning and only sees the reply after </think>.
     """
-    text = re.sub(r'<think>.*?</think>', '', accumulated, flags=re.DOTALL)
-    text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL)
-    return text.strip()
+    return strip_think_tags(accumulated)
 
 
 def extract_model_names(list_response) -> List[str]:
