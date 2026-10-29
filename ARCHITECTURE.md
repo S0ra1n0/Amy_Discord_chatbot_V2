@@ -165,6 +165,23 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   landing during that Discord edit would otherwise be followed by a stale "Up next". The
   announce has its own try, so a speech failure is never taken for a bad track. `up_next`
   (`/voice up_next:`, saved, default on) is independent of `voice_enabled`.
+- **Autoplay happens only when a YouTube song really played and ended on its own, with listeners present**
+  (`music.should_autoplay`). `advance_playback` calls it when `advance_with_history` finds
+  nothing next, using `previous`: `/stop`, `/leave`, the Stop button and idle leaves clear
+  `current` (`stop_all`), so there is nothing to follow; a `/previous`, a `/skip` of a song
+  somebody queued, a local file, an empty channel and the `autoplay` setting (saved, default
+  on) also say no. A `/skip` of an Autoplay song (`requested_by == AUTOPLAY_REQUESTER`) moves
+  on. The song must have played `AUTOPLAY_MIN_PLAYED` seconds (measured from the position
+  clock BEFORE `finish_playback` resets it; `played_enough`): an unreadable stream ends at
+  once and would otherwise chain through the Mix forever. The pick is the first entry of YouTube's Mix (`related_tracks`, bounded with
+  `playlistend`: the Mix is endless) not among `player.history`, the ended song and
+  `last_played`, not live and at most `AUTOPLAY_MAX_SECONDS`, compared by video id (`youtube_video_id`). The lookup runs under the player
+  lock like a stream resolve and re-checks afterwards: a moved `generation` (a `/stop`) means
+  nothing plays, a song queued meanwhile plays instead (and is not announced "Up next":
+  the `/play` speaks for itself). Any failure finishes as before. The lookup yields up to
+  `AUTOPLAY_ATTEMPTS` spares; a pick that fails to start moves to the next, and when they run
+  out playback finishes (a user-queued track that fails still just skips). The pick goes
+  through the normal play path, so the usual "Up next" applies.
 - **`/leave` says goodbye after its permission check and before disconnecting**, waiting
   at most `GOODBYE_WAIT`; a refused `/leave` says nothing. Idle and empty-channel leaves
   don't say goodbye - nobody is listening.

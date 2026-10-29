@@ -9,9 +9,9 @@ HELP_EVERYONE = """**Commands — Everyone:**
   • Usage: `/rng 0 999`
 `/websearch [query] [recency]` - Search the web and show the results
   • Optional recency: past day, week, month or year
-  • I also search on my own when a question needs current info
+  • I also search on my own when needed
 `/join` - Bring me into the voice channel you're in
-`/leave` - Make me leave the voice channel (must be in it with me, or an admin)
+`/leave` - Make me leave the voice channel (be in it with me, or admin)
 
 **Music:**
 `/play [song, URL, or file]` - Queue a track (I'll join your channel)
@@ -28,7 +28,8 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/skipto [position]` - Jump ahead to a queued track
 `/shuffle` - Shuffle the queued tracks
 `/nowplaying` - Show the current track
-`/loop [off|track|queue]` - Set repeat mode"""
+`/loop [off|track|queue]` - Set repeat mode
+`/autoplay [on|off]` - Play related songs when the queue ends"""
 
 HELP_ADMIN = """
 **Commands — Admin only:**

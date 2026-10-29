@@ -65,6 +65,7 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/clearqueue`            | Empty the queue without stopping the current track                        | Admin only |
 | `/nowplaying`            | Show the current track                                                    | Everyone   |
 | `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
+| `/autoplay [on\|off]` | Keep playing related songs when the queue ends (remembered; no argument shows it) | In-channel |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
 
 ### Web search
@@ -259,6 +260,8 @@ Local files play from `.mp3`, `.m4a`, `.opus`, `.wav` and `.flac`, and `/seek` w
 
 **Loop modes** — `/loop off` (default), `/loop track` (repeat current), `/loop queue` (rotate the whole queue endlessly). An explicit `/skip` or `/skipto` always moves on, even under `track` loop — otherwise the song would repeat forever with no way out. Under `queue` loop a skipped track still rotates to the back.
 
+**Autoplay** — on by default. When the last song in the queue ends on its own, Amy asks YouTube for the "Mix" of that song and plays the first related one she hasn't played recently (the last 20 songs are skipped), shown as requested by *Autoplay* and announced with the usual spoken "Up next". It only happens for a YouTube song that played for about 10 seconds (so a stream that can't be read doesn't chain on forever), with at least one person in her channel. If a pick won't start she tries the next related song (up to three) before giving up. It ends when you `/stop` (or `/leave`, or press Stop), turn it off with `/autoplay off` (remembered across restarts; `/autoplay` alone shows the setting), everyone leaves, or YouTube has nothing new to offer. `/skip` on a song Amy autoplayed moves on to the next related one; `/skip` on a song somebody queued, as the last one, ends the music as usual. `/loop track` and `/loop queue` never trigger it. A song you `/play` while she is looking is played instead, announced by `/play` itself. Live streams and anything over 15 minutes are skipped (a song of unknown length is allowed); if YouTube returns nothing new, she simply finishes and idles as before.
+
 ### Searching
 
 `/play` takes whichever result YouTube ranks first, which is not always the one you meant.
@@ -368,7 +371,7 @@ Setting volume **below 100%** forces her to decode audio to raw PCM so the level
 
 If you just want Amy quieter, prefer Discord's own per-user volume slider (right-click Amy → Volume). It's client-side, costs nothing, and is per-listener.
 
-**Amy disconnects on her own in two cases:** 60 seconds after the last person leaves her channel, and 5 minutes after the queue runs dry. Either way the queue is cleared, so she never resumes stale music when re-summoned.
+**Amy disconnects on her own in two cases:** 60 seconds after the last person leaves her channel, and 5 minutes after the queue runs dry (with Autoplay on, a YouTube song that ends on its own is followed by a related one, so the 5 minutes start after a local file, a `/skip` of the last song, `/autoplay off`, or when YouTube offers nothing new). Either way the queue is cleared, so she never resumes stale music when re-summoned.
 
 > **A note on YouTube:** playback relies on `yt-dlp`. YouTube changes its internals regularly, so if `/play` suddenly stops finding tracks, update it — `pip install -U yt-dlp` — rather than assuming the bot broke. Be aware that streaming YouTube audio is contrary to YouTube's Terms of Service; that's the reason large public music bots have been shut down. Fine for a private personal bot, but worth knowing.
 
@@ -387,7 +390,7 @@ If you just want Amy quieter, prefer Discord's own per-user volume slider (right
 10. Use `/model` (Admin only) to view or switch the active Ollama model at runtime — the new model is validated against Ollama's installed model list before switching. The choice is **saved** and restored on the next start. If it can't be loaded at startup, Amy asks Ollama whether it's still installed: only a model Ollama confirms is gone is replaced by the default, and only for that run — your saved choice is kept, so reinstalling the model brings it back. If Ollama simply isn't up yet (both starting at login, say), she keeps your choice and loads it on the first reply
 11. Use `/forget` (Admin only) to wipe conversation memory for a channel — Amy asks you to confirm with a button first
 12. Use `/join`, `/create` and `/leave` to control which voice channel Amy sits in; she auto-leaves 60s after the last person departs
-13. `/play` queues music and pulls Amy into your voice channel if she isn't already there; the queue advances automatically, and she disconnects 5 minutes after it runs dry
+13. `/play` queues music and pulls Amy into your voice channel if she isn't already there; the queue advances automatically (with Autoplay on, a YouTube song that ends on its own is followed by a related one), and when it does run dry she disconnects 5 minutes later
 
 ## Setup & Installation
 
@@ -642,7 +645,7 @@ python tests/run_tests.py             # offline suites only (~20s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-27 suites covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+28 suites covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
 which is exactly what CI does: every push and pull request runs the offline suites and

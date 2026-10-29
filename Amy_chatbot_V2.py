@@ -267,6 +267,8 @@ bot_enabled: bool = db.get_bool_setting("bot_enabled", True)
 voice_enabled: bool = db.get_bool_setting("voice_enabled", True)
 # /voice up_next on|off (admins): say "Up next, ..." when a song changes by itself. Saved.
 up_next_enabled: bool = db.get_bool_setting("up_next", True)
+# /autoplay on|off: when the queue runs out, play a song YouTube considers related. Saved.
+autoplay_enabled: bool = db.get_bool_setting("autoplay", True)
 if model_manager.current != DEFAULT_MODEL:
     log.info(f"Restored saved model: {model_manager.current}")
 if not bot_enabled:
@@ -1323,6 +1325,47 @@ async def finish_playback(guild: discord.Guild, player: music.GuildPlayer) -> No
     player.idle_task = asyncio.create_task(idle_disconnect(guild))
 
 
+async def autoplay_pick(guild: discord.Guild, vc: discord.VoiceClient,
+                        player: music.GuildPlayer, last: Optional[music.Track], *,
+                        force_next: bool, going_back: bool,
+                        played: float) -> Tuple[List[music.Track], bool]:
+    """
+    The queue ran dry: (songs to try in order, whether they came from the user's queue). An
+    empty list means finish. Called by advance_playback under the player lock. Never raises.
+    Looking the Mix up takes seconds, so afterwards it re-checks what the world looks like: a
+    /stop (generation moved) wins, and a /play that queued a song meanwhile gets played in
+    its place (flagged, so it isn't also announced as "Up next": the command speaks for itself).
+    Up to AUTOPLAY_ATTEMPTS related songs come back from the one lookup, for a pick that
+    won't start.
+    """
+    channel = voice.active_channel(vc)
+    if not music.should_autoplay(
+            enabled=autoplay_enabled, last=last, force_next=force_next,
+            going_back=going_back, humans=voice.humans_in(channel) if channel else 0,
+            played=played):
+        return [], False
+    assert last is not None             # should_autoplay refuses None
+    generation = player.generation
+    try:
+        candidates = await music.related_tracks(last)
+    except Exception as e:
+        log.warning(f"Autoplay: could not get songs related to '{last.title}': "
+                    f"{type(e).__name__}: {e}")
+        return [], False
+    if player.generation != generation or not vc.is_connected():
+        log.info("Autoplay: playback was stopped while looking for a song")
+        return [], False
+    if player.queue:                    # a /play landed during the lookup: it goes first
+        return [player.queue.popleft()], True
+    picks = music.autoplay_picks(
+        candidates, music.recent_video_ids([*player.history, last, player.last_played]))
+    if not picks:
+        log.info(f"Autoplay: nothing new related to '{last.title}'")
+        return [], False
+    log.info(f"Autoplay: '{picks[0].title}' after '{last.title}'")
+    return picks, False
+
+
 async def advance_playback(guild: discord.Guild) -> None:
     """
     Play the next track. Called when one finishes, and to kick off the first track.
@@ -1348,12 +1391,22 @@ async def advance_playback(guild: discord.Guild) -> None:
         force_next, going_back = player.skip_requested, player.back_requested
         player.skip_requested = player.back_requested = False
         previous = player.current           # what just finished (None for a first track)
+        played = player.position()          # before finish_playback resets the clock
         resumed = player.resume_position > 0
         next_track = music.advance_with_history(
             player.current, player.queue, player.history, player.loop_mode,
             force_next=force_next, going_back=going_back,
         )
+        attempts = [next_track] if next_track is not None else []
+        autoplayed = user_queued = False
         if next_track is None:
+            # Only a song that ended on its own: /stop, /leave and the Stop button clear
+            # `current`, so `previous` is None and autoplay stays out of it.
+            attempts, user_queued = await autoplay_pick(
+                guild, vc, player, previous, force_next=force_next, going_back=going_back,
+                played=played)
+            autoplayed = bool(attempts) and not user_queued
+        if not attempts:
             await finish_playback(guild, player)
             return
 
@@ -1362,31 +1415,45 @@ async def advance_playback(guild: discord.Guild) -> None:
         # A restored queue starts mid-track; every other advance starts at zero.
         start_at = player.resume_position
         player.resume_position = 0.0
-        try:
-            if not await music.play_track(vc, player, next_track, after, start_at=start_at):
-                # /stop landed while the track was loading. Nothing was playing for its
-                # vc.stop() to interrupt, so no after-callback will tidy up - do it here.
-                await finish_playback(guild, player)
+        for attempt, next_track in enumerate(attempts):
+            started = False
+            try:
+                if not await music.play_track(vc, player, next_track, after, start_at=start_at):
+                    # /stop landed while the track was loading. Nothing was playing for its
+                    # vc.stop() to interrupt, so no after-callback will tidy up - do it here.
+                    await finish_playback(guild, player)
+                    return
+                started = True
+                player.last_played = next_track
+                # Announce NOW, before any await: refresh_now_playing is a Discord edit that
+                # can take a while, and /skip, /skipto and /stop don't take the player lock -
+                # one landing in that wait would be followed by a stale "Up next, <skipped
+                # song>". A failure to speak must not be mistaken for a bad track either.
+                # A song a /play queued during the autoplay lookup is not announced: the
+                # command says "Now playing" itself.
+                if up_next_enabled and not user_queued and voicelines.should_announce_next(
+                        previous, next_track, force_next=force_next, going_back=going_back,
+                        resumed=resumed):
+                    try:
+                        announce(guild, "up_next", title=next_track.title)
+                    except Exception:
+                        log.exception("Could not announce the next song")
+                await refresh_now_playing(guild)
+                snapshot_player(guild.id)   # record the new track and a fresh position
                 return
-            player.last_played = next_track
-            # Announce NOW, before any await: refresh_now_playing is a Discord edit that can
-            # take a while, and /skip, /skipto and /stop don't take the player lock - one
-            # landing in that wait would be followed by a stale "Up next, <skipped song>".
-            # A failure to speak must not be mistaken for a bad track either.
-            if up_next_enabled and voicelines.should_announce_next(
-                    previous, next_track, force_next=force_next, going_back=going_back,
-                    resumed=resumed):
-                try:
-                    announce(guild, "up_next", title=next_track.title)
-                except Exception:
-                    log.exception("Could not announce the next song")
-            await refresh_now_playing(guild)
-            snapshot_player(guild.id)   # record the new track and a fresh position
-        except Exception as e:
-            log.error(f"Could not play '{next_track.title}': {e}")
-            # Skip the bad track rather than stalling the whole queue
-            player.current = None
-            music.spawn(advance_playback(guild))
+            except Exception as e:
+                log.error(f"Could not play '{next_track.title}': {e}")
+                if autoplayed and not started:
+                    # Nothing the user asked for: try the next related song from the same
+                    # lookup, and finish when they are used up.
+                    if attempt + 1 < len(attempts):
+                        continue
+                    await finish_playback(guild, player)
+                    return
+                # Skip the bad track rather than stalling the whole queue
+                player.current = None
+                music.spawn(advance_playback(guild))
+                return
 
 
 async def idle_disconnect(guild: discord.Guild) -> None:
@@ -2089,6 +2156,28 @@ async def music_loop(ctx: MusicContext, mode: LoopMode) -> MusicResult:
     return _info(f"Loop set to **{mode.value}**.")
 
 
+def autoplay_status() -> str:
+    if autoplay_enabled:
+        return ("Autoplay is **on**: when the queue runs out I'll keep going with songs "
+                "related to the last one. `/stop` or `/autoplay off` ends it.")
+    return "Autoplay is **off**: I'll stop when the queue runs out."
+
+
+async def music_autoplay(ctx: MusicContext, state: Optional[bool] = None) -> MusicResult:
+    """Show autoplay, or (state given) switch it - with /loop's permission rule."""
+    global autoplay_enabled
+    if state is None:
+        return _info(autoplay_status())
+    if ctx.connected() is None:
+        return _error(NOT_CONNECTED)
+    if not ctx.may_control():
+        return _error(NOT_WITH_AMY)
+    autoplay_enabled = state
+    db.set_bool_setting("autoplay", autoplay_enabled)   # survives a restart
+    log.info("Autoplay is now " + ("on" if state else "off"))
+    return _info(autoplay_status())
+
+
 async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
@@ -2553,6 +2642,19 @@ async def slash_shuffle(interaction: discord.Interaction) -> None:
 async def slash_loop(interaction: discord.Interaction,
                      mode: app_commands.Choice[str]) -> None:
     await simple_music(interaction, music_loop, LoopMode(mode.value))
+
+
+@tree.command(name="autoplay", description="Keep playing related songs when the queue ends")
+@app_commands.describe(state="on or off (leave empty to see the current setting)")
+@app_commands.choices(state=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+@app_commands.guild_only()
+async def slash_autoplay(interaction: discord.Interaction,
+                         state: Optional[app_commands.Choice[str]] = None) -> None:
+    await simple_music(interaction, music_autoplay,
+                       None if state is None else state.value == "on")
 
 
 @tree.command(name="clearqueue", description="Empty the queue (current track keeps playing)")

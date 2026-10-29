@@ -5,6 +5,7 @@ import logging
 import asyncio
 import os
 import random
+import re
 import time
 import shutil
 import urllib.parse
@@ -385,11 +386,15 @@ def is_playlist_url(query: str) -> bool:
     return True
 
 
-def _ytdl_extract_flat(url: str) -> Dict[str, Any]:
-    """Blocking flat playlist lookup. Always called through an executor."""
+def _ytdl_extract_flat(url: str, first: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Blocking flat playlist lookup. Always called through an executor. `first` stops after
+    that many entries: a YouTube Mix is endless (2,000+ entries, ~25s to page through).
+    """
     import yt_dlp
 
-    with yt_dlp.YoutubeDL(YTDL_FLAT_OPTIONS) as ydl:
+    options: Any = YTDL_FLAT_OPTIONS if first is None else dict(YTDL_FLAT_OPTIONS, playlistend=first)
+    with yt_dlp.YoutubeDL(options) as ydl:
         raw = ydl.extract_info(url, download=False)
     if raw is None:
         raise ValueError("no result")
@@ -506,6 +511,154 @@ async def search_tracks(
             thumbnail=entry.get("thumbnail"),
         ))
     return tracks
+
+
+#----Autoplay------
+AUTOPLAY_REQUESTER: str = "Autoplay"   # shown on the now-playing card
+AUTOPLAY_TIMEOUT: float = 20.0         # the Mix lookup; past this, Amy just finishes
+AUTOPLAY_CANDIDATES: int = 15          # how many Mix entries are considered
+AUTOPLAY_MAX_SECONDS: int = 15 * 60    # a longer entry (a mix, a concert) is not autoplayed
+AUTOPLAY_MIN_PLAYED: float = 10.0      # a song that ended sooner than this didn't really play
+AUTOPLAY_ATTEMPTS: int = 3             # related songs tried (from one lookup) before giving up
+_LIVE_STATUSES = ("is_live", "is_upcoming", "post_live")
+_YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def youtube_video_id(url: str) -> Optional[str]:
+    """
+    The 11-character video id in a YouTube link, or None (not YouTube, a playlist or channel
+    page, a plain search term). Handles watch?v=, youtu.be/, /shorts/, /embed/, /live/, with
+    any extra parameters. The one place ids are read, so "recently played" compares like with
+    like whatever form a track's `query` happens to be in.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in _YOUTUBE_HOSTS):
+        return None
+    if host.endswith("youtu.be"):
+        candidate = parsed.path.strip("/").split("/")[0]
+    else:
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts and parts[0] in ("shorts", "embed", "live", "v") and len(parts) > 1:
+            candidate = parts[1]
+        else:
+            candidate = (urllib.parse.parse_qs(parsed.query).get("v") or [""])[0]
+    return candidate if _YOUTUBE_ID.match(candidate) else None
+
+
+def mix_url(video_id: str) -> str:
+    """YouTube's auto-generated "Mix" playlist for a video (list=RD<id>): related songs."""
+    return f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+
+
+def recent_video_ids(tracks: List[Optional[Track]]) -> Set[str]:
+    """Video ids of the tracks given (None and non-YouTube tracks are ignored)."""
+    ids: Set[str] = set()
+    for track in tracks:
+        if track is not None:
+            vid = youtube_video_id(track.query)
+            if vid:
+                ids.add(vid)
+    return ids
+
+
+def autoplay_picks(candidates: List[Track], recent_ids: Set[str],
+                   limit: int = AUTOPLAY_ATTEMPTS) -> List[Track]:
+    """
+    Up to `limit` candidates with a title and a YouTube id that were not played recently and
+    are no longer than AUTOPLAY_MAX_SECONDS, in order (the first is the pick, the rest are
+    spares if it won't start). An unknown duration is accepted: live streams are dropped
+    earlier, in related_tracks, where the entry's live flags are still visible.
+    """
+    picks: List[Track] = []
+    for track in candidates:
+        vid = youtube_video_id(track.query)
+        if track.duration is not None and track.duration > AUTOPLAY_MAX_SECONDS:
+            continue
+        if vid and track.title and vid not in recent_ids:
+            picks.append(track)
+            if len(picks) >= limit:
+                break
+    return picks
+
+
+def pick_autoplay(candidates: List[Track], recent_ids: Set[str]) -> Optional[Track]:
+    """The first of autoplay_picks, or None."""
+    picks = autoplay_picks(candidates, recent_ids, 1)
+    return picks[0] if picks else None
+
+
+def played_enough(played: float, duration: Optional[int]) -> bool:
+    """
+    Whether a song that just ended really played: AUTOPLAY_MIN_PLAYED seconds, or - for a song
+    shorter than that - nearly all of it. A stream FFmpeg can't read ends at once; without
+    this, autoplay would chain through the Mix every few seconds, forever.
+    """
+    needed = AUTOPLAY_MIN_PLAYED
+    if duration is not None:
+        needed = min(needed, max(duration - 1.0, 0.0))
+    return played >= needed
+
+
+def should_autoplay(*, enabled: bool, last: Optional[Track], force_next: bool,
+                    going_back: bool, humans: int, played: float) -> bool:
+    """
+    Whether an empty queue should be refilled with a related song rather than finishing.
+    Only when a YouTube song ENDED on its own (`last` is what just finished: None after /stop,
+    /leave and the Stop button, which clear it) with people listening, and the setting is on.
+    A /skip of the user's own last song, or a /previous, that finds nothing next is the user
+    choosing, so it finishes; a /skip of an AUTOPLAY song moves on to the next related one
+    (the user never asked for it). Otherwise the song must have played `played_enough`
+    seconds, so a track that can't be streamed doesn't chain through the Mix.
+    """
+    if not (enabled and last is not None and not last.is_local
+            and youtube_video_id(last.query) is not None
+            and not going_back and humans > 0):
+        return False
+    if force_next:
+        return last.requested_by == AUTOPLAY_REQUESTER
+    return played_enough(played, last.duration)
+
+
+async def related_tracks(seed: Track, requested_by: str = AUTOPLAY_REQUESTER,
+                         limit: int = AUTOPLAY_CANDIDATES,
+                         timeout: float = AUTOPLAY_TIMEOUT) -> List[Track]:
+    """
+    Songs YouTube considers related to `seed`: its Mix, one flat request. Raises ValueError
+    for a seed with no video id; yt-dlp and timeout errors propagate - the caller falls back
+    to finishing. Entries come back as canonical watch URLs, so ids compare cleanly later.
+    """
+    vid = youtube_video_id(seed.query)
+    if vid is None:
+        raise ValueError("not a YouTube track")
+    loop = asyncio.get_running_loop()
+    info = await asyncio.wait_for(
+        loop.run_in_executor(None, _ytdl_extract_flat, mix_url(vid), limit), timeout)
+    tracks: List[Track] = []
+    for entry in (info.get("entries") or [])[:limit]:
+        if not entry:
+            continue
+        entry_id = entry.get("id") or youtube_video_id(entry.get("url") or "")
+        title = entry.get("title")
+        if not entry_id or not _YOUTUBE_ID.match(str(entry_id)) or not title:
+            continue
+        if entry.get("is_live") or entry.get("live_status") in _LIVE_STATUSES:
+            continue                    # a live stream never ends: not for autoplay
+        tracks.append(Track(
+            title=title,
+            query=f"https://www.youtube.com/watch?v={entry_id}",
+            duration=entry.get("duration"),
+            requested_by=requested_by,
+            thumbnail=entry.get("thumbnail"),
+        ))
+    return tracks
+#--------------------------------------
 
 
 async def resolve_stream_url(track: Track) -> str:
