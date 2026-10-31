@@ -7,6 +7,10 @@ from typing import Callable, Dict, Optional, Set, Union
 
 import discord
 
+# What a boundary catch-all in the bot EXPECTS from Discord (see logs.log_failure).
+DISCORD_ERRORS = (discord.DiscordException, asyncio.TimeoutError, OSError)
+VOICE_ERRORS = DISCORD_ERRORS + (RuntimeError,)     # connect() raises RuntimeError without PyNaCl
+
 DEFAULT_CHANNEL_NAME: str = "Amy's Room"
 MAX_CHANNEL_NAME_LEN: int = 100
 EMPTY_DISCONNECT_DELAY: int = 60  # Seconds to wait before leaving an empty channel

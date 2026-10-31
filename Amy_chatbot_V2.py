@@ -25,7 +25,7 @@ from database import (DEFAULT_MAX_MESSAGES, MIN_MAX_MESSAGES, ConversationDB,
                       SchemaTooNewError)
 import config
 import voice
-from voice import VoiceManager
+from voice import DISCORD_ERRORS, VOICE_ERRORS, VoiceManager
 import music
 import mixer
 from music import LoopMode, MusicManager
@@ -503,8 +503,8 @@ def snapshot_player(guild_id: int) -> None:
             # Only meaningful when there is a current track occupying slot 0
             resume_position=player.position() if player.current is not None else 0.0,
         )
-    except Exception as e:
-        log.warning(f"Could not save the queue for guild {guild_id}: {e}")
+    except Exception:       # best effort: a failed save must not stop playback or the 20 s tick
+        log.warning(f"Could not save the queue for guild {guild_id}", exc_info=True)
 
 
 @tasks.loop(seconds=SNAPSHOT_INTERVAL)
@@ -586,8 +586,9 @@ async def restore_player(guild: discord.Guild) -> bool:
         if voice.active_channel(voice.get_voice_client(guild)) is None:
             try:
                 await voice.connect_to(channel)
-            except Exception as e:
-                log.warning(f"Could not rejoin {channel.name} to resume: {e}")
+            except VOICE_ERRORS as e:
+                logs.log_failure(f"Could not rejoin {channel.name} to resume", e, VOICE_ERRORS,
+                            logging.WARNING)
                 return True
 
     await advance_playback(guild)               # no-op if a command already started playback
@@ -617,8 +618,8 @@ async def restore_saved_queues() -> int:
         try:
             if await restore_player(saved_guild):
                 restored += 1
-        except Exception as e:
-            log.warning(f"Could not restore the queue for {saved_id}: {e}")
+        except Exception:       # boundary: one guild's bad snapshot must not stop the others
+            log.warning(f"Could not restore the queue for {saved_id}", exc_info=True)
     return restored
 
 
@@ -650,8 +651,8 @@ def cleanup_guild_music(guild_id: int) -> None:
     music_manager.cleanup(guild_id)
     try:
         db.clear_player_state(guild_id)
-    except Exception as e:                      # never let persistence break leaving voice
-        log.warning(f"Could not clear the saved queue for {guild_id}: {e}")
+    except Exception:                           # never let persistence break leaving voice
+        log.warning(f"Could not clear the saved queue for {guild_id}", exc_info=True)
 #----------------------------------------------
 
 #----Streaming Chat------
@@ -710,8 +711,8 @@ async def chat_streaming(
         except httpx.ConnectError as e:
             log.warning(f"Ollama unavailable during stream: {e}")
             error_flag["occurred"] = True
-        except Exception as e:
-            log.error(f"Streaming error: {e}")
+        except Exception:       # thread boundary: the reply must still end, with the error shown
+            log.exception("Streaming error")
             error_flag["occurred"] = True
         finally:
             loop.call_soon_threadsafe(chunk_queue.put_nowait, None)  # Sentinel: stream done
@@ -925,8 +926,8 @@ async def voice_create(interaction: discord.Interaction, guild: discord.Guild,
                 await vc.move_to(channel)
             else:
                 await voice.connect_to(channel)
-        except Exception as e:
-            log.error(f"Could not join newly created channel: {e}")
+        except Exception as e:  # broad on purpose: whatever failed, the channel must not be orphaned
+            logs.log_failure("Could not join newly created channel", e, DISCORD_ERRORS)
             # Channel exists but Amy couldn't join - don't orphan it
             try:
                 await channel.delete(reason="Amy could not join the channel she created")
@@ -1215,8 +1216,9 @@ class SearchResults(discord.ui.View):
             try:
                 async with voice_manager.lock_for(guild.id):
                     await voice.connect_to(state.channel)
-            except Exception as e:
-                log.error(f"Voice connect failed during search pick: {e}")
+            except Exception as e:      # button boundary: the click must always be answered
+                logs.log_failure("Voice connect failed during search pick", e,
+                            VOICE_ERRORS)
                 await interaction.response.edit_message(
                     embed=ui.error_embed("I couldn't join your voice channel."), view=None)
                 return
@@ -1320,9 +1322,9 @@ async def autoplay_pick(guild: discord.Guild, vc: discord.VoiceClient,
     generation = player.generation
     try:
         candidates = await music.related_tracks(last)
-    except Exception as e:
-        log.warning(f"Autoplay: could not get songs related to '{last.title}': "
-                    f"{type(e).__name__}: {e}")
+    except Exception as e:      # whatever failed, she just finishes instead of autoplaying
+        logs.log_failure(f"Autoplay: could not get songs related to '{last.title}'", e,
+                    music.lookup_errors(), logging.WARNING)
         return [], False
     if player.generation != generation or not vc.is_connected():
         log.info("Autoplay: playback was stopped while looking for a song")
@@ -1413,8 +1415,9 @@ async def advance_playback(guild: discord.Guild) -> None:
                 await refresh_now_playing(guild)
                 snapshot_player(guild.id)   # record the new track and a fresh position
                 return
-            except Exception as e:
-                log.error(f"Could not play '{next_track.title}': {e}")
+            except Exception as e:      # any failure skips this track, never the whole queue
+                logs.log_failure(f"Could not play '{next_track.title}'", e,
+                            music.lookup_errors() + DISCORD_ERRORS)
                 if autoplayed and not started:
                     # Nothing the user asked for: try the next related song from the same
                     # lookup, and finish when they are used up.
@@ -1579,9 +1582,15 @@ async def _after_speech_only(guild_id: int) -> None:
 
 def _on_hold_done(guild_id: int) -> None:
     """From the audio thread: speech over paused music has run out - pause the music again."""
+    # After Client.close() the loop is the MISSING sentinel, whose call_soon_threadsafe is an
+    # AttributeError - which would escape into Mixer.read and fail the mixer. Nothing to
+    # re-pause once she is shutting down.
+    loop = bot.loop
+    if bot.is_closed() or loop is discord.utils.MISSING:
+        return
     try:
-        bot.loop.call_soon_threadsafe(lambda: music.spawn(_pause_after_speech(guild_id)))
-    except Exception as e:                       # the loop is closing during shutdown
+        loop.call_soon_threadsafe(lambda: music.spawn(_pause_after_speech(guild_id)))
+    except RuntimeError as e:                    # the loop closed between the check and here
         log.warning(f"Could not re-pause after speaking: {e}")
 
 
@@ -1812,8 +1821,8 @@ async def music_search(ctx: MusicContext, query: str) -> MusicResult:
         SEARCH + " Searching for **" + shown + "**...", wait=True)
     try:
         results = await music.search_tracks(query, requested_by=str(ctx.interaction.user))
-    except Exception as e:
-        log.error("Search failed: " + str(e))
+    except Exception as e:      # command boundary: the user always gets an answer
+        logs.log_failure("Search failed", e, music.lookup_errors())
         await status_msg.edit(content=None,
                               embed=ui.error_embed("That search went wrong. Try again."))
         return ""
@@ -1867,8 +1876,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
             log.error(f"Voice connect failed: {e}")
             return _error(f"Voice support isn't fully installed on my host: {e}\n"
                           "Fix: `pip install \"discord.py[voice]\"`")
-        except Exception as e:
-            log.error(f"Voice connect failed: {e}")
+        except Exception as e:  # command boundary: the user always gets an answer
+            logs.log_failure("Voice connect failed", e, DISCORD_ERRORS)
             return _error("I couldn't join your voice channel. Please try again.")
     elif not ctx.may_control():
         return _error("You need to be in my voice channel to queue tracks.")
@@ -1889,8 +1898,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
         await status_msg.edit(content=SEARCH + " Loading playlist...")
         try:
             title, tracks, skipped = await music.resolve_playlist(query, author)
-        except Exception as e:
-            log.error("Could not load playlist: " + str(e))
+        except Exception as e:  # command boundary: the user always gets an answer
+            logs.log_failure("Could not load playlist", e, music.lookup_errors())
             await status_msg.edit(content=DENY + " I couldn't load that playlist.")
             return ""
 
@@ -1918,8 +1927,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
     # --- single track ---
     try:
         track = await music.resolve_metadata(query, requested_by=author)
-    except Exception as e:
-        log.error("Could not resolve query: " + str(e))
+    except Exception as e:      # command boundary: the user always gets an answer
+        logs.log_failure("Could not resolve query", e, music.lookup_errors())
         await status_msg.edit(content=DENY + " I couldn't find anything for `" + shown + "`.")
         return ""
 
@@ -2094,9 +2103,9 @@ async def _restart_playing(
             player.filter_name = filter_change
         try:
             moved = await music.restart_at(vc, player, track, after, target)
-        except Exception as e:
+        except Exception as e:  # broad on purpose: the filter name must be rolled back on any failure
             player.filter_name = previous
-            log.error(f"{label} failed on '{track.title}': {e}")
+            logs.log_failure(f"{label} failed on '{track.title}'", e, music.lookup_errors() + DISCORD_ERRORS)
             # The new source is built before the old one is touched, but restart_at can still
             # fail after vc.stop() (while starting it): then nothing is playing and the
             # after-callback moves on once the lock is released - so say which it is.
@@ -2368,7 +2377,9 @@ async def build_status(interaction: discord.Interaction) -> str:
     try:
         await asyncio.get_running_loop().run_in_executor(None, ollama.list)
         ollama_state = "Connected ✅"
-    except Exception:
+    # Not running, not reachable, or answering 200 with something that isn't Ollama
+    # (ValueError covers JSONDecodeError and pydantic's ValidationError).
+    except (httpx.HTTPError, OSError, ValueError, ollama.ResponseError):
         ollama_state = "Unavailable ❌"
 
     stats = db.get_stats()
@@ -2997,8 +3008,8 @@ async def on_ready() -> None:
             synced = await tree.sync()
             log.info(f"Synced {len(synced)} slash command(s) globally "
                      "(may take up to an hour to appear - set GUILD_ID for instant sync)")
-    except Exception as e:
-        log.error(f"Could not sync slash commands: {e}")
+    except Exception as e:      # startup boundary: a failed sync must not stop the bot coming up
+        logs.log_failure("Could not sync slash commands", e, DISCORD_ERRORS)
 
     if not prune_old_messages_task.is_running():
         prune_old_messages_task.start()
@@ -3017,8 +3028,8 @@ async def on_ready() -> None:
         try:
             discord.opus._load_default()
             log.info("Opus encoder loaded")
-        except Exception as e:
-            log.warning(f"Could not preload opus: {e}")
+        except Exception as e:  # startup, optional: the first track just loads it later
+            logs.log_failure("Could not preload opus", e, DISCORD_ERRORS, logging.WARNING)
 
     # Warm the model in the background so the first real message doesn't pay the load cost.
     # Backgrounded rather than awaited: it takes a few seconds, and nothing else here needs
@@ -3035,8 +3046,8 @@ async def on_ready() -> None:
         removed = await voice.sweep_orphan_channels(bot, db, voice_manager)
         if removed:
             log.info(f"Cleaned up {removed} orphaned voice channel(s) from a previous run")
-    except Exception as e:
-        log.warning(f"Orphan voice channel sweep failed: {e}")
+    except Exception as e:      # startup boundary: the rest of on_ready must still run
+        logs.log_failure("Orphan voice channel sweep failed", e, DISCORD_ERRORS, logging.WARNING)
 
     # Put back any queue that was playing when Amy last stopped. Done after the orphan
     # sweep so a channel she created and is about to delete isn't rejoined. Guarded to run
@@ -3103,7 +3114,7 @@ async def on_message(msg: discord.Message) -> None:
         log.exception(f"Error processing message: {e}")
         try:
             await msg.reply("Sorry, I encountered an unexpected error. Please try again.")
-        except Exception:
+        except DISCORD_ERRORS:
             log.error("Failed to send error message to Discord")
 
 @bot.event

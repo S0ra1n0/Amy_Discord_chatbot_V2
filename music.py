@@ -525,6 +525,22 @@ _YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
 
 
+_lookup_errors: Optional[Tuple[type, ...]] = None
+
+
+def lookup_errors() -> Tuple[type, ...]:
+    """
+    What a yt-dlp / FFmpeg lookup is EXPECTED to raise (see logs.log_failure). Resolved on
+    first use: importing yt-dlp costs ~0.4 s, which the bot and most test suites never need
+    until a lookup has actually run.
+    """
+    global _lookup_errors
+    if _lookup_errors is None:
+        from yt_dlp.utils import YoutubeDLError
+        _lookup_errors = (YoutubeDLError, ValueError, OSError, asyncio.TimeoutError)
+    return _lookup_errors
+
+
 def youtube_video_id(url: str) -> Optional[str]:
     """
     The 11-character video id in a YouTube link, or None (not YouTube, a playlist or channel

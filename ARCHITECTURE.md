@@ -20,7 +20,7 @@ one guards against.
 | `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
-| `logs.py` | Logging setup: console plus a rotating file | **nothing external** |
+| `logs.py` | Logging setup: console plus a rotating file, and `log_failure` for boundary catch-alls | **nothing external** |
 | `mixer.py` | `SpeechQueue` and `Mixer`: Amy's voice mixed over the music, with ducking and the hold-music mode | discord |
 | `voicelines.py` | What Amy says out loud: confirmation phrasings, speakable titles and times, how a chat reply becomes speech, the paraphrase prompt | llm, speech (both pure) |
 | `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engines (Kokoro, Piper) and the `Speaker` | Kokoro/PyTorch or Piper/onnxruntime **only when loaded** |
@@ -201,6 +201,31 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   records reach ours. Chatty libraries are capped in `logs.QUIET` (discord.py at DEBUG logs
   raw gateway payloads, httpx at INFO logs every request).
 - Exceptions go through `log.exception` or `exc_info=`, so the traceback lands in the file.
+
+## Error handling
+
+- **A boundary may catch `Exception`; inner code catches what it expects.** Boundaries are
+  places where any failure must not crash the bot or leave a user unanswered: command and
+  button handlers, background loops, startup steps, thread/after-callbacks, cleanup that
+  must run (rolling back `filter_name`, deleting an orphaned channel). Everything else names
+  its exceptions (`RuntimeError` from a closing loop, `DISCORD_ERRORS` from a reply,
+  `httpx.HTTPError`/`OSError`/`ValueError`/`ollama.ResponseError` from Ollama), so a TypeError
+  or `AttributeError` surfaces instead of reading as "Unavailable".
+- **A broad catch never logs just `{e}`.** `logs.log_failure(msg, exc, expected, level)` logs
+  a failure in `expected` as one line (type name included: asyncio's TimeoutError has an empty
+  message) and anything else with its traceback. The tuples live next to what raises them:
+  `music.lookup_errors()` for yt-dlp/FFmpeg (resolved on first use: importing yt-dlp costs
+  ~0.4 s at startup), `DISCORD_ERRORS`/`VOICE_ERRORS` in `voice.py`. Persistence catches
+  (`Could not save/restore/clear the queue`) use `exc_info=True`. `test_failure_logging.py`
+  guards it.
+- **Code on the audio thread checks for shutdown first.** After `Client.close()` the bot's
+  loop is discord.py's MISSING sentinel, so `_on_hold_done` returns before scheduling:
+  anything that raises inside `Mixer.read` fails the mixer.
+- **No silent `pass` without a reason.** The quiet case is a best-effort
+  `except discord.HTTPException: pass` on a cosmetic edit or delete.
+- **Scope: this audit covered `Amy_chatbot_V2.py` only.** The other modules still hold 17 broad
+  catches (music, mixer, models, speech, websearch; some are legitimate boundaries like
+  `Mixer.read`). They are not audited yet.
 
 ## Settings
 

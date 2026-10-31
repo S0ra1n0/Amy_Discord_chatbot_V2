@@ -92,3 +92,21 @@ def setup_logging(log_file: Optional[str]) -> Optional[str]:
     setattr(handler, _MARK, True)
     root.addHandler(handler)
     return None
+
+
+def log_failure(message: str, exc: BaseException, expected: tuple,
+                level: int = logging.ERROR, logger: Optional[logging.Logger] = None) -> None:
+    """
+    Log a failure a boundary handler is about to absorb. An `expected` kind (a bad link, a
+    refused connect) is one line; anything else - an AttributeError, a KeyError - is a bug
+    that used to vanish into a one-line "{e}", so it carries its traceback.
+
+    The type name is always there: asyncio's TimeoutError has an empty str(), so "{e}" alone
+    logged a blank reason.
+    """
+    log = logger or logging.getLogger("amy")
+    detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    if isinstance(exc, expected):
+        log.log(level, f"{message}: {detail}")
+    else:
+        log.log(level, f"{message}: {detail}", exc_info=exc)

@@ -702,7 +702,7 @@ python tests/run_tests.py             # offline suites only (~27s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-30 suites (22 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+31 suites (23 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README, or if the suite counts stated here drift from `tests/run_tests.py`.
 Line endings: the repo is LF everywhere (`.gitattributes`: `* text=auto eol=lf`), so commits carry no "LF will be replaced by CRLF" warnings; editors on Windows should keep LF.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
