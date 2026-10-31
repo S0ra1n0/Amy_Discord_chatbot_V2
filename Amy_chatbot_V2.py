@@ -265,10 +265,17 @@ bot_enabled: bool = db.get_bool_setting("bot_enabled", True)
 # /voice on|off (admins). Mutes her without unloading the engine, so turning it back on is
 # instant. Saved, like /toggle. Only matters when TTS=on loads the engine at all.
 voice_enabled: bool = db.get_bool_setting("voice_enabled", True)
-# /voice up_next on|off (admins): say "Up next, ..." when a song changes by itself. Saved.
-up_next_enabled: bool = db.get_bool_setting("up_next", True)
-# /autoplay on|off: when the queue runs out, play a song YouTube considers related. Saved.
-autoplay_enabled: bool = db.get_bool_setting("autoplay", True)
+# /voice up_next on|off (admins): say "Up next, ..." when a song changes by itself, and
+# /autoplay on|off: when the queue runs out, play a song YouTube considers related. Both are
+# PER SERVER (database `guild_settings`; a server with no row inherits the old bot-wide row,
+# else on): read through autoplay_on / up_next_on below, never as globals.
+def autoplay_on(guild_id: int) -> bool:
+    return db.guild_bool(guild_id, config.AUTOPLAY_KEY, True)
+
+
+def up_next_on(guild_id: int) -> bool:
+    return db.guild_bool(guild_id, config.UP_NEXT_KEY, True)
+
 if model_manager.current != DEFAULT_MODEL:
     log.info(f"Restored saved model: {model_manager.current}")
 if not bot_enabled:
@@ -1295,7 +1302,7 @@ def autoplay_applies(vc: discord.VoiceClient, player: music.GuildPlayer,
     """Whether the queue running dry after `last` should be followed by a related song."""
     channel = voice.active_channel(vc)
     return music.should_autoplay(
-        enabled=autoplay_enabled, last=last, force_next=force_next,
+        enabled=autoplay_on(player.guild_id), last=last, force_next=force_next,
         going_back=going_back, humans=voice.humans_in(channel) if channel else 0,
         played=played)
 
@@ -1358,7 +1365,7 @@ async def play_attempts(guild: discord.Guild, vc: discord.VoiceClient,
             # song>". A failure to speak must not be mistaken for a bad track either.
             # A song a /play queued during the autoplay lookup is not announced: the
             # command says "Now playing" itself.
-            if up_next_enabled and not user_queued and voicelines.should_announce_next(
+            if up_next_on(guild.id) and not user_queued and voicelines.should_announce_next(
                     previous, next_track, force_next=force_next, going_back=going_back,
                     resumed=resumed):
                 try:
@@ -1466,7 +1473,7 @@ async def advance_playback(guild: discord.Guild) -> None:
                 return
             # /autoplay off during the lookup cancels the pick; a queued song still plays.
             attempts, user_queued = autoplay_choice(
-                player, previous, candidates if autoplay_enabled else [])
+                player, previous, candidates if autoplay_on(guild.id) else [])
             if not attempts:
                 await finish_playback(guild, player)
                 return
@@ -2340,26 +2347,24 @@ async def music_filter(ctx: MusicContext, preset: Optional[str] = None) -> Music
     return _info(filter_status(name))
 
 
-def autoplay_status() -> str:
-    if autoplay_enabled:
-        return ("Autoplay is **on**: when the queue runs out I'll keep going with songs "
+def autoplay_status(guild_id: int) -> str:
+    if autoplay_on(guild_id):
+        return ("Autoplay is **on** in this server: when the queue runs out I'll keep going with songs "
                 "related to the last one. `/stop` or `/autoplay off` ends it.")
-    return "Autoplay is **off**: I'll stop when the queue runs out."
+    return "Autoplay is **off** in this server: I'll stop when the queue runs out."
 
 
 async def music_autoplay(ctx: MusicContext, state: Optional[bool] = None) -> MusicResult:
-    """Show autoplay, or (state given) switch it - with /loop's permission rule."""
-    global autoplay_enabled
+    """Show autoplay, or (state given) switch it for this server - with /loop's permission rule."""
     if state is None:
-        return _info(autoplay_status())
+        return _info(autoplay_status(ctx.guild.id))
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
     if not ctx.may_control():
         return _error(NOT_WITH_AMY)
-    autoplay_enabled = state
-    db.set_bool_setting("autoplay", autoplay_enabled)   # survives a restart
-    log.info("Autoplay is now " + ("on" if state else "off"))
-    return _info(autoplay_status())
+    db.set_guild_bool(ctx.guild.id, config.AUTOPLAY_KEY, state)   # survives a restart
+    log.info(f"Autoplay is now {'on' if state else 'off'} in guild {ctx.guild.id}")
+    return _info(autoplay_status(ctx.guild.id))
 
 
 async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
@@ -2903,8 +2908,9 @@ async def slash_say(interaction: discord.Interaction,
                                         else ui.error_embed(reply)), ephemeral=True)
 
 
-def voice_status() -> str:
-    """The /voice report: the switch, the engine, and the voice settings."""
+def voice_status(guild_id: int) -> str:
+    """The /voice report: the switch, the engine, and the voice settings (Up next is this
+    server's own setting)."""
     if speaker is None:
         return ("\U0001F507 **Voice: not set up.** Set `TTS=on` in `.env` and restart "
                 "(the README's \"Amy's voice\" section covers the one-time install).")
@@ -2912,7 +2918,7 @@ def voice_status() -> str:
     engine = {"ready": "ready", "loading": "loading...", "off": "not started yet",
               "failed": f"failed - {speaker.problem}"}.get(speaker.state, speaker.state)
     return (f"\U0001F50A **Voice: {switch}**\n"
-            f"Up next: {'on' if up_next_enabled else 'off'}\n"
+            f"Up next: {'on' if up_next_on(guild_id) else 'off'}\n"
             f"Engine: {engine}\n"
             f"Voice: {describe_voice()}, "
             f"level {round(VOICE_LEVEL * 100)}%\n"
@@ -2933,9 +2939,11 @@ def voice_status() -> str:
 async def slash_voice(interaction: discord.Interaction,
                       state: Optional[app_commands.Choice[str]] = None,
                       up_next: Optional[app_commands.Choice[str]] = None) -> None:
-    global voice_enabled, up_next_enabled
+    global voice_enabled
+    guild = interaction.guild
+    assert guild is not None      # admin_only refuses DMs (an admin needs a server)
     if state is None and up_next is None:
-        await interaction.response.send_message(voice_status(), ephemeral=True)
+        await interaction.response.send_message(voice_status(guild.id), ephemeral=True)
         return
     if speaker is None:
         await deny(interaction, NO_VOICE)
@@ -2944,17 +2952,17 @@ async def slash_voice(interaction: discord.Interaction,
     if state is not None:
         voice_enabled = state.value == "on"
         db.set_bool_setting("voice_enabled", voice_enabled)   # survives a restart
-        if not voice_enabled and interaction.guild is not None:
-            shush(interaction.guild)                          # off means quiet now, not later
+        if not voice_enabled:
+            shush(guild)                                      # off means quiet now, not later
         log.info("Voice is now " + state.value)
         parts.append("\U0001F50A My voice is **on**." if voice_enabled
                      else "\U0001F507 My voice is **off**.")
     if up_next is not None:
         up_next_enabled = up_next.value == "on"
-        db.set_bool_setting("up_next", up_next_enabled)       # survives a restart
-        log.info("Up-next announcements are now " + up_next.value)
-        parts.append("I'll say what's up next (when my voice is on)." if up_next_enabled
-                     else "I won't announce the next song.")
+        db.set_guild_bool(guild.id, config.UP_NEXT_KEY, up_next_enabled)  # survives a restart
+        log.info(f"Up-next announcements are now {up_next.value} in guild {guild.id}")
+        parts.append("I'll say what's up next in this server (when my voice is on)."
+                     if up_next_enabled else "I won't announce the next song in this server.")
     await interaction.response.send_message(" ".join(parts))
 
 

@@ -25,7 +25,7 @@ one guards against.
 | `mixer.py` | `SpeechQueue` and `Mixer`: Amy's voice mixed over the music, with ducking and the hold-music mode | discord |
 | `voicelines.py` | What Amy says out loud: confirmation phrasings, speakable titles and times, how a chat reply becomes speech, the paraphrase prompt | llm, speech (both pure) |
 | `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engines (Kokoro, Piper) and the `Speaker` | Kokoro/PyTorch or Piper/onnxruntime **only when loaded** |
-| `database.py` | SQLite: history, settings, voice channels, queue snapshots, schema migrations | sqlite3 |
+| `database.py` | SQLite: history, bot-wide and per-server settings (with a cached flag lookup), voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
 
 **New logic goes in a module as a pure helper**, then gets wired into `Amy_chatbot_V2.py`.
@@ -261,6 +261,16 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `ConversationDB(max_messages=)`, which trims storage, and to `get_messages(limit=)`.
   `test_regression.py` asserts the two agree.
 - `/toggle` and `/model` persist in the `settings` table. They used to reset on restart.
+- **Per-server vs bot-wide.** Per server (table `guild_settings(guild_id, key, value)`, keys in
+  `config.AUTOPLAY_KEY` / `UP_NEXT_KEY`): `/autoplay` and `/voice up_next`. Bot-wide (table
+  `settings`): `bot_enabled` (`/toggle`), `voice_enabled` (`/voice on|off`), `model` and
+  `think_mode:<model>` (`/model`). The rule is `config.resolve_bool(server value, bot-wide value,
+  code default)`: a server's own value, else the old bot-wide row (never copied or deleted; it is
+  the default a server inherits), else the code default; a stored value that isn't a recognised
+  word counts as unset. The bot reads it with `autoplay_on(guild_id)` / `up_next_on(guild_id)`
+  (`ConversationDB.guild_bool`, cached per `(guild, key, default)` and dropped when either level
+  is written, so a track advance doesn't query SQLite). **Never** keep a per-server setting in a
+  module global. The planned DJ role and vote share (DJ_PLAN.md) are meant to live in `guild_settings` too.
 
 ## Database
 
@@ -280,7 +290,7 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   guild's `saved_queue` rows in one transaction. The snapshot task fires every 20s
   (`SNAPSHOT_INTERVAL`); appending would grow the queue on every tick. Slot 0 is the track
   that was playing.
-- **Schema version is 2.** Migration 2 adds `saved_queue.requester_id INTEGER` (NULL for rows
+- **Schema version is 3.** Migration 3 adds `guild_settings` (above; empty at first, the bot-wide `settings` rows are untouched). Migration 2 adds `saved_queue.requester_id INTEGER` (NULL for rows
   saved before it) and `is_autoplay INTEGER NOT NULL DEFAULT 0`. `music.track_to_dict` /
   `track_from_dict` carry both; a stored row with no id whose `requested_by` is
   `AUTOPLAY_REQUESTER` loads as `is_autoplay=True` (what an old Autoplay row was), and a junk id

@@ -173,7 +173,7 @@ finally:
 print()
 print("=== advance_playback: autoplay when the queue drains ===")
 _real = (music.play_track, music.related_tracks, amy.refresh_now_playing, amy.announce,
-         amy.finish_playback, amy.autoplay_enabled, amy.up_next_enabled)
+         amy.finish_playback)
 played, said, finished, lookups = [], [], [], []
 hooks = []          # run during the (slow) related lookup, like a command landing meanwhile
 mix = []            # what the fake Mix returns, or an Exception to raise
@@ -240,7 +240,8 @@ def run(gid, *, last="yt", humans=1, enabled=True, mix_result=(), history=(), se
     p.history.extend(history)
     p.queue.extend(queue)
     mix = mix_result
-    amy.autoplay_enabled, amy.up_next_enabled = enabled, True
+    amy.db.set_guild_bool(gid, amy.config.AUTOPLAY_KEY, enabled)
+    amy.db.set_guild_bool(gid, amy.config.UP_NEXT_KEY, True)
     for lst in (played, said, finished, lookups):
         lst.clear()
     bad.clear()
@@ -353,7 +354,8 @@ try:
         p.current = yt(1)
         p.started_at = time.monotonic() - 60.0
         mix = list(mix_result)
-        amy.autoplay_enabled, amy.up_next_enabled = True, True
+        amy.db.set_guild_bool(gid, amy.config.AUTOPLAY_KEY, True)
+        amy.db.set_guild_bool(gid, amy.config.UP_NEXT_KEY, True)
         for lst in (played, said, finished, lookups):
             lst.clear()
         bad.clear()
@@ -486,20 +488,18 @@ try:
           amy.db.load_player_state(8050))
 
     async def autoplay_off(p, guild, vc):
-        amy.autoplay_enabled = False
+        amy.db.set_guild_bool(p.guild_id, amy.config.AUTOPLAY_KEY, False)
     p, vc, _ = drive(8060, autoplay_off)
     check("/autoplay off during the lookup cancels the pick: nothing plays, playback finishes",
           played == [] and finished != [] and said == [], (played, finished, said))
-    amy.autoplay_enabled = True
 
     async def autoplay_off_queued(p, guild, vc):
-        amy.autoplay_enabled = False
+        amy.db.set_guild_bool(p.guild_id, amy.config.AUTOPLAY_KEY, False)
         p.queue.append(yt(9, "requested"))
         # the queued song's own advance is not run: the lookup's second stretch must pick it up
     p, vc, _ = drive(8061, autoplay_off_queued)
     check("...but a song queued meanwhile still plays",
           [t.title for t in played] == ["requested"] and said == [], (played, said))
-    amy.autoplay_enabled = True
 
     async def cancel_in_lookup(p, guild, vc):
         running["task"].cancel()
@@ -538,12 +538,11 @@ try:
         amy.snapshot_player = _real_snap
 finally:
     (music.play_track, music.related_tracks, amy.refresh_now_playing, amy.announce,
-     amy.finish_playback, amy.autoplay_enabled, amy.up_next_enabled) = _real
+     amy.finish_playback) = _real
 
 # ---- /autoplay -----------------------------------------------------------------------------
 print()
 print("=== /autoplay ===")
-_real_ap = amy.autoplay_enabled
 ch = RealVoiceChannel(10, "Chung")
 member = Member(USER, ch, name="userA")
 guild = Guild(OWNER, member, VoiceClient(ch), guild_id=8100)
@@ -557,30 +556,70 @@ def slash(it, *args):
     return text_of(None, it)
 
 
+AP = amy.config.AUTOPLAY_KEY
+ch2 = RealVoiceChannel(11, "Other")
+member2 = Member(USER, ch2, name="userA")
+guild2 = Guild(OWNER, member2, VoiceClient(ch2), guild_id=8102)
 try:
-    amy.autoplay_enabled = True
     out = slash(Interaction(member, guild))
     check("no argument shows the status", "Autoplay is **on**" in out, out)
     out = slash(Interaction(member, guild), app_commands.Choice(name="off", value="off"))
-    check("off turns it off and saves it", amy.autoplay_enabled is False
-          and amy.db.get_bool_setting("autoplay", True) is False and "off" in out, out)
+    check("off turns it off and saves it for this server", amy.autoplay_on(8100) is False
+          and amy.db.get_guild_setting(8100, AP) == "false" and "off" in out, out)
+    check("...and leaves the bot-wide row and another server alone",
+          amy.db.get_setting(AP) is None and amy.autoplay_on(8102) is True
+          and amy.db.get_guild_setting(8102, AP) is None)
     out = slash(Interaction(member, guild))
     check("the status now says off", "Autoplay is **off**" in out, out)
+    out = slash(Interaction(member2, guild2))
+    check("...while the other server's status still says on", "Autoplay is **on**" in out, out)
     out = slash(Interaction(member, guild), app_commands.Choice(name="on", value="on"))
-    check("on turns it back on and saves it", amy.autoplay_enabled is True
-          and amy.db.get_bool_setting("autoplay", False) is True, out)
+    check("on turns it back on and saves it", amy.autoplay_on(8100) is True
+          and amy.db.get_guild_setting(8100, AP) == "true", out)
 
     stranger = Member(77, None, name="stranger")
     out = slash(Interaction(stranger, guild), app_commands.Choice(name="off", value="off"))
-    check("someone outside Amy's channel can't change it", amy.autoplay_enabled is True
+    check("someone outside Amy's channel can't change it", amy.autoplay_on(8100) is True
           and "voice channel" in out, out)
     out = slash(Interaction(stranger, guild))
     check("...but can read the status", "Autoplay is **on**" in out, out)
     unconnected = Guild(OWNER, member, None, guild_id=8101)
     out = slash(Interaction(member, unconnected), app_commands.Choice(name="off", value="off"))
-    check("not connected: refused, setting unchanged", amy.autoplay_enabled is True, out)
+    check("not connected: refused, setting unchanged", amy.autoplay_on(8101) is True
+          and amy.db.get_guild_setting(8101, AP) is None, out)
+
+    # Two servers decide independently when their songs end.
+    amy.db.set_guild_bool(8110, AP, False)
+    amy.db.set_guild_bool(8111, AP, True)
+    _real = (music.play_track, music.related_tracks, amy.refresh_now_playing, amy.announce,
+             amy.finish_playback)
+    music.play_track, music.related_tracks = _play, _related
+    amy.refresh_now_playing, amy.finish_playback = _refresh, _finish
+    amy.announce = lambda guild, event, title=None, **kw: said.append((event, title))
+    try:
+        # run() sets the guild's own value from `enabled`, so set each guild through setup_fn
+        # AFTER that: A (off) and B (on) end a song in the same moment.
+        run(8110, mix_result=[yt(1), yt(2)],
+            setup_fn=lambda p: amy.db.set_guild_bool(8110, AP, False))
+        a_played = [t.title for t in played]
+        run(8111, mix_result=[yt(1), yt(2)],
+            setup_fn=lambda p: amy.db.set_guild_bool(8111, AP, True))
+        b_played = [t.title for t in played]
+    finally:
+        (music.play_track, music.related_tracks, amy.refresh_now_playing, amy.announce,
+         amy.finish_playback) = _real
+    check("autoplay off in guild A plays nothing; guild B (on) autoplays",
+          a_played == [] and b_played == ["song 2"], (a_played, b_played))
+
+    # A server with no row of its own inherits the bot-wide row the old build saved.
+    amy.db.set_setting(AP, "false")
+    check("a fresh server inherits the bot-wide row (off)", amy.autoplay_on(8120) is False)
+    check("...a server with its own row ignores it", amy.autoplay_on(8100) is True)
+    out = slash(Interaction(member2, guild2))
+    check("...and its status shows the inherited value", "Autoplay is **off**" in out, out)
+    amy.db.set_setting(AP, "true")
+    check("...and follows the bot-wide row when it changes", amy.autoplay_on(8120) is True)
 finally:
-    amy.autoplay_enabled = _real_ap
-    amy.db.set_bool_setting("autoplay", _real_ap)
+    amy.db.set_setting(AP, "true")
 
 finish("ALL AUTOPLAY TESTS PASSED")

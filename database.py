@@ -84,6 +84,16 @@ MIGRATIONS: List[str] = [
             ALTER TABLE saved_queue ADD COLUMN requester_id INTEGER;
             ALTER TABLE saved_queue ADD COLUMN is_autoplay INTEGER NOT NULL DEFAULT 0;
 """,
+    # 3: per-server settings. The bot-wide `settings` rows stay as they are and act as the
+    # defaults a server inherits until it has a row of its own.
+    """
+            CREATE TABLE guild_settings (
+                guild_id INTEGER NOT NULL,
+                key      TEXT    NOT NULL,
+                value    TEXT    NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            );
+""",
 ]
 SCHEMA_VERSION: int = len(MIGRATIONS)
 
@@ -133,6 +143,9 @@ class ConversationDB:
                  max_messages: int = DEFAULT_MAX_MESSAGES) -> None:
         self.path = db_path
         self.max_messages = max(MIN_MAX_MESSAGES, max_messages)
+        # (guild_id, key, default) -> resolved bool, so a track advance never queries SQLite
+        # twice for the same setting. Dropped for a key whenever it is written (either level).
+        self._flag_cache: Dict[Tuple[int, str, bool], bool] = {}
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         try:
             self._create_tables()
@@ -244,6 +257,50 @@ class ConversationDB:
                                            updated_at = CURRENT_TIMESTAMP
         """, (key, value))
         self.conn.commit()
+        self._forget_flags(key)
+
+    #----Per-server settings------
+    # A server's own value, else the bot-wide row above (the old global setting, left as it
+    # was so nothing is lost), else the code default: see config.resolve_bool.
+
+    def _forget_flags(self, key: str, guild_id: Optional[int] = None) -> None:
+        for cached in [k for k in self._flag_cache
+                       if k[1] == key and (guild_id is None or k[0] == guild_id)]:
+            del self._flag_cache[cached]
+
+    def get_guild_setting(self, guild_id: int, key: str) -> Optional[str]:
+        """This server's stored value for `key`, or None when it has none."""
+        row = self.conn.execute(
+            "SELECT value FROM guild_settings WHERE guild_id = ? AND key = ?",
+            (guild_id, key)).fetchone()
+        return row[0] if row else None
+
+    def set_guild_setting(self, guild_id: int, key: str, value: str) -> None:
+        self.conn.execute("""
+            INSERT INTO guild_settings (guild_id, key, value) VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, key) DO UPDATE SET value = excluded.value
+        """, (guild_id, key, value))
+        self.conn.commit()
+        self._forget_flags(key, guild_id)
+
+    def clear_guild_setting(self, guild_id: int, key: str) -> None:
+        """Back to inheriting the bot-wide value / default."""
+        self.conn.execute("DELETE FROM guild_settings WHERE guild_id = ? AND key = ?",
+                          (guild_id, key))
+        self.conn.commit()
+        self._forget_flags(key, guild_id)
+
+    def guild_bool(self, guild_id: int, key: str, default: bool) -> bool:
+        """The effective true/false setting for a server (cached after the first read)."""
+        cached = self._flag_cache.get((guild_id, key, default))
+        if cached is None:
+            cached = config.resolve_bool(self.get_guild_setting(guild_id, key),
+                                         self.get_setting(key), default)
+            self._flag_cache[(guild_id, key, default)] = cached
+        return cached
+
+    def set_guild_bool(self, guild_id: int, key: str, value: bool) -> None:
+        self.set_guild_setting(guild_id, key, "true" if value else "false")
 
     def get_bool_setting(self, key: str, default: bool) -> bool:
         """Boolean form of get_setting. Anything unrecognised falls back to `default`."""

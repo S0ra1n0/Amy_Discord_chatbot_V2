@@ -36,6 +36,26 @@ def parse_bool(name: str, raw: Optional[str], default: bool) -> Tuple[bool, Opti
                      f"or on/off); using {fallback}.")
 
 
+# Keys of the per-server settings (database `guild_settings`; the same names are the bot-wide
+# `settings` rows they inherit from). Phase 2 adds the DJ role and vote share beside these.
+AUTOPLAY_KEY = "autoplay"
+UP_NEXT_KEY = "up_next"
+
+
+def resolve_bool(guild_raw: Optional[str], bot_raw: Optional[str], default: bool) -> bool:
+    """
+    A per-server true/false setting: this server's stored value, else the bot-wide one it
+    inherits, else the code default. A stored value that isn't a recognised word counts as
+    not set (it falls through to the next level), so a hand-edited row never flips anything.
+    """
+    for raw in (guild_raw, bot_raw):
+        if raw is not None:
+            value, problem = parse_bool("", raw, default)
+            if problem is None and raw.strip():
+                return value
+    return default
+
+
 def parse_int(name: str, raw: Optional[str], default: int,
               minimum: int) -> Tuple[int, Optional[str]]:
     """

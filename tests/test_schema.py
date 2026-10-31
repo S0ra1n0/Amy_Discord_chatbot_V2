@@ -22,7 +22,8 @@ import database
 from database import MIGRATIONS, SCHEMA_VERSION, ConversationDB, SchemaTooNewError
 from _check import check, finish
 
-TABLES = {"messages", "bot_voice_channels", "settings", "saved_queue", "saved_player"}
+TABLES = {"messages", "bot_voice_channels", "settings", "saved_queue", "saved_player",
+          "guild_settings"}
 
 
 _tmp = tempfile.TemporaryDirectory()
@@ -113,6 +114,73 @@ check("missing fields default to no id, not autoplay",
       new[2]["requester_id"] is None and new[2]["is_autoplay"] is False, new)
 db.conn.close()
 
+print("=== migration 3: a version-2 database upgrades with nothing lost ===")
+v2path = temp_path()
+v2 = sqlite3.connect(v2path)
+v2.executescript(MIGRATIONS[0] + MIGRATIONS[1])
+v2.execute("PRAGMA user_version = 2")
+v2.execute("INSERT INTO settings (key, value) VALUES ('autoplay', 'false')")
+v2.execute("INSERT INTO settings (key, value) VALUES ('up_next', 'false')")
+v2.execute("INSERT INTO settings (key, value) VALUES ('model', 'qwen3:4b')")
+v2.execute("INSERT INTO saved_player (guild_id) VALUES (7)")
+v2.execute("INSERT INTO saved_queue (guild_id, slot, title, query, requester_id) "
+           "VALUES (7, 0, 'Mine', 'https://x/a', 55)")
+v2.execute("INSERT INTO messages (server, channel, role, content) VALUES ('s','c','user','hi')")
+v2.commit()
+v2.close()
+db = ConversationDB(v2path)
+check("upgraded to the current version", database.schema_version(db.conn) == SCHEMA_VERSION)
+check("guild_settings exists and is empty",
+      db.conn.execute("SELECT COUNT(*) FROM guild_settings").fetchone() == (0,))
+check("bot-wide rows untouched",
+      (db.get_setting("autoplay"), db.get_setting("up_next"), db.get_setting("model"))
+      == ("false", "false", "qwen3:4b"))
+check("queue and messages kept",
+      db.load_player_state(7) is not None and db.load_player_state(7)["tracks"][0]["requester_id"] == 55
+      and db.conn.execute("SELECT content FROM messages").fetchall() == [("hi",)])
+check("an existing server with no row inherits the bot-wide value (no behaviour change)",
+      db.guild_bool(7, "autoplay", True) is False and db.guild_bool(7, "up_next", True) is False)
+db.conn.close()
+
+print("=== per-server settings ===")
+gpath = temp_path()
+db = ConversationDB(gpath)
+check("nothing stored -> None", db.get_guild_setting(1, "autoplay") is None)
+check("nothing anywhere -> the code default", db.guild_bool(1, "autoplay", True) is True
+      and db.guild_bool(1, "autoplay", False) is False)
+db.set_setting("autoplay", "false")                 # the old bot-wide row
+check("a server with no row inherits the bot-wide row", db.guild_bool(2, "autoplay", True) is False)
+db.set_guild_bool(1, "autoplay", True)
+check("its own value wins over the bot-wide row", db.guild_bool(1, "autoplay", False) is True)
+check("...and does not leak to another server",
+      db.guild_bool(2, "autoplay", True) is False and db.get_guild_setting(2, "autoplay") is None)
+check("the bot-wide row was not copied or changed",
+      db.get_setting("autoplay") == "false" and db.get_guild_setting(2, "autoplay") is None)
+db.set_guild_bool(1, "autoplay", False)
+db.set_guild_bool(2, "autoplay", True)
+check("two servers hold different values at once",
+      (db.guild_bool(1, "autoplay", True), db.guild_bool(2, "autoplay", False)) == (False, True))
+check("the setting is per key", db.guild_bool(1, "up_next", True) is True)
+db.set_guild_setting(3, "autoplay", "banana")       # a hand-edited row
+db.set_setting("autoplay", "true")
+check("an invalid stored value falls through to the bot-wide one",
+      db.guild_bool(3, "autoplay", False) is True)
+db.set_setting("autoplay", "banana")
+check("...and an invalid bot-wide one to the default", db.guild_bool(3, "autoplay", False) is False)
+check("a cached read is refreshed by a write to the same server",
+      db.guild_bool(6, "up_next", True) is True
+      and (db.set_guild_bool(6, "up_next", False), db.guild_bool(6, "up_next", True))[1] is False)
+db.clear_guild_setting(1, "autoplay")
+check("clearing a server's value returns it to inheriting",
+      db.get_guild_setting(1, "autoplay") is None and db.guild_bool(1, "autoplay", True) is True)
+db.set_guild_bool(5, "up_next", False)
+db.conn.close()
+db = ConversationDB(gpath)
+check("a restart keeps the per-server values",
+      db.get_guild_setting(2, "autoplay") == "true" and db.guild_bool(2, "autoplay", False) is True
+      and db.guild_bool(5, "up_next", True) is False)
+db.conn.close()
+
 print("=== reopening an up-to-date database changes nothing ===")
 db = ConversationDB(path)
 check("still the current version", database.schema_version(db.conn) == SCHEMA_VERSION)
@@ -187,6 +255,7 @@ print("=== shipped migrations are never edited ===")
 SHIPPED = [
     "6a04fdafdd6183f1",   # 1: baseline (the schema as it stood before versioning)
     "2836c127dc5d5236",   # 2: saved_queue.requester_id, saved_queue.is_autoplay
+    "e423afb401aaeff9",   # 3: guild_settings (per-server settings)
 ]
 got = [hashlib.sha256(m.encode("utf-8")).hexdigest()[:16] for m in MIGRATIONS]
 check("no shipped migration has changed", got[:len(SHIPPED)] == SHIPPED, got)

@@ -1484,14 +1484,17 @@ try:
           and amy.db.get_bool_setting("voice_enabled", False) is True and amy.can_speak(g), out)
 
     # /voice up_next: its own saved switch, independent of the voice switch
-    _real_up_next = amy.up_next_enabled
-    amy.up_next_enabled = True
+    _UN = amy.config.UP_NEXT_KEY
+    _gid = it_owner.guild.id
     out = slash("voice", Interaction(owner, it_owner.guild), None, None)
     check("/voice status shows Up next: on", "Up next: on" in out, out)
     out = slash("voice", Interaction(owner, it_owner.guild), None,
                 app_commands.Choice(name="off", value="off"))
-    check("/voice up_next:off turns the announcements off, saved",
-          amy.up_next_enabled is False and amy.db.get_bool_setting("up_next", True) is False, out)
+    check("/voice up_next:off turns the announcements off for this server, saved",
+          amy.up_next_on(_gid) is False and amy.db.get_guild_setting(_gid, _UN) == "false"
+          and amy.db.get_setting(_UN) is None, out)
+    check("...and another server is untouched", amy.up_next_on(_gid + 1000) is True
+          and amy.db.get_guild_setting(_gid + 1000, _UN) is None)
     check("...without touching the voice", amy.voice_enabled is True
           and amy.db.get_bool_setting("voice_enabled", False) is True and amy.can_speak(g), out)
     out = slash("voice", Interaction(owner, it_owner.guild), None, None)
@@ -1499,15 +1502,13 @@ try:
     out = slash("voice", Interaction(owner, it_owner.guild),
                 app_commands.Choice(name="off", value="off"))
     check("/voice off alone leaves the up_next switch as it was",
-          amy.voice_enabled is False and amy.up_next_enabled is False, out)
+          amy.voice_enabled is False and amy.up_next_on(_gid) is False, out)
     out = slash("voice", Interaction(owner, it_owner.guild),
                 app_commands.Choice(name="on", value="on"),
                 app_commands.Choice(name="on", value="on"))
     check("both options at once set both",
-          amy.voice_enabled is True and amy.up_next_enabled is True
-          and amy.db.get_bool_setting("up_next", False) is True, out)
-    amy.up_next_enabled = _real_up_next
-    amy.db.set_bool_setting("up_next", _real_up_next)
+          amy.voice_enabled is True and amy.up_next_on(_gid) is True
+          and amy.db.get_guild_setting(_gid, _UN) == "true", out)
 
     amy.speaker = None
     out = slash("voice", Interaction(owner, it_owner.guild), None)
@@ -1526,7 +1527,6 @@ print()
 print("=== advance_playback announces the next song only when one ends on its own ===")
 _real_play_t, _real_refresh_t, _real_announce = (amy.music.play_track, amy.refresh_now_playing,
                                                  amy.announce)
-_real_up = amy.up_next_enabled
 _said = []
 
 
@@ -1552,7 +1552,7 @@ def _un_run(gid, *, current="playing", queue=("next",), setup_fn=None, enabled=T
     vc.stopped = True
     if setup_fn:
         setup_fn(p)
-    amy.up_next_enabled = enabled
+    amy.db.set_guild_bool(gid, amy.config.UP_NEXT_KEY, enabled)
     _said.clear()
     _order.clear()
     asyncio.run(amy.advance_playback(g))
@@ -1608,7 +1608,6 @@ try:
 finally:
     amy.music.play_track, amy.refresh_now_playing, amy.announce = (
         _real_play_t, _real_refresh_t, _real_announce)
-    amy.up_next_enabled = _real_up
 
 # ---- Phase 1F: two replies at once ---------------------------------------------------------
 print()

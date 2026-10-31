@@ -34,6 +34,18 @@ _, msg = config.parse_int("HISTORY_LIMIT", "abc", default=10, minimum=2)
 check("the warning names the setting and the fallback", "HISTORY_LIMIT" in msg and "10" in msg, msg)
 
 print()
+print("=== resolve_bool: server value, else bot-wide, else default ===")
+rb = config.resolve_bool
+check("the server's value wins", rb("false", "true", True) is False and rb("true", "false", False) is True)
+check("no server value -> the bot-wide one", rb(None, "false", True) is False
+      and rb(None, "true", False) is True)
+check("neither -> the default", rb(None, None, True) is True and rb(None, None, False) is False)
+check("an invalid server value falls to the bot-wide one", rb("banana", "false", True) is False)
+check("an invalid bot-wide value falls to the default", rb(None, "banana", False) is False
+      and rb("banana", "banana", True) is True)
+check("a blank value counts as not set", rb("", "false", True) is False and rb("  ", None, False) is False)
+check("the same words as the .env parser", rb("on", None, False) is True and rb("NO", None, True) is False)
+
 print("=== parse_bool ===")
 for raw, want, warns in [(None, True, False), ("", True, False), ("true", True, False),
                          ("True", True, False), ("1", True, False), ("yes", True, False),
