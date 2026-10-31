@@ -19,7 +19,7 @@ import httpx
 
 API_URL = "https://lrclib.net/api/search"
 USER_AGENT = "Amy-Discord-Bot/1.0 (personal Discord music bot; lyrics lookup)"
-TIMEOUT = 8.0                  # seconds, for the whole lookup (httpx's own limit is per read)
+TIMEOUT = 8.0                  # seconds PER SEARCH (find_lyrics may make two; httpx's own limit is per read)
 DURATION_TOLERANCE = 5         # seconds: a result this close to the track's length is "the same song"
 PAGE_CHARS = 4000              # under the 4096 embed limit, leaving room for the footer note
 MAX_PAGES = 3                  # ~12k characters; the rest is left to lrclib.net
@@ -77,6 +77,19 @@ def _tidy(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" -–—|:,~・")
 
 
+_EXT = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+_TRACK_NO = re.compile(r"^\d{1,2}\s*[-.]\s*")      # 1-2 digits: "311 - Amber" is an artist
+
+
+def local_title(filename: str) -> str:
+    """
+    A local file's name ("01 - Artist - Song.flac") as a title for `search_terms`: the
+    extension and a leading track number dropped. Pure. Falls back to the name as given.
+    """
+    name = _EXT.sub("", filename.strip())
+    return _TRACK_NO.sub("", name).strip() or filename.strip()
+
+
 def search_terms(title: str) -> Terms:
     """
     Turn a track title ("Artist - Song (Official Video)") into search terms. Pure.
@@ -101,13 +114,14 @@ def search_terms(title: str) -> Terms:
 
 
 # ---- Choosing among results ---------------------------------------------------------------------
-_STAMPS = re.compile(r"^\s*(?:\[\d+:\d+(?:[.:]\d+)?\]\s*)+|<\d+:\d+(?:[.:]\d+)?>\s*", re.M)
-_TAG_LINE = re.compile(r"^\s*\[[A-Za-z]+:[^\]]*\]\s*$", re.M)     # [ar:Artist] [length:3:20]
+# Spaces and tabs only: `\s` would eat the newlines and lose stanza breaks.
+_STAMPS = re.compile(r"^[ \t]*(?:\[\d+:\d+(?:[.:]\d+)?\][ \t]*)+|<\d+:\d+(?:[.:]\d+)?>[ \t]*", re.M)
+_TAG_LINE = re.compile(r"^[ \t]*\[[A-Za-z]+:[^\]]*\][ \t]*$", re.M)     # [ar:Artist] [length:3:20]
 
 
 def strip_timestamps(synced: str) -> str:
-    """Synced lyrics ("[01:23.45] words") as plain lines. Pure."""
-    text = _STAMPS.sub("", _TAG_LINE.sub("", synced))
+    """Synced lyrics ("[01:23.45] words") as plain lines; stanza breaks are kept. Pure."""
+    text = _STAMPS.sub("", _TAG_LINE.sub("", synced.replace("\r\n", "\n").replace("\r", "\n")))
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -123,6 +137,19 @@ def _text_of(rec: Dict[str, Any]) -> str:
 
 def _usable(rec: Any) -> bool:
     return isinstance(rec, dict) and (rec.get("instrumental") is True or bool(_text_of(rec)))
+
+
+def names_match(rec: Dict[str, Any], terms: Terms) -> bool:
+    """
+    Does a record loosely match what was searched? Pure. Casefolded, and either side may
+    contain the other. With an artist in the terms, the ARTIST must match (the record's artist
+    or, for a title ordered "Song - Artist", its track name), so a same-titled cover by someone
+    else is out; with no artist, the title (or the record's artist) may match.
+    """
+    ours = [s.casefold().strip() for s in ((terms.artist,) if terms.artist else (terms.title,))
+            if s and s.strip()]
+    theirs = [str(rec.get(k) or "").casefold().strip() for k in ("artistName", "trackName")]
+    return any(a and b and (a in b or b in a) for a in ours for b in theirs)
 
 
 def choose_result(results: List[Dict[str, Any]], duration: Optional[float] = None,
@@ -161,20 +188,31 @@ def split_pages(text: str, limit: int = PAGE_CHARS) -> List[str]:
     """
     Cut text into pieces of at most `limit` characters, on line boundaries. Pure.
 
-    A single line longer than the limit is cut at its last space (or hard, with none).
-    Pieces are stripped; no text is lost apart from that edge whitespace.
+    A single line longer than the limit is cut at its last space (or hard, with none), never
+    right after a lone backslash (that would separate it from the character it escapes). The
+    rest of a cut line starts a new page, so a leading `#`, `>` or `-` there gets a backslash
+    (it was not at a line start when the text was escaped). Pieces are stripped; no text is
+    lost apart from that edge whitespace. `limit` must be at least 2 (a continuation
+    backslash plus one character would never fit in 1).
     """
+    if limit < 2:
+        raise ValueError("limit must be at least 2")
     pages: List[str] = []
     current = ""
     for line in text.strip().split("\n"):
         while len(line) > limit:
             cut = line.rfind(" ", 0, limit + 1)
             cut = cut if cut > 0 else limit
+            head = line[:cut]
+            if (len(head) - len(head.rstrip("\\"))) % 2 == 1 and cut > 1:
+                cut -= 1
             if current:
                 pages.append(current)
                 current = ""
             pages.append(line[:cut].strip())
             line = line[cut:].strip()
+            if line[:1] in ("#", ">", "-"):
+                line = "\\" + line
         if current and len(current) + 1 + len(line) > limit:
             pages.append(current)
             current = line
@@ -236,7 +274,8 @@ async def find_lyrics(terms: Terms, duration: Optional[float] = None) -> Optiona
     """
     Look a song up. Returns None for 'no match'; raises LyricsError when LRCLIB can't be
     reached. With a known duration a record within DURATION_TOLERANCE from either search beats the
-    first search's out-of-tolerance guess. With an artist it asks for that exact pair first, then falls back to a free-text
+    first search's out-of-tolerance guess (from the free-text search only if its artist or title
+    loosely matches the terms). Each search has its own TIMEOUT. With an artist it asks for that exact pair first, then falls back to a free-text
     search of both words (a title ordered "Song - Artist" matches that way).
     """
     attempts: List[Dict[str, str]] = []
@@ -253,9 +292,13 @@ async def find_lyrics(terms: Terms, duration: Optional[float] = None) -> Optiona
             continue
         # Duration known: a record of the right length from ANY attempt beats the first
         # attempt's best guess (a live cut), so keep looking until one matches.
-        found = choose_result(results, duration, strict=True)
+        # ...but in the free-text round only one whose names loosely match what was asked
+        # (a cover by someone else of the right length is not the song).
+        candidates = results if "q" not in params else [r for r in results if names_match(r, terms)]
+        found = choose_result(candidates, duration, strict=True)
         if found is not None:
             return found
         if fallback is None:
-            fallback = choose_result(results, duration)
+            # The duration preference only ever applies to name-matched records
+            fallback = choose_result(candidates, duration) or choose_result(results)
     return fallback

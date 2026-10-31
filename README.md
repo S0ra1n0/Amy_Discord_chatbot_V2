@@ -293,14 +293,19 @@ give it the artist and title yourself.
 
 Track titles are tidied before searching: brackets such as `(Official Video)` or `【...】`, a
 `feat.` credit and anything after `|` are dropped, and `Artist - Song` is split into artist and
-song. When Amy knows the track's length she prefers a match within 5 seconds of it - from either of
-her two searches (artist + title, then free text) - so a live cut or a 10-hour loop loses to the
-studio version whenever one turns up; if none is that close she shows the first result. Lyrics are shown as plain text (markdown in them, such as links or `*stars*`, is escaped so it
-appears literally). Plain lyrics are preferred; synced-only entries
-have their timestamps removed; instrumentals say so. Long lyrics are sent as up to 3 cards (about
+song. For a local file (`/play` from `MUSIC_DIR`) the file extension and a leading track number are
+dropped first, so `01 - Artist - Song.flac` searches for Artist / Song. When Amy knows the track's
+length she prefers a match within 5 seconds of it - from either of her two searches (artist +
+title, then free text; a free-text hit must also match the artist you searched for - or the
+title, when there was no artist - so a same-length cover by someone else doesn't win) - so a live cut or a 10-hour loop
+loses to the studio version whenever one turns up; if none is that close she shows the first
+result. Lyrics are shown as plain text (markdown in them, such as links or `*stars*`, is escaped
+so it appears literally, and so are the song names in her "not found" and "instrumental" replies).
+Plain lyrics are preferred; synced-only entries have their timestamps removed (blank lines between
+verses are kept); instrumentals say so. Long lyrics are sent as up to 3 cards (about
 12,000 characters) and then point to lrclib.net. Like `/queue`, the answer is public. If LRCLIB
-is slow or down (8 second limit) you get a friendly message and the bot carries on. Amy never
-reads lyrics out loud.
+is slow or down (8 second limit per search, up to two searches) you get a friendly message and the
+bot carries on. Amy never reads lyrics out loud.
 
 ### Position, seeking and replay
 

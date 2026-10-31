@@ -1847,7 +1847,9 @@ async def music_lyrics(ctx: MusicContext, song: str = "") -> MusicResult:
         if current is None:
             return _info("Nothing is playing right now. "
                          "Try `/lyrics <artist - title>` to look a song up.")
-        terms = lyrics.search_terms(current.title)
+        # A local file's title is its file name: drop the extension and track number
+        terms = lyrics.search_terms(lyrics.local_title(current.title) if current.is_local
+                                    else current.title)
         duration = current.duration
         asked = current.title
     try:
@@ -1858,11 +1860,12 @@ async def music_lyrics(ctx: MusicContext, song: str = "") -> MusicResult:
     if found is None:
         return _error("Couldn't find lyrics for **%s** (I searched for `%s`). "
                       "Try `/lyrics <artist - title>`."
-                      % (_shown(asked.replace("**", "")),
+                      % (lyrics.escape_markdown(_shown(asked)),
                          _shown(terms.shown.replace("`", "'"))))
     if found.text is None:
         return Reply(embed=ui.info_embed("**%s** is an instrumental, so there are no lyrics."
-                                         % _shown(found.heading), heading="Lyrics"))
+                                         % lyrics.escape_markdown(_shown(found.heading)),
+                                         heading="Lyrics"))
     pages, truncated = lyrics.lyric_pages(found.text)
     for embed in ui.lyrics_embeds(found.heading, pages, truncated, lyrics.CONTINUES_NOTE):
         await ctx.interaction.followup.send(embed=embed)

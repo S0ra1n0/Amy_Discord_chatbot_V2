@@ -74,6 +74,29 @@ check("metadata tag lines removed", "[ar" not in out and "length" not in out, ou
 check("words kept in order", out.split("\n") == ["Hello there", "Again", "end"], out.split("\n"))
 
 print()
+print("=== local files: extension and track number dropped ===")
+t = T(lyrics.local_title("Artist - Song.mp3"))
+check("local: extension dropped", (t.artist, t.title) == ("Artist", "Song"), t)
+t = T(lyrics.local_title("01 - Artist - Song.flac"))
+check("local: track number and extension dropped", (t.artist, t.title) == ("Artist", "Song"), t)
+check("local: '07. Song.ogg' form", lyrics.local_title("07. Song.ogg") == "Song")
+check("local: a name that is all number keeps something", lyrics.local_title("1984.mp3") == "1984")
+check("local: a number-named artist survives", lyrics.local_title("311 - Amber.mp3") == "311 - Amber",
+      lyrics.local_title("311 - Amber.mp3"))
+check("local: dots inside the name survive", lyrics.local_title("Mr. Brightside.mp3") == "Mr. Brightside")
+
+print()
+print("=== strip_timestamps keeps stanza breaks ===")
+check("blank line between stanzas kept",
+      lyrics.strip_timestamps("[00:01.00] one\n\n[00:04.00] three") == "one\n\nthree",
+      repr(lyrics.strip_timestamps("[00:01.00] one\n\n[00:04.00] three")))
+check("stamp-only line becomes a blank line",
+      lyrics.strip_timestamps("[00:01.00] a\n[00:02.00] \n[00:03.00] b") == "a\n\nb",
+      repr(lyrics.strip_timestamps("[00:01.00] a\n[00:02.00] \n[00:03.00] b")))
+check("CRLF input handled",
+      lyrics.strip_timestamps("[00:01.00] a\r\n\r\n[00:03.00] b") == "a\n\nb")
+
+print()
 print("=== choose_result ===")
 c = lyrics.choose_result
 check("empty list: None", c([]) is None)
@@ -120,6 +143,28 @@ check("...at spaces, losing no words",
       " ".join(" ".join(pages).split()) == "intro " + long_line + " outro")
 pages = lyrics.split_pages("x" * 250, 100)
 check("an unbroken string is hard-cut", [len(p) for p in pages] == [100, 100, 50], [len(p) for p in pages])
+try:
+    lyrics.split_pages("\\--", 1)
+    check("split_pages refuses limit < 2 (it would loop forever)", False, "no error")
+except ValueError:
+    check("split_pages refuses limit < 2 (it would loop forever)", True)
+pages = lyrics.split_pages("a" * 99 + "\\*" + "b" * 10, 100)
+check("a hard cut never separates a backslash from the char it escapes",
+      not pages[0].endswith("\\") and "".join(pages).replace("\\", "") == "a" * 99 + "*" + "b" * 10
+      and all(len(p) <= 100 for p in pages), pages)
+pages = lyrics.split_pages("a" * 98 + "\\\\" + "b" * 10, 100)
+check("...but an escaped backslash pair may be cut after",
+      pages[0] == "a" * 98 + "\\\\", pages)
+pages = lyrics.split_pages("a" * 100 + "- not a list", 100)
+check("a continuation page starting with '-' is escaped", pages[1].startswith("\\- ") , pages)
+pages = lyrics.split_pages("word " * 30 + "# x " + "y" * 20, 150)
+check("a continuation page starting with '#' is escaped",
+      any(p.startswith("\\#") for p in pages[1:]), pages)
+pages = lyrics.split_pages("a" * 100 + ">quote", 100)
+check("a continuation page starting with '>' is escaped", pages[1].startswith("\\>"), pages)
+pages, _ = lyrics.lyric_pages("x" * 4000 + "-" + "y" * 50)
+check("lyric_pages: continuation marker escaped and page within limit",
+      pages[1].startswith("\\-") and all(len(p) <= lyrics.PAGE_CHARS for p in pages), pages)
 big = "\n".join("verse line number %04d" % i for i in range(2000))   # ~44k chars
 pages, truncated = lyrics.lyric_pages(big)
 check("capped at MAX_PAGES", len(pages) == lyrics.MAX_PAGES, len(pages))
@@ -238,7 +283,8 @@ try:
     # search's out-of-tolerance guess (e.g. a 400 s live cut).
     calls.clear()
     fake_search.answers = [[rec(title="Live cut", duration=400)],
-                           [rec(title="Live cut", duration=400), rec(title="Studio", duration=321)]]
+                           [rec(title="Live cut", duration=400),
+                            rec(artist="Artist", title="Studio", duration=321)]]
     f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 320))
     check("duration: q search's in-tolerance record beats the first attempt's fallback",
           f is not None and f.title == "Studio" and len(calls) == 2, (f, calls))
@@ -262,6 +308,39 @@ try:
     f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 320))
     check("duration: a fallback from the q search is still returned",
           f is not None and f.title == "Only via q", f)
+    # Wrong-song guard: the free-text round only accepts a right-length record whose names
+    # loosely match; otherwise the first search's guess stands.
+    calls.clear()
+    fake_search.answers = [[rec(artist="Artist", title="Song", duration=230)],
+                           [rec(artist="Artist", title="Song", duration=230),
+                            rec(artist="Other Band", title="Different", duration=268)]]
+    f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 270))
+    check("duration: a right-length cover with unrelated names loses to the first guess",
+          f is not None and (f.artist, f.title) == ("Artist", "Song") and len(calls) == 2, (f, calls))
+    calls.clear()
+    fake_search.answers = [[], [rec(artist="Other Band", title="Different", duration=268),
+                                rec(artist="ARTIST", title="Remix", duration=269)]]
+    f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 270))
+    check("duration: a right-length record matching the artist (casefolded) is accepted",
+          f is not None and f.title == "Remix", f)
+    calls.clear()
+    fake_search.answers = [[], [rec(artist="Artist", title="Song", duration=230),
+                                rec(artist="Other Band", title="Different", duration=268)]]
+    f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 270))
+    check("duration: empty pair search, the fallback ignores unrelated right-length records",
+          f is not None and (f.artist, f.title) == ("Artist", "Song"), f)
+    calls.clear()
+    fake_search.answers = [[rec(artist="Artist", title="Song", duration=400)],
+                           [rec(artist="Artist", title="Song", duration=400),
+                            rec(artist="Cover Guy", title="Song", duration=270)]]
+    f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 270))
+    check("duration: a same-titled cover by another artist does not win",
+          f is not None and f.artist == "Artist", f)
+    check("names_match without an artist falls back to the title",
+          lyrics.names_match(rec(artist="Zed", title="Song"), lyrics.Terms(None, "song")))
+    check("names_match is crosswise and loose",
+          lyrics.names_match(rec(artist="Song", title="Artist feat. X"), lyrics.Terms("Artist", "Song"))
+          and not lyrics.names_match(rec(artist="Q", title="Z"), lyrics.Terms("Artist", "Song")))
 finally:
     lyrics.search_lrclib = orig_search
 
@@ -385,6 +464,37 @@ try:
     check("not found with a typed query: bold is what was typed",
           "**Some Artist - Some Song (Live)**" in out and "`Some Artist - Some Song`" in out, out)
     check("not found: sent no lyrics embed", all(not (m.embed and m.embed.footer.text) for m in it.sent))
+
+    evil_name = "[Free Nitro](https://phish.example) ||x|| **b**"
+    fake = FakeLRC([[], []])
+    with_fake(fake)
+    _, it = setup()
+    out = run_music(amy, "lyrics", [evil_name], interaction=it)
+    check("not found: typed query is escaped (no masked link, spoiler or bold break)",
+          BS + "[Free Nitro" + BS + "](https://phish.example)" in out and BS + "|" + BS + "|x" in out
+          and BS + "*" + BS + "*b" in out, out)
+    fake = FakeLRC([[], []])
+    with_fake(fake)
+    _, it = setup(current_title="[Free Nitro](https://phish.example) ||x||")
+    out = run_music(amy, "lyrics", [""], interaction=it)
+    check("not found: YouTube title is escaped",
+          BS + "[Free Nitro" in out and BS + "|" + BS + "|x" in out, out)
+    fake = FakeLRC([[rec(artist="[Free Nitro](https://phish.example)", title="||x||",
+                        plain=None, instrumental=True)]])
+    with_fake(fake)
+    _, it = setup()
+    out = run_music(amy, "lyrics", ["wordless"], interaction=it)
+    check("instrumental: community artist/title escaped",
+          BS + "[Free Nitro" + BS + "](https://phish.example)" in out and BS + "|" + BS + "|x" in out, out)
+
+    fake = FakeLRC([[rec(artist="Artist", title="Song", plain="local words")]])
+    with_fake(fake)
+    player, it = setup()
+    player.current = amy.music.Track(title="01 - Artist - Song.flac", query="x", duration=None,
+                                     requested_by="userA", is_local=True)
+    run_music(amy, "lyrics", [""], interaction=it)
+    check("local file: searched without number and extension",
+          fake.calls[0] == {"track_name": "Song", "artist_name": "Artist"}, fake.calls)
 
     big = "\n".join("verse line number %04d" % i for i in range(2000))
     fake = FakeLRC([[rec(plain=big)]])

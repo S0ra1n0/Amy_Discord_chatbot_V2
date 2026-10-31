@@ -442,7 +442,18 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   sends each page as its own follow-up (`lyric_pages` caps at `MAX_PAGES`).
 - **Lyrics text is escaped before it is split** (`escape_markdown` inside `lyric_pages`): records
   are community-submitted, and a masked link or spoiler would otherwise render. Escaping adds
-  characters, so splitting first could push a page over the embed limit.
+  characters, so splitting first could push a page over the embed limit. `split_pages` never cuts
+  right after a lone backslash and escapes a `#`, `>` or `-` that starts a continuation page.
+  **Names shown in replies are escaped too**: the not-found reply's title and the instrumental
+  reply's LRCLIB heading go through `escape_markdown` (after `_shown` truncates, so a cut can't
+  strand a backslash); the searched terms sit in an inline code span with backticks removed.
+- **Free-text matches must match the artist.** In `find_lyrics`' `q` round the duration
+  preference (strict pick AND fallback) applies only to records passing `names_match`: with an
+  artist in the terms, the record's artist (or its track name, for "Song - Artist" order) must
+  contain it or be contained by it, casefolded; with no artist, the title. If none pass, the
+  first usable record is used with no duration preference. Local files go through `local_title`
+  (extension and a 1-2 digit track number dropped) before `search_terms`. `split_pages` rejects
+  `limit < 2`.
 - **Lyrics are never spoken** and never go to the model: `music_lyrics` has no `announce`.
 
 ## The model (Ollama)
