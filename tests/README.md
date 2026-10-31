@@ -32,7 +32,9 @@ python tests/run_tests.py --live      # + starts the real bot against Discord
 python tests/run_tests.py --all       # everything
 ```
 
-The runner finds `.venv` automatically and falls back to the current interpreter.
+The runner uses the Python it was started with when that is a venv (so
+`%TEMP%\avt\Scripts\python.exe tests\run_tests.py` really tests the no-TTS venv); a bare system
+Python hands over to the project's `.venv` when there is one.
 Individual suites can also be run directly: `python tests/test_music.py`. Run directly or through the runner, no suite touches your real database: each one uses a throwaway `AMY_DB_PATH`.
 
 A suite that can't run here exits with code **77** and the runner reports it as `SKIP`, listed by name in the summary (`16 suite(s) passed, 1 SKIPPED (not tested): ...`). It never counts as a pass: `test_model_live.py` used to exit 0 when Ollama was missing and showed up as PASS having tested nothing.

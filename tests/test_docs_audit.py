@@ -168,6 +168,15 @@ print("=== suite counts in the docs match the runner ===")
 import run_tests
 n_off, n_net, n_live = len(run_tests.OFFLINE), len(run_tests.NETWORK), len(run_tests.LIVE)
 n_all = n_off + n_net + n_live
+# The runner must test the venv it was started from (the no-TTS CI stand-in once silently
+# ran the bot's .venv instead); only a bare system Python hands over to the project .venv.
+_other = os.path.join("C:", os.sep, "elsewhere", "Scripts", "python.exe")
+check("runner keeps a venv Python it was started with",
+      run_tests.choose_interpreter(_other, in_venv=True) == _other)
+_proj_venv = os.path.join(run_tests.PROJ, ".venv", "Scripts", "python.exe")
+if os.path.isfile(_proj_venv):
+    check("runner hands a bare system Python over to the project .venv",
+          run_tests.choose_interpreter(_other, in_venv=False) == _proj_venv)
 t_readme = open(os.path.join("tests", "README.md"), encoding="utf-8").read()
 summary = re.search(r"(\d+)\s+suites\s*\((\d+)\s+offline,\s*(\d+)\s+network,\s*(\d+)\s+live\)", readme)
 check("README states the suite breakdown at all", summary is not None)

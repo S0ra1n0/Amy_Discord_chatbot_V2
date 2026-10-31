@@ -61,14 +61,23 @@ LIVE = [
 ]
 
 
+def choose_interpreter(executable: str, in_venv: bool, proj: str = PROJ) -> str:
+    """
+    The Python to run the suites with. One started from a venv is used as is, so another venv
+    (the no-TTS CI stand-in) really tests itself. A bare system Python usually lacks the
+    dependencies, so it hands over to the project's .venv when there is one.
+    """
+    if in_venv:
+        return executable
+    for venv in (os.path.join(proj, ".venv", "Scripts", "python.exe"),
+                 os.path.join(proj, ".venv", "bin", "python")):
+        if os.path.isfile(venv):
+            return venv
+    return executable
+
+
 def interpreter() -> str:
-    venv = os.path.join(PROJ, ".venv", "Scripts", "python.exe")
-    if os.path.isfile(venv):
-        return venv
-    venv_posix = os.path.join(PROJ, ".venv", "bin", "python")
-    if os.path.isfile(venv_posix):
-        return venv_posix
-    return sys.executable
+    return choose_interpreter(sys.executable, sys.prefix != sys.base_prefix)
 
 
 SKIPPED = 77                    # exit code a suite uses to say "could not run here"
