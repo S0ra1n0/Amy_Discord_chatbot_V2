@@ -78,6 +78,41 @@ check("saved queue kept",
       db.conn.execute("SELECT title FROM saved_queue").fetchall() == [("Song",)])
 db.conn.close()
 
+print("=== migration 2: a version-1 database with a saved queue upgrades and loads ===")
+v1path = temp_path()
+v1 = sqlite3.connect(v1path)
+v1.executescript(MIGRATIONS[0])
+v1.execute("PRAGMA user_version = 1")
+v1.execute("INSERT INTO saved_player (guild_id) VALUES (7)")
+v1.execute("INSERT INTO saved_queue (guild_id, slot, title, query, requested_by) "
+           "VALUES (7, 0, 'Mine', 'https://x/a', 'alice')")
+v1.execute("INSERT INTO saved_queue (guild_id, slot, title, query, requested_by) "
+           "VALUES (7, 1, 'Mix', 'https://x/b', 'Autoplay')")
+v1.commit()
+v1.close()
+db = ConversationDB(v1path)
+check("upgraded to the current version", database.schema_version(db.conn) == SCHEMA_VERSION)
+old = db.load_player_state(7)["tracks"]
+check("old rows keep their data", [t["title"] for t in old] == ["Mine", "Mix"]
+      and [t["requested_by"] for t in old] == ["alice", "Autoplay"], old)
+check("old rows have no requester id", [t["requester_id"] for t in old] == [None, None], old)
+check("old rows are not flagged autoplay (the loader decides from the name)",
+      [t["is_autoplay"] for t in old] == [False, False], old)
+
+print("=== an upgraded database round-trips the new fields ===")
+db.save_player_state(7, [
+    {"title": "Human", "query": "https://x/c", "requested_by": "bob", "requester_id": 4242},
+    {"title": "Auto", "query": "https://x/d", "requested_by": "Autoplay", "is_autoplay": True},
+    {"title": "Plain", "query": "https://x/e"},
+], "off", 1.0, None, None)
+new = db.load_player_state(7)["tracks"]
+check("requester id saved and loaded", new[0]["requester_id"] == 4242, new)
+check("a human track is not autoplay", new[0]["is_autoplay"] is False, new)
+check("autoplay flag saved and loaded", new[1]["is_autoplay"] is True and new[1]["requester_id"] is None, new)
+check("missing fields default to no id, not autoplay",
+      new[2]["requester_id"] is None and new[2]["is_autoplay"] is False, new)
+db.conn.close()
+
 print("=== reopening an up-to-date database changes nothing ===")
 db = ConversationDB(path)
 check("still the current version", database.schema_version(db.conn) == SCHEMA_VERSION)
@@ -151,6 +186,7 @@ print("=== shipped migrations are never edited ===")
 # migration, then add its hash here.
 SHIPPED = [
     "6a04fdafdd6183f1",   # 1: baseline (the schema as it stood before versioning)
+    "2836c127dc5d5236",   # 2: saved_queue.requester_id, saved_queue.is_autoplay
 ]
 got = [hashlib.sha256(m.encode("utf-8")).hexdigest()[:16] for m in MIGRATIONS]
 check("no shipped migration has changed", got[:len(SHIPPED)] == SHIPPED, got)

@@ -78,6 +78,12 @@ MIGRATIONS: List[str] = [
                 saved_at         DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 """,
+    # 2: who queued a track, by id (a name changes on rename), and whether Autoplay did.
+    # Old rows keep requester_id NULL and is_autoplay 0; the loader falls back to the name.
+    """
+            ALTER TABLE saved_queue ADD COLUMN requester_id INTEGER;
+            ALTER TABLE saved_queue ADD COLUMN is_autoplay INTEGER NOT NULL DEFAULT 0;
+""",
 ]
 SCHEMA_VERSION: int = len(MIGRATIONS)
 
@@ -159,11 +165,13 @@ class ConversationDB:
             self.conn.execute("DELETE FROM saved_queue WHERE guild_id = ?", (guild_id,))
             self.conn.executemany("""
                 INSERT INTO saved_queue
-                    (guild_id, slot, title, query, duration, requested_by, is_local, thumbnail)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (guild_id, slot, title, query, duration, requested_by, is_local, thumbnail,
+                     requester_id, is_autoplay)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [(guild_id, i, t["title"], t["query"], t.get("duration"),
                    t.get("requested_by", "unknown"), 1 if t.get("is_local") else 0,
-                   t.get("thumbnail"))
+                   t.get("thumbnail"), t.get("requester_id"),
+                   1 if t.get("is_autoplay") else 0)
                   for i, t in enumerate(tracks)])
             self.conn.execute("""
                 INSERT INTO saved_player (guild_id, loop_mode, volume, voice_channel_id,
@@ -189,9 +197,11 @@ class ConversationDB:
             return None
         tracks = [
             {"title": r[0], "query": r[1], "duration": r[2], "requested_by": r[3],
-             "is_local": bool(r[4]), "thumbnail": r[5]}
+             "is_local": bool(r[4]), "thumbnail": r[5],
+             "requester_id": r[6], "is_autoplay": bool(r[7])}
             for r in self.conn.execute("""
-                SELECT title, query, duration, requested_by, is_local, thumbnail
+                SELECT title, query, duration, requested_by, is_local, thumbnail,
+                       requester_id, is_autoplay
                 FROM saved_queue WHERE guild_id = ? ORDER BY slot ASC
             """, (guild_id,))
         ]

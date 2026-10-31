@@ -261,11 +261,15 @@ class Response:
 
     async def send_message(self, content=None, *, embed=None, view=None, ephemeral=False):
         self._done = True
-        self._owner.sent.append(SentMessage(content, embed, view))
+        m = SentMessage(content, embed, view)
+        m.kind, m.ephemeral = "send", ephemeral
+        self._owner.sent.append(m)
 
     async def edit_message(self, content=None, embed=None, view=None):
         self._done = True
-        self._owner.sent.append(SentMessage(content, embed, view))
+        m = SentMessage(content, embed, view)
+        m.kind, m.ephemeral = "edit", False
+        self._owner.sent.append(m)
 
 
 class Interaction:

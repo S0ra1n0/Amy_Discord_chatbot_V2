@@ -71,6 +71,9 @@ class Reply:
     content: Optional[str] = None
     embed: Optional[discord.Embed] = None
     view: Optional[discord.ui.View] = None
+    # A refusal or failure (`_error`). A player button, which answers a success by updating the
+    # card, answers one of these with an ephemeral message instead.
+    error: bool = False
 
 
 #----Embed Builders------

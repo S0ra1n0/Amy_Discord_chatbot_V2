@@ -956,12 +956,7 @@ async def voice_leave(interaction: discord.Interaction, guild: discord.Guild) ->
     if current is None:
         return Reply(embed=ui.error_embed("I'm not in a voice channel."))
 
-    member = guild.get_member(interaction.user.id)
-    in_same_channel = bool(
-        member and member.voice and member.voice.channel
-        and member.voice.channel.id == current.id
-    )
-    if not (is_admin_member(interaction.guild, interaction.user.id) or in_same_channel):
+    if not may_control_playback(guild, interaction.user.id):
         return Reply(embed=ui.error_embed("You need to be in my voice channel (or an admin) to make me leave."))
 
     await say_goodbye(guild)     # waits for it to play, at most GOODBYE_WAIT seconds
@@ -1052,25 +1047,18 @@ class PlayerControls(discord.ui.View):
     async def pause_button(self, interaction: discord.Interaction,
                            button: discord.ui.Button) -> None:
         guild = interaction.guild
-        vc = voice.get_voice_client(guild) if guild else None
-        if guild is None or vc is None or not vc.is_connected():
-            await interaction.response.send_message(
-                embed=ui.error_embed("I'm not in a voice channel."), ephemeral=True)
+        if guild is None:
             return
-
-        player = music_manager.player_for(guild.id)
-        # Through the music helpers: they keep the position clock honest, and know the
-        # music is "paused" while Amy speaks over it with the track held.
-        if music.resume_music(vc, player):
-            paused = False
-            announce(guild, "resume")
-        elif music.pause_music(vc, player):
-            paused = True
-            announce(guild, "pause")
-        else:
-            await interaction.response.send_message(
-                embed=ui.error_embed("Nothing is playing."), ephemeral=True)
+        ctx = MusicContext.build(interaction, guild)
+        player = ctx.player
+        # The /pause and /resume handlers do the work (position clock, "held" music, the
+        # spoken line); the button only picks which one the current state calls for.
+        paused_now = music.music_paused(ctx.vc)
+        result = await (music_resume if paused_now else music_pause)(ctx, refresh=False)
+        if isinstance(result, Reply) and result.error:
+            await send_reply(interaction, result, ephemeral=True)
             return
+        paused = not paused_now
 
         if player.current is None:
             await interaction.response.defer()
@@ -1085,36 +1073,29 @@ class PlayerControls(discord.ui.View):
     async def skip_button(self, interaction: discord.Interaction,
                           button: discord.ui.Button) -> None:
         guild = interaction.guild
-        vc = voice.get_voice_client(guild) if guild else None
-        player = music_manager.player_for(guild.id) if guild else None
-        if guild is None or player is None or not music.music_active(vc, player) or vc is None:
-            await interaction.response.send_message(
-                embed=ui.error_embed("Nothing is playing."), ephemeral=True)
+        if guild is None:
             return
-
-        player.skip_requested = True  # so TRACK loop can't swallow an explicit skip
-        skipped = player.current.title if player.current else "this one"
-        await interaction.response.defer()
-        vc.stop()  # after-callback advances the queue and refreshes the message
-        announce(guild, "skip", title=skipped)
+        # The same handler as /skip, so a rule added there applies to the button too.
+        result = await music_skip(MusicContext.build(interaction, guild))
+        if isinstance(result, Reply) and result.error:
+            await send_reply(interaction, result, ephemeral=True)
+            return
+        await interaction.response.defer()   # the card updates itself when the queue advances
 
     @discord.ui.button(label="Stop", emoji="⏹", style=discord.ButtonStyle.danger,
                        custom_id="amy:stop")
     async def stop_button(self, interaction: discord.Interaction,
                           button: discord.ui.Button) -> None:
         guild = interaction.guild
-        vc = voice.get_voice_client(guild) if guild else None
-        if guild is None or vc is None or not vc.is_connected():
-            await interaction.response.send_message(
-                embed=ui.error_embed("I'm not in a voice channel."), ephemeral=True)
+        if guild is None:
             return
-
-        player = music_manager.player_for(guild.id)
-        finished = player.current or player.last_played
-        player.stop_all()       # also cancels a track that is still being prepared
-        # Matches /stop: stop and stay. The idle timer still disconnects her later.
-        vc.stop()
-        announce(guild, "stop")
+        ctx = MusicContext.build(interaction, guild)
+        finished = ctx.player.current or ctx.player.last_played   # stop_all clears `current`
+        # The same handler as /stop (stop and stay; it also drops the saved queue).
+        result = await music_stop(ctx)
+        if isinstance(result, Reply) and result.error:
+            await send_reply(interaction, result, ephemeral=True)
+            return
 
         embed = (ui.now_playing_embed(finished, stopped=True) if finished
                  else ui.info_embed("Playback stopped."))
@@ -1224,6 +1205,13 @@ class SearchResults(discord.ui.View):
                 await interaction.response.edit_message(
                     embed=ui.error_embed("I couldn't join your voice channel."), view=None)
                 return
+        elif not may_control_playback(guild, interaction.user.id):
+            # Same rule and wording as /play: queueing needs you in Amy's channel (or admin)
+            # Private to the clicker: the shared results and menu stay, so they can join and retry
+            await interaction.response.send_message(
+                embed=ui.error_embed("You need to be in my voice channel to queue tracks."),
+                ephemeral=True)
+            return
 
         player.text_channel_id = interaction.channel_id
         player.queue.append(track)
@@ -1772,7 +1760,7 @@ MusicResult = Union[str, Reply]
 
 
 def _error(text: str) -> Reply:
-    return Reply(embed=ui.error_embed(text))
+    return Reply(embed=ui.error_embed(text), error=True)
 
 
 def _info(text: str) -> Reply:
@@ -1885,7 +1873,8 @@ async def music_search(ctx: MusicContext, query: str) -> MusicResult:
     status_msg = await ctx.interaction.followup.send(
         SEARCH + " Searching for **" + shown + "**...", wait=True)
     try:
-        results = await music.search_tracks(query, requested_by=str(ctx.interaction.user))
+        results = await music.search_tracks(
+            query, requested_by=str(ctx.interaction.user), requester_id=ctx.user_id)
     except Exception as e:      # command boundary: the user always gets an answer
         logs.log_failure("Search failed", e, music.lookup_errors())
         await status_msg.edit(content=None,
@@ -1962,7 +1951,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
     if music.is_playlist_url(query):
         await status_msg.edit(content=SEARCH + " Loading playlist...")
         try:
-            title, tracks, skipped = await music.resolve_playlist(query, author)
+            title, tracks, skipped = await music.resolve_playlist(
+                query, author, requester_id=ctx.user_id)
         except Exception as e:  # command boundary: the user always gets an answer
             logs.log_failure("Could not load playlist", e, music.lookup_errors())
             await status_msg.edit(content=DENY + " I couldn't load that playlist.")
@@ -1991,7 +1981,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
 
     # --- single track ---
     try:
-        track = await music.resolve_metadata(query, requested_by=author)
+        track = await music.resolve_metadata(
+            query, requested_by=author, requester_id=ctx.user_id)
     except Exception as e:      # command boundary: the user always gets an answer
         logs.log_failure("Could not resolve query", e, music.lookup_errors())
         await status_msg.edit(content=DENY + " I couldn't find anything for `" + shown + "`.")
@@ -2022,7 +2013,8 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
 
 # --- everything below needs an active connection ---
 
-async def music_pause(ctx: MusicContext) -> MusicResult:
+async def music_pause(ctx: MusicContext, refresh: bool = True) -> MusicResult:
+    # refresh=False: the Pause button edits the card itself, in its own response
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
@@ -2031,11 +2023,12 @@ async def music_pause(ctx: MusicContext) -> MusicResult:
     if not music.pause_music(vc, ctx.player):
         return _error("Nothing is playing.")
     announce(ctx.guild, "pause")
-    await refresh_now_playing(ctx.guild, paused=True)
+    if refresh:
+        await refresh_now_playing(ctx.guild, paused=True)
     return _info("Paused.")
 
 
-async def music_resume(ctx: MusicContext) -> MusicResult:
+async def music_resume(ctx: MusicContext, refresh: bool = True) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
@@ -2044,7 +2037,8 @@ async def music_resume(ctx: MusicContext) -> MusicResult:
     if not music.resume_music(vc, ctx.player):
         return _error("Nothing is paused.")
     announce(ctx.guild, "resume")
-    await refresh_now_playing(ctx.guild, paused=False)
+    if refresh:
+        await refresh_now_playing(ctx.guild, paused=False)
     return _info("Resumed.")
 
 
@@ -2378,7 +2372,7 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
     if target is None:
         return _error("There's no track at position " + str(position) + ".")
     # Users may only remove what they queued; admins may remove anything
-    if target.requested_by != str(ctx.interaction.user) and not ctx.is_admin():
+    if not music.is_requester(target, ctx.user_id, str(ctx.interaction.user)) and not ctx.is_admin():
         return (DENY + " That track was queued by " + markup.escape_markdown(target.requested_by)
                 + ". You can only remove your own.")
 

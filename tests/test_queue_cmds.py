@@ -335,7 +335,7 @@ try:
     pl = seed_queue(amy, 4405, ["restored1", "restored2"], current=None)
     amy.music.find_ffmpeg = lambda: "ffmpeg"
 
-    async def _fake_resolve(query, requested_by="?"):
+    async def _fake_resolve(query, requested_by="?", requester_id=None):
         return amy.music.Track(title="Requested Song", query="https://youtu.be/req",
                                duration=200, requested_by=requested_by)
 
@@ -434,8 +434,8 @@ try:
     check("L1: /stop cancels in-flight starts", p.generation == gen + 1, (gen, p.generation))
     import inspect as _insp
     _btn = _insp.getsource(amy.PlayerControls.stop_button)
-    check("L1: the Stop button goes through stop_all as well",
-          "stop_all()" in _btn and "queue.clear()" not in _btn, _btn[:160])
+    check("L1: the Stop button goes through /stop's handler, and so through stop_all",
+          "music_stop(" in _btn and "queue.clear()" not in _btn, _btn[:160])
 
     # M6: a failed seek must say the track is still playing - because it now is.
     async def _seek_fails(*a, **kw):
@@ -746,10 +746,10 @@ _real_resolve, _real_advance, _real_ffmpeg = (amy.music.resolve_metadata, amy.ad
                                                amy.music.find_ffmpeg)
 
 
-async def _record_resolve(query, requested_by="?"):
+async def _record_resolve(query, requested_by="?", requester_id=None):
     _seen_queries.append(query)
     return amy.music.Track(title="Found", query="https://youtu.be/f", duration=60,
-                           requested_by=requested_by)
+                           requested_by=requested_by, requester_id=requester_id)
 
 
 async def _no_advance(guild):
@@ -765,6 +765,8 @@ try:
     slash("play", it, "  My  Song   Name.mp3 ")
     check("/play keeps inner whitespace in the query",
           _seen_queries == ["My  Song   Name.mp3"], _seen_queries)
+    check("/play stamps the queued track with the requester's id",
+          bool(p.queue) and p.queue[-1].requester_id == USER, [t.requester_id for t in p.queue])
     p, it = setup(USER, "userA", [])
     check("/play with a blank query asks what to play",
           "What should I play?" in slash("play", it, "   "))
@@ -1335,7 +1337,7 @@ try:
     _real_res, _real_adv, _real_ff = (amy.music.resolve_metadata, amy.advance_playback,
                                       amy.music.find_ffmpeg)
 
-    async def _resolve(query, requested_by="?"):
+    async def _resolve(query, requested_by="?", requester_id=None):
         return amy.music.Track(title="New Song [Lyrics]", query="https://youtu.be/n", duration=100,
                                requested_by=requested_by)
 
@@ -1667,6 +1669,205 @@ try:
     sp.close()
 finally:
     amy.speaker = _real_speaker3
+
+# ---- DJ_PLAN phase 0: ids not names, buttons share the commands, /search in-channel -------
+import dataclasses as _dc
+import inspect as _inspect2
+
+print()
+print("=== /remove ownership is by id, not by display name ===")
+
+
+def _owned(track_fields, user_id, user_name):
+    p, it = setup(user_id, user_name, ["x"])
+    p.queue[0] = _dc.replace(p.queue[0], **track_fields)
+    out = run_music(amy, "remove", [1], interaction=it)
+    return out, len(p.queue)
+
+
+out, left = _owned(dict(requester_id=USER, requested_by="oldname"), USER, "newname")
+check("renamed owner can still remove their song (same id, new name)",
+      "Removed" in out and left == 0, out)
+out, left = _owned(dict(requester_id=USER, requested_by="oldname"), 98, "oldname")
+check("another person with the same name is not the owner (different id)",
+      "only remove your own" in out and left == 1, out)
+out, left = _owned(dict(requester_id=None, requested_by="userA"), USER, "userA")
+check("a legacy track with no id still matches by name", "Removed" in out and left == 0, out)
+out, left = _owned(dict(requester_id=None, requested_by="Autoplay", is_autoplay=True), 98, "Autoplay")
+check("an autoplay track is owned by nobody, even a user named Autoplay",
+      "only remove your own" in out and left == 1, out)
+out, left = _owned(dict(requester_id=None, requested_by="Autoplay", is_autoplay=True), OWNER, "boss")
+check("...but an admin can still remove it", "Removed" in out and left == 0, out)
+
+print()
+print("=== the player buttons go through the command handlers ===")
+_bt_announced = []
+_bt_real = (amy.announce, amy.music_skip, amy.music_stop, amy.music_pause, amy.music_resume, amy.db)
+amy.announce = lambda g, kind, *a, **k: _bt_announced.append(kind)
+_bt_db = _DB(_tf.mktemp(suffix=".db"))
+amy.db = _bt_db
+_bt_calls = []
+
+
+def _spy(name):
+    real = getattr(amy, name)
+
+    async def wrapper(ctx, *a, **kw):
+        _bt_calls.append(name)
+        return await real(ctx, *a, **kw)
+    setattr(amy, name, wrapper)
+
+
+try:
+    for _n in ("music_skip", "music_stop", "music_pause", "music_resume"):
+        _spy(_n)
+
+    # Skip: the same function as /skip, and the same effect
+    p, it = setup(USER, "userA", ["t1"])
+    _bt_calls.clear()
+    asyncio.run(amy.PlayerControls().skip_button.callback(it))
+    check("the Skip button reaches music_skip", _bt_calls == ["music_skip"], _bt_calls)
+    check("...which stopped the track and flagged the skip",
+          it.guild.voice_client.stopped and p.skip_requested)
+    p, it = setup(USER, "userA", ["t1"])
+    _bt_calls.clear()
+    run_music(amy, "skip", interaction=it)
+    check("/skip reaches the same music_skip", _bt_calls == ["music_skip"], _bt_calls)
+    check("the Skip button source calls the handler, not vc.stop()",
+          "music_skip(" in _inspect2.getsource(amy.PlayerControls.skip_button)
+          and "vc.stop" not in _inspect2.getsource(amy.PlayerControls.skip_button))
+
+    # a refusal from the handler reaches the clicker, and the button cannot bypass it
+    outsider = Member(98, VoiceChannel(11, "elsewhere"), name="out")
+    p, it = setup(USER, "userA", ["t1"])
+    it2 = Interaction(outsider, it.guild)
+    asyncio.run(amy.PlayerControls().skip_button.callback(it2))
+    check("an outsider's Skip click is refused by the handler, nothing stops",
+          not it.guild.voice_client.stopped and "voice channel" in text_of(None, it2), text_of(None, it2))
+    p, it = setup(USER, "userA", [])
+    p.current = None
+    it.guild.voice_client.stopped = True
+    asyncio.run(amy.PlayerControls().skip_button.callback(it))
+    check("Skip with nothing playing says so", "Nothing is playing" in text_of(None, it), text_of(None, it))
+
+    # Stop: like /stop, it drops the saved queue
+    p, it = setup(USER, "userA", ["a", "b"])
+    amy.snapshot_player(GUILD)
+    check("(setup) a snapshot exists", _bt_db.load_player_state(GUILD) is not None)
+    gen = p.generation
+    _bt_calls.clear()
+    asyncio.run(amy.PlayerControls().stop_button.callback(it))
+    check("the Stop button reaches music_stop", _bt_calls == ["music_stop"], _bt_calls)
+    check("the Stop button clears the saved queue like /stop",
+          _bt_db.load_player_state(GUILD) is None)
+    check("...and cancels in-flight starts and empties the queue",
+          p.generation == gen + 1 and not p.queue)
+    check("...and still edits the card to the finished one (no buttons)",
+          it.sent and it.sent[-1].view is None and it.sent[-1].embed is not None)
+
+    # Pause / Resume: the same handlers as /pause and /resume
+    _bt_refreshes = []
+    _bt_real_refresh = amy.refresh_now_playing
+
+    async def _count_refresh(*a, **kw):
+        _bt_refreshes.append(kw.get("paused"))
+    amy.refresh_now_playing = _count_refresh
+
+    p, it = setup(USER, "userA", ["t1"])
+    _bt_calls.clear()
+    asyncio.run(amy.PlayerControls().pause_button.callback(it))
+    check("the Pause button reaches music_pause and pauses",
+          _bt_calls == ["music_pause"] and it.guild.voice_client._paused, _bt_calls)
+    check("...and edits the card exactly once, itself (no second edit via refresh_now_playing)",
+          _bt_refreshes == [] and [m.kind for m in it.sent] == ["edit"], (_bt_refreshes, it.sent))
+    check("...and the card is edited with a Resume button",
+          it.sent[-1].view is not None and
+          [c.label for c in it.sent[-1].view.children][1] == "Resume")
+    it_b = Interaction(it.user, it.guild)
+    asyncio.run(amy.PlayerControls().pause_button.callback(it_b))
+    check("clicking again reaches music_resume and resumes",
+          _bt_calls == ["music_pause", "music_resume"] and not it.guild.voice_client._paused,
+          _bt_calls)
+    check("the Resume click also edits once and never refreshes",
+          _bt_refreshes == [] and [m.kind for m in it_b.sent] == ["edit"], (_bt_refreshes, it_b.sent))
+    check("the spoken lines are the handlers' (pause, resume)",
+          [k for k in _bt_announced if k in ("pause", "resume")] == ["pause", "resume"], _bt_announced)
+    # the slash commands keep refreshing the shared card
+    p, it = setup(USER, "userA", ["t1"])
+    run_music(amy, "pause", interaction=it)
+    run_music(amy, "resume", interaction=Interaction(it.user, it.guild))
+    check("/pause and /resume still refresh the card", _bt_refreshes == [True, False], _bt_refreshes)
+finally:
+    amy.refresh_now_playing = _bt_real_refresh
+    (amy.announce, amy.music_skip, amy.music_stop, amy.music_pause, amy.music_resume,
+     amy.db) = _bt_real
+
+print()
+print("=== /search's picker needs you in Amy's channel when she is connected ===")
+_pk_real = (amy.advance_playback, amy.announce)
+
+
+async def _no_advance(guild):
+    return None
+
+amy.advance_playback = _no_advance
+amy.announce = lambda *a, **k: None
+
+
+def _pick(member):
+    p, it = setup(USER, "userA", [])
+    p.current = None
+    guild = Guild(OWNER, member, it.guild.voice_client, guild_id=GUILD)
+    view = amy.SearchResults([make_track(amy, "Found")], member.id, guild, query="q")
+    view.picker._values = ["0"]
+    pick_it = Interaction(member, guild)
+    asyncio.run(view.picker.callback(pick_it))
+    _pick.it = pick_it
+    return p, text_of(None, pick_it)
+
+
+try:
+    p, text = _pick(Member(98, VoiceChannel(11, "elsewhere"), name="out"))
+    check("a user in another channel is refused with /play's wording",
+          "You need to be in my voice channel to queue tracks." in text and len(p.queue) == 0, text)
+    _m = _pick.it.sent
+    check("...privately: one ephemeral message, the results message is not edited",
+          len(_m) == 1 and _m[0].kind == "send" and _m[0].ephemeral, [(m.kind, m.ephemeral) for m in _m])
+    p, text = _pick(Member(98, None, name="nowhere"))
+    check("a user in no voice channel is refused too (ephemeral)",
+          len(p.queue) == 0 and "voice channel" in text and _pick.it.sent[0].ephemeral, text)
+    p, text = _pick(Member(USER, CH, name="userA"))
+    check("a user in Amy's channel queues the track", len(p.queue) == 1, text)
+    p, text = _pick(Member(OWNER, VoiceChannel(11, "elsewhere"), name="boss"))
+    check("an admin outside the channel may still queue", len(p.queue) == 1, text)
+finally:
+    amy.advance_playback, amy.announce = _pk_real
+
+print()
+print("=== /leave uses the shared playback-permission rule ===")
+check("voice_leave calls may_control_playback instead of its own copy",
+      "may_control_playback(" in _inspect2.getsource(amy.voice_leave)
+      and "in_same_channel" not in _inspect2.getsource(amy.voice_leave))
+_lv_real = amy.say_goodbye
+
+
+async def _quiet_bye(guild):
+    return None
+
+amy.say_goodbye = _quiet_bye
+try:
+    for who, ch, label, allowed in [
+            (USER, CH, "someone in Amy's channel", True),
+            (OWNER, VoiceChannel(11, "elsewhere"), "an admin outside the channel", True),
+            (59, VoiceChannel(11, "elsewhere"), "an outsider", False)]:
+        member = Member(who, ch, name="m")
+        vc = VoiceClient(CH)
+        g = Guild(OWNER, member, vc, guild_id=GUILD)
+        out = run_voice(amy, "leave", interaction=Interaction(member, g))
+        check("/leave: " + label + (" may leave" if allowed else " is refused"),
+              vc.disconnected == allowed and (allowed or "need to be in my voice channel" in out), out)
+finally:
+    amy.say_goodbye = _lv_real
 
 # The exit code is set by _check's gate, wherever a failure happens. It used to be one
 # `if fails: sys.exit(1)` that sat above the restore section, so ~30 checks there could

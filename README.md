@@ -277,7 +277,10 @@ out and the footer changes to say so — Discord gives no error for a disabled m
 shows a "not allowed" cursor, so the message has to explain itself.
 
 Picking a track behaves exactly like `/play`: Amy joins your channel if she isn't already,
-and either starts playing or adds it to the queue.
+and either starts playing or adds it to the queue. When she is already in a voice channel you
+must be in it too (or be an admin), and a pick from anywhere else is refused with the same
+"You need to be in my voice channel to queue tracks." as `/play` - shown only to you, so the results and menu stay for everyone to use. (Before, the menu skipped that
+check once Amy was connected, so someone outside the call could queue songs through it.)
 
 > If the dropdown won't let you click it, the search has expired — run `/search` again.
 > The window was **60 seconds** in earlier versions, which could run out while you were
@@ -394,6 +397,16 @@ The now-playing card carries four buttons — **Previous**, **Pause/Resume**, **
 They follow exactly the same permission rule as the equivalent commands: you must be in Amy's
 voice channel, or be an admin. Pressing one without permission gets a private (ephemeral)
 refusal that nobody else sees, so a button is never a way around a command's check.
+
+Pause/Resume, Skip and Stop now run the very same code as `/pause` `/resume`, `/skip` and `/stop`
+rather than a copy of it. One visible fix came out of that: the **Stop** button used to leave the
+saved queue behind, so a restart brought back a queue you had stopped on purpose; it now clears it
+like `/stop` does.
+
+`/remove` (you may remove only your own songs) now recognises you by your Discord account, not
+your display name, so renaming yourself no longer locks you out of your own queued songs, and a
+person whose name happens to be "Autoplay" can't claim the songs Amy autoplayed. Queues saved
+before this update still work: their songs are matched by name, as they always were.
 
 The buttons are *persistent*: they have no expiry and keep working after Amy restarts. A
 default Discord component set expires after three minutes, which would leave dead buttons

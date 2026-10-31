@@ -173,7 +173,7 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   nothing next, using `previous`: `/stop`, `/leave`, the Stop button and idle leaves clear
   `current` (`stop_all`), so there is nothing to follow; a `/previous`, a `/skip` of a song
   somebody queued, a local file, an empty channel and the `autoplay` setting (saved, default
-  on) also say no. A `/skip` of an Autoplay song (`requested_by == AUTOPLAY_REQUESTER`) moves
+  on) also say no. A `/skip` of an Autoplay song (`Track.is_autoplay`, never the display name) moves
   on. The song must have played `AUTOPLAY_MIN_PLAYED` seconds (measured from the position
   clock BEFORE `finish_playback` resets it; `played_enough`): an unreadable stream ends at
   once and would otherwise chain through the Mix forever. The pick is the first entry of YouTube's Mix (`related_tracks`, bounded with
@@ -280,6 +280,18 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   guild's `saved_queue` rows in one transaction. The snapshot task fires every 20s
   (`SNAPSHOT_INTERVAL`); appending would grow the queue on every tick. Slot 0 is the track
   that was playing.
+- **Schema version is 2.** Migration 2 adds `saved_queue.requester_id INTEGER` (NULL for rows
+  saved before it) and `is_autoplay INTEGER NOT NULL DEFAULT 0`. `music.track_to_dict` /
+  `track_from_dict` carry both; a stored row with no id whose `requested_by` is
+  `AUTOPLAY_REQUESTER` loads as `is_autoplay=True` (what an old Autoplay row was), and a junk id
+  loads as None.
+- **Who queued a track is an id, not a name.** `Track.requester_id` (the Discord user id, set
+  wherever a human queues: `/play`, playlists, the `/search` picker) and `Track.is_autoplay`
+  are the identity; `requested_by` is only the display string (`str(user)`, or "Autoplay"). A
+  display name changes on rename and anyone can be called "Autoplay", so nothing decides on it
+  when an id exists. The one ownership rule is `music.is_requester(track, user_id, user_name)`:
+  by id when the track has one, by name only for an old row with no id, and an autoplay track is
+  owned by nobody. `/remove` uses it.
 
 ## Playback
 
@@ -399,7 +411,21 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   checker narrows it. Commands that need a connection check that first, then permission.
 - **There is one playback-permission rule**, `may_control_playback`: in Amy's channel, or an
   admin. Commands use it through `ctx.may_control()` and the player buttons call it directly,
-  so a button can't bypass a command's check or the other way round.
+  so a button can't bypass a command's check or the other way round. Everything that asks it
+  uses it, rather than copying it: `/leave` (`voice_leave`) and the `/search` picker too (the
+  picker, when Amy is connected, refuses a user outside her channel with `/play`'s wording;
+  she may only be absent from that check while she is not yet connected, where the picker joins
+  the user's own channel like `/play`).
+- **Buttons go through the command handlers.** The player buttons build a `MusicContext` from
+  the click and call `music_skip`, `music_stop` and `music_pause`/`music_resume`; they do not
+  re-implement them (the Stop button once skipped the queue snapshot). A refusal comes back as
+  `Reply(error=True)` (`_error`) and the button sends it ephemerally; on success it keeps its
+  own response (defer, or edit the card). The Pause button passes `refresh=False` to
+  `music_pause`/`music_resume`, so the card is edited once, by the click response (a second
+  REST edit through `refresh_now_playing` could miss the 3-second window). The `/search`
+  picker's "not in my channel" refusal is ephemeral and leaves the shared menu in place. A rule added to a command therefore applies to its
+  button. `interaction_check` stays as a first gate. `Previous` shares `go_back`, `Shush`
+  shares `shush`.
 - Fast commands go through `simple_music(interaction, handler, *args)`; read-only ones pass
   `cooldown=False`. Slow ones (`/play`, `/search`, `/seek`, `/replay`) gate, defer, then call
   their handler themselves - `test_slash.py` reads each callback's source for the defer.

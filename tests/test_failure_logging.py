@@ -75,7 +75,7 @@ amy.music.find_ffmpeg = lambda: "ffmpeg"
 
 
 def search_with(exc):
-    async def _boom(query, requested_by="?"):
+    async def _boom(query, requested_by="?", requester_id=None):
         raise exc
     amy.music.search_tracks = _boom
     member = Member(99, CH, name="userA")

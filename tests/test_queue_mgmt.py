@@ -292,4 +292,33 @@ except Exception as e:                                          # noqa: BLE001
     print("   raised", repr(e))
 check("the after-callback survives a closed loop (shutdown) instead of raising", _survived)
 
+print("=== is_requester: ownership by id, name only as a fallback ===")
+_mine = music.Track(title="t", query="q", requested_by="oldname", requester_id=7)
+check("same id, new name: still the owner", music.is_requester(_mine, 7, "newname"))
+check("different id, same name: not the owner", not music.is_requester(_mine, 8, "oldname"))
+_legacy = music.Track(title="t", query="q", requested_by="alice")
+check("no id (old row): matches by name", music.is_requester(_legacy, 1, "alice"))
+check("no id (old row): a different name is not the owner", not music.is_requester(_legacy, 1, "bob"))
+_auto = music.Track(title="t", query="q", requested_by="Autoplay", is_autoplay=True)
+check("autoplay: owned by nobody, not even a user called Autoplay",
+      not music.is_requester(_auto, 1, "Autoplay"))
+_auto_id = music.Track(title="t", query="q", requested_by="x", requester_id=7, is_autoplay=True)
+check("autoplay: nobody even with a matching id", not music.is_requester(_auto_id, 7, "x"))
+
+print("=== saved tracks keep who queued them ===")
+_rt = music.track_from_dict(music.track_to_dict(_mine))
+check("requester id survives a save/load", _rt is not None and _rt.requester_id == 7 and not _rt.is_autoplay, _rt)
+_rt = music.track_from_dict(music.track_to_dict(_auto))
+check("the autoplay flag survives a save/load", _rt is not None and _rt.is_autoplay, _rt)
+_old = music.track_from_dict({"title": "t", "query": "q", "requested_by": "Autoplay", "requester_id": None})
+check("an old row named Autoplay with no id loads as autoplay", _old is not None and _old.is_autoplay, _old)
+_human = music.track_from_dict({"title": "t", "query": "q", "requested_by": "Autoplay", "requester_id": 5})
+check("...but a person with an id who is named Autoplay does not",
+      _human is not None and not _human.is_autoplay and _human.requester_id == 5, _human)
+_old = music.track_from_dict({"title": "t", "query": "q", "requested_by": "alice"})
+check("an old row with no id loads with requester_id None and not autoplay",
+      _old is not None and _old.requester_id is None and not _old.is_autoplay, _old)
+_odd = music.track_from_dict({"title": "t", "query": "q", "requester_id": "nope"})
+check("a junk requester id is dropped, not trusted", _odd is not None and _odd.requester_id is None, _odd)
+
 finish("ALL QUEUE MANAGEMENT TESTS PASSED")

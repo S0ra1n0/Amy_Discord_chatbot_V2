@@ -107,7 +107,11 @@ for label, change in [
 
 check("a /skip of an AUTOPLAY song moves on to another",
       music.should_autoplay(**dict(base, force_next=True, played=2.0,
-                                   last=dataclasses.replace(yt(1), requested_by="Autoplay"))))
+                                   last=dataclasses.replace(yt(1), requested_by="Autoplay",
+                                                            is_autoplay=True))))
+check("...but a person who is merely NAMED Autoplay is not autoplay",
+      not music.should_autoplay(**dict(base, force_next=True, played=2.0,
+                                       last=dataclasses.replace(yt(1), requested_by="Autoplay"))))
 check("exactly the minimum play time counts", music.should_autoplay(**dict(base, played=10.0)))
 short = dataclasses.replace(yt(1), duration=5)
 check("a 5s song that played 4s to its end counts",
@@ -155,6 +159,8 @@ try:
               ("Fourth", "https://www.youtube.com/watch?v=" + vid(4), "Autoplay"),
               ("Was live", "https://www.youtube.com/watch?v=" + vid(8), "Autoplay")],
           [(t.title, t.query) for t in got])
+    check("...and flagged is_autoplay, with no requester id",
+          all(t.is_autoplay and t.requester_id is None for t in got), got)
     try:
         asyncio.run(music.related_tracks(music.Track("t", "plain words")))
         check("a seed with no video id is refused", False)
@@ -200,7 +206,8 @@ async def _related(seed, *a, **kw):
     if isinstance(mix, Exception):
         raise mix
     # like the real one, entries come back requested by Autoplay
-    return [dataclasses.replace(t, requested_by=music.AUTOPLAY_REQUESTER) for t in mix]
+    return [dataclasses.replace(t, requested_by=music.AUTOPLAY_REQUESTER, is_autoplay=True)
+            for t in mix]
 
 
 async def _refresh(*a, **kw):
@@ -290,6 +297,7 @@ try:
 
     def _autoplay_last(p):
         p.current.requested_by = music.AUTOPLAY_REQUESTER
+        p.current.is_autoplay = True
         p.skip_requested = True
     run(8015, mix_result=[yt(1), yt(2)], ran_for=2.0, setup_fn=_autoplay_last)
     check("/skip of an Autoplay song (even 2s in) moves on to the next related one, no 'Up next'",

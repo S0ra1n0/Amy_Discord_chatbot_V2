@@ -123,9 +123,27 @@ class Track:
     requested_by: str = "unknown"
     is_local: bool = False
     thumbnail: Optional[str] = None
+    # Who queued it, by id: a display name changes on rename and anyone can be called
+    # "Autoplay". None for rows saved before ids were stored. `requested_by` is for display.
+    requester_id: Optional[int] = None
+    is_autoplay: bool = False
 
 
 #----Pure Helpers (no Discord/network, unit testable)------
+def is_requester(track: Track, user_id: int, user_name: str) -> bool:
+    """
+    Whether this user queued `track`. By id when the track has one (rename-safe), else by
+    name (a row saved before ids were stored). An Autoplay track is owned by nobody, whatever
+    name a person has.
+    """
+    if track.is_autoplay:
+        return False
+    if track.requester_id is not None:
+        return track.requester_id == user_id
+    return track.requested_by == user_name
+
+
+
 def format_duration(seconds: Optional[int]) -> str:
     """Render seconds as m:ss, or h:mm:ss past an hour. Unknown durations show as '?:??'."""
     if seconds is None or seconds < 0:
@@ -421,7 +439,8 @@ def _ytdl_extract(query: str) -> Dict[str, Any]:
     return info
 
 
-async def resolve_metadata(query: str, requested_by: str) -> Track:
+async def resolve_metadata(query: str, requested_by: str,
+                           requester_id: Optional[int] = None) -> Track:
     """
     Build a Track from a query, URL, or local file path.
     Only fetches title/duration - the stream URL is resolved later, at play time.
@@ -433,6 +452,7 @@ async def resolve_metadata(query: str, requested_by: str) -> Track:
             query=local,
             duration=None,
             requested_by=requested_by,
+            requester_id=requester_id,
             is_local=True,
         )
 
@@ -444,12 +464,14 @@ async def resolve_metadata(query: str, requested_by: str) -> Track:
         query=info.get("webpage_url") or query,
         duration=info.get("duration"),
         requested_by=requested_by,
+        requester_id=requester_id,
         thumbnail=info.get("thumbnail"),
     )
 
 
 async def resolve_playlist(
-    url: str, requested_by: str, limit: int = MAX_PLAYLIST_TRACKS
+    url: str, requested_by: str, limit: int = MAX_PLAYLIST_TRACKS,
+    requester_id: Optional[int] = None,
 ) -> Tuple[str, List[Track], int]:
     """
     Resolve a playlist URL into Tracks.
@@ -478,7 +500,7 @@ async def resolve_playlist(
     over_limit = max(0, len(usable) - limit)
     tracks = [
         Track(title=title, query=page, duration=duration,
-              requested_by=requested_by, thumbnail=thumb)
+              requested_by=requested_by, requester_id=requester_id, thumbnail=thumb)
         for title, page, duration, thumb in usable[:limit]
     ]
     playlist_title = info.get("title") or "playlist"
@@ -486,7 +508,8 @@ async def resolve_playlist(
 
 
 async def search_tracks(
-    query: str, requested_by: str, limit: int = SEARCH_RESULTS
+    query: str, requested_by: str, limit: int = SEARCH_RESULTS,
+    requester_id: Optional[int] = None,
 ) -> List[Track]:
     """
     Return the top `limit` search hits so the user can choose, rather than /play silently
@@ -510,6 +533,7 @@ async def search_tracks(
             query=page,
             duration=entry.get("duration"),
             requested_by=requested_by,
+            requester_id=requester_id,
             thumbnail=entry.get("thumbnail"),
         ))
     return tracks
@@ -640,7 +664,7 @@ def should_autoplay(*, enabled: bool, last: Optional[Track], force_next: bool,
             and not going_back and humans > 0):
         return False
     if force_next:
-        return last.requested_by == AUTOPLAY_REQUESTER
+        return last.is_autoplay
     return played_enough(played, last.duration)
 
 
@@ -673,6 +697,7 @@ async def related_tracks(seed: Track, requested_by: str = AUTOPLAY_REQUESTER,
             query=f"https://www.youtube.com/watch?v={entry_id}",
             duration=entry.get("duration"),
             requested_by=requested_by,
+            is_autoplay=True,
             thumbnail=entry.get("thumbnail"),
         ))
     return tracks
@@ -1045,6 +1070,8 @@ def track_to_dict(track: Track) -> Dict[str, Any]:
         "requested_by": track.requested_by,
         "is_local": track.is_local,
         "thumbnail": track.thumbnail,
+        "requester_id": track.requester_id,
+        "is_autoplay": track.is_autoplay,
     }
 
 
@@ -1073,9 +1100,16 @@ def track_from_dict(data: Dict[str, Any]) -> Optional[Track]:
     if not isinstance(thumbnail, str) or not thumbnail:
         thumbnail = None
 
+    requester_id = data.get("requester_id")
+    if isinstance(requester_id, bool) or not isinstance(requester_id, int):
+        requester_id = None
+    # A row saved before is_autoplay existed: Autoplay's name with no id was Autoplay.
+    is_autoplay = bool(data.get("is_autoplay")) or (
+        requester_id is None and requested_by == AUTOPLAY_REQUESTER)
+
     return Track(title=title, query=query, duration=duration,
                  requested_by=requested_by, is_local=bool(data.get("is_local")),
-                 thumbnail=thumbnail)
+                 thumbnail=thumbnail, requester_id=requester_id, is_autoplay=is_autoplay)
 
 
 def loop_mode_from(value: Any) -> LoopMode:
