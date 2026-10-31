@@ -8,6 +8,7 @@ import io
 import logging
 import os
 import sys
+from collections import deque
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 # Resolve the project root from this file, so the suite runs from any checkout
@@ -23,6 +24,8 @@ from _check import check, finish
 
 amy = load_bot()
 import lyrics
+import markup
+import music
 import ui
 
 OWNER, USER, GUILD = 42, 99, 500
@@ -81,6 +84,17 @@ t = T(lyrics.local_title("01 - Artist - Song.flac"))
 check("local: track number and extension dropped", (t.artist, t.title) == ("Artist", "Song"), t)
 check("local: '07. Song.ogg' form", lyrics.local_title("07. Song.ogg") == "Song")
 check("local: a name that is all number keeps something", lyrics.local_title("1984.mp3") == "1984")
+check("local: '7. Song.ogg' loses the dotted number", lyrics.local_title("7. Song.ogg") == "Song",
+      lyrics.local_title("7. Song.ogg"))
+check("local: '1. Intro.flac' loses the dotted number", lyrics.local_title("1. Intro.flac") == "Intro",
+      lyrics.local_title("1. Intro.flac"))
+check("local: '3 - Yesterday.mp3' (no padding, no artist dash) is left alone",
+      lyrics.local_title("3 - Yesterday.mp3") == "3 - Yesterday")
+check("local: '21 - Adele.mp3' keeps its artist", lyrics.local_title("21 - Adele.mp3") == "21 - Adele",
+      lyrics.local_title("21 - Adele.mp3"))
+check("local: '01 - Adele.mp3' (zero-padded) is a track number", lyrics.local_title("01 - Adele.mp3") == "Adele")
+check("local: '1 - Artist - Song.mp3' (rest has a dash) is a track number",
+      lyrics.local_title("1 - Artist - Song.mp3") == "Artist - Song")
 check("local: a number-named artist survives", lyrics.local_title("311 - Amber.mp3") == "311 - Amber",
       lyrics.local_title("311 - Amber.mp3"))
 check("local: dots inside the name survive", lyrics.local_title("Mr. Brightside.mp3") == "Mr. Brightside")
@@ -95,6 +109,19 @@ check("stamp-only line becomes a blank line",
       repr(lyrics.strip_timestamps("[00:01.00] a\n[00:02.00] \n[00:03.00] b")))
 check("CRLF input handled",
       lyrics.strip_timestamps("[00:01.00] a\r\n\r\n[00:03.00] b") == "a\n\nb")
+
+f = lyrics.choose_result([rec(plain="one\r\ntwo\rthree\r\n\r\nfour")])
+check("CRLF plainLyrics normalized like synced", f.text == "one\ntwo\nthree\n\nfour", repr(f.text))
+
+print()
+print("=== titles from strangers are escaped outside /lyrics too ===")
+PHISH = "[Free Nitro](https://phish.example) ||x||"
+q_out = music.render_queue(make_track(amy, PHISH), deque([make_track(amy, PHISH)]), music.LoopMode.OFF)
+check("render_queue: now-playing and queued titles escaped",
+      q_out.count("\\[Free Nitro\\](https://phish.example)") == 2 and "[Free Nitro](" not in q_out, q_out)
+emb = ui.search_results_embed("q", [make_track(amy, PHISH)])
+check("search_results_embed: title escaped", "[Free Nitro](" not in emb.description
+      and "\\[Free Nitro\\]" in emb.description, emb.description)
 
 print()
 print("=== choose_result ===")
@@ -336,6 +363,26 @@ try:
     f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Artist", "Song"), 270))
     check("duration: a same-titled cover by another artist does not win",
           f is not None and f.artist == "Artist", f)
+    check("names_match: accents ignored (Beyonce / Beyoncé)",
+          lyrics.names_match(rec(artist="Beyoncé", title="X"), lyrics.Terms("Beyonce", "Halo"))
+          and lyrics.names_match(rec(artist="Beyonce", title="X"), lyrics.Terms("Beyoncé", "Halo"))
+          and lyrics.names_match(rec(artist="Sinéad O'Connor", title="X"), lyrics.Terms("Sinead O'Connor", "S")))
+    check("names_match: Japanese dakuten are not folded (バンド != ハント)",
+          not lyrics.names_match(rec(artist="ハント", title="X"), lyrics.Terms("バンド", "S"))
+          and lyrics.names_match(rec(artist="バンド", title="X"), lyrics.Terms("バンド", "S")))
+    check("names_match: Hangul is not split into jamo (가 != 각)",
+          not lyrics.names_match(rec(artist="각", title="X"), lyrics.Terms("가", "S"))
+          and lyrics.names_match(rec(artist="각", title="X"), lyrics.Terms("각", "S")))
+    check("names_match: '&' equals 'and'",
+          lyrics.names_match(rec(artist="Simon and Garfunkel", title="X"), lyrics.Terms("Simon & Garfunkel", "S"))
+          and lyrics.names_match(rec(artist="Simon & Garfunkel", title="X"),
+                                 lyrics.Terms("Simon and Garfunkel", "S")))
+    calls.clear()
+    fake_search.answers = [[], [rec(artist="Foo", title="Bar", duration=100),
+                                rec(artist="Baz", title="Qux", duration=269)]]
+    f = asyncio.run(lyrics.find_lyrics(lyrics.Terms("Kenshi Yonezu", "Lemon"), 270))
+    check("duration: nothing name-matches -> the right-length record still beats the first",
+          f is not None and f.title == "Qux", f)
     check("names_match without an artist falls back to the title",
           lyrics.names_match(rec(artist="Zed", title="Song"), lyrics.Terms(None, "song")))
     check("names_match is crosswise and loose",
@@ -350,17 +397,17 @@ BS = chr(92)
 NL = chr(10)
 evil = NL.join(["intro [x](https://e.vil) and *a* ||spoiler|| `code`",
                 "# not a heading", "> not a quote", "- not a list"])
-esc = lyrics.escape_markdown(evil)
+esc = markup.escape_markdown(evil)
 check("masked link brackets escaped", BS + "[x" + BS + "](https://e.vil)" in esc, esc)
 check("emphasis, spoiler and code escaped",
       BS + "*a" + BS + "*" in esc and BS + "|" + BS + "|spoiler" in esc and BS + "`code" + BS + "`" in esc, esc)
 check("line-start heading, quote and list markers escaped",
       NL + BS + "# not" in esc and NL + BS + "> not" in esc and NL + BS + "- not" in esc, esc)
-check("plain text untouched", lyrics.escape_markdown("plain (words), ok!") == "plain (words), ok!")
-pages, _ = lyrics.lyric_pages(evil)
-check("lyric_pages escapes", BS + "[x" + BS + "]" in pages[0], pages[0])
+check("plain text untouched", markup.escape_markdown("plain (words), ok!") == "plain (words), ok!")
+check("lyrics.py no longer carries the escaper (it imports only httpx + stdlib)",
+      not hasattr(lyrics, "escape_markdown") and not hasattr(lyrics, "markup"))
 heavy = NL.join("*" * 70 for _ in range(200))                       # escaping doubles every line
-pages, truncated = lyrics.lyric_pages(heavy)
+pages, truncated = lyrics.lyric_pages(markup.escape_markdown(heavy))
 check("pages stay within the limit AFTER escaping",
       all(len(p) <= lyrics.PAGE_CHARS for p in pages), [len(p) for p in pages])
 check("...and escaping really did add characters",
@@ -508,6 +555,17 @@ try:
           all(len(m.embed.title) + len(m.embed.description) + len(m.embed.footer.text) <= 6000
               for m in it.sent))
     check("last page says it continues on lrclib.net", "lrclib.net" in it.sent[-1].embed.description)
+
+    heavy_song = NL.join("*" * 70 for _ in range(200))              # escaping doubles every line
+    fake = FakeLRC([[rec(plain=heavy_song)]])
+    with_fake(fake)
+    _, it = setup()
+    run_music(amy, "lyrics", [""], interaction=it)
+    check("command escapes lyrics before paging (stars escaped on every page)",
+          all(m.embed.description.startswith(BS + "*") for m in it.sent), [m.embed.description[:5] for m in it.sent])
+    check("...and every escaped page still fits the page limit",
+          all(len(m.embed.description) <= lyrics.PAGE_CHARS + len(lyrics.CONTINUES_NOTE) + 2 for m in it.sent),
+          [len(m.embed.description) for m in it.sent])
 
     for label, err in (("timeout", lyrics.LyricsError("TimeoutError: ")),
                        ("HTTP failure", lyrics.LyricsError("HTTPStatusError: 503"))):

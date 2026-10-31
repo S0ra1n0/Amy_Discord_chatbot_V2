@@ -677,6 +677,19 @@ out = slash("skip", it)
 check("/skip names the skipped track", "Skipped **playing**" in out, out)
 check("/skip asks the queue to advance", p.skip_requested and it.guild.voice_client.stopped)
 
+PHISH = "[Free Nitro](https://phish.example)"
+ESC = "\\[Free Nitro\\](https://phish.example)"
+p, it = setup(USER, "userA", ["t1"])
+p.current = make_track(amy, PHISH)
+out = slash("skip", it)
+check("/skip escapes a masked-link title", "Skipped **" + ESC + "**" in out and "[Free Nitro](" not in out, out)
+p, it = setup(USER, "userA", [PHISH])
+out = run_music(amy, "remove", [1], interaction=it)
+check("/remove escapes a masked-link title", "Removed **" + ESC + "**" in out and "[Free Nitro](" not in out, out)
+p, it = setup(USER, "userA", ["a", PHISH])
+out = run_music(amy, "skipto", [2], interaction=it)
+check("/skipto escapes a masked-link title", "Skipping to **" + ESC + "**" in out and "[Free Nitro](" not in out, out)
+
 p, it = setup(USER, "userA", ["t1"])
 out = slash("nowplaying", it)
 check("/nowplaying shows the current track", "playing" in out and "Nothing is playing" not in out, out)

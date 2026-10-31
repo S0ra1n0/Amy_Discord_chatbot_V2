@@ -12,6 +12,7 @@ User-Agent.
 """
 import asyncio
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -78,16 +79,29 @@ def _tidy(text: str) -> str:
 
 
 _EXT = re.compile(r"\.[A-Za-z0-9]{1,5}$")
-_TRACK_NO = re.compile(r"^\d{1,2}\s*[-.]\s*")      # 1-2 digits: "311 - Amber" is an artist
+_NO_DOT = re.compile(r"^\d{1,2}\.\s*")              # "7. Song": a dot is never artist/title
+_NO_DASH = re.compile(r"^\d{1,2}\s*-\s*")           # 1-2 digits: "311 - Amber" is an artist
+_PADDED_NO = re.compile(r"^0\d\b")                   # "01 - ...": zero-padded, surely a track number
 
 
 def local_title(filename: str) -> str:
     """
     A local file's name ("01 - Artist - Song.flac") as a title for `search_terms`: the
-    extension and a leading track number dropped. Pure. Falls back to the name as given.
+    extension dropped, and a leading track number: always "7. " style, but "NN - " only when
+    zero-padded ("01") or the rest still has an "Artist - Song" dash ("1 - Artist - Song"),
+    so "21 - Adele" keeps its artist. Pure. Falls back to the name as given.
     """
     name = _EXT.sub("", filename.strip())
-    return _TRACK_NO.sub("", name).strip() or filename.strip()
+    m = _NO_DOT.match(name)
+    if m:
+        name = name[m.end():]
+    else:
+        m = _NO_DASH.match(name)
+        if m:
+            rest = name[m.end():]
+            if _PADDED_NO.match(name) or _DASH.search(rest):
+                name = rest
+    return name.strip() or filename.strip()
 
 
 def search_terms(title: str) -> Terms:
@@ -128,7 +142,7 @@ def strip_timestamps(synced: str) -> str:
 def _text_of(rec: Dict[str, Any]) -> str:
     plain = rec.get("plainLyrics")
     if isinstance(plain, str) and plain.strip():
-        return plain.strip()
+        return plain.replace("\r\n", "\n").replace("\r", "\n").strip()
     synced = rec.get("syncedLyrics")
     if isinstance(synced, str) and synced.strip():
         return strip_timestamps(synced)
@@ -139,16 +153,31 @@ def _usable(rec: Any) -> bool:
     return isinstance(rec, dict) and (rec.get("instrumental") is True or bool(_text_of(rec)))
 
 
+def _fold_name(name: str) -> str:
+    """
+    A name for comparing: Latin accents dropped ("Beyoncé"), casefolded, "&" as "and", spaces
+    collapsed. Marks on non-Latin letters stay (dakuten make バンド differ from ハント, and
+    Hangul is never split into jamo).
+    """
+    out: List[str] = []
+    for ch in unicodedata.normalize("NFKD", name):
+        if unicodedata.combining(ch) and out and out[-1].isascii() and out[-1].isalpha():
+            continue                                  # an accent on an ASCII letter
+        out.append(ch)
+    bare = unicodedata.normalize("NFC", "".join(out))
+    return re.sub(r"\s+", " ", bare.casefold().replace("&", " and ")).strip()
+
+
 def names_match(rec: Dict[str, Any], terms: Terms) -> bool:
     """
-    Does a record loosely match what was searched? Pure. Casefolded, and either side may
-    contain the other. With an artist in the terms, the ARTIST must match (the record's artist
-    or, for a title ordered "Song - Artist", its track name), so a same-titled cover by someone
-    else is out; with no artist, the title (or the record's artist) may match.
+    Does a record loosely match what was searched? Pure. Names are normalized (`_fold_name`:
+    accents, case, "&"), and either side may contain the other. With an artist in the terms,
+    the ARTIST must match (the record's artist or, for a title ordered "Song - Artist", its
+    track name), so a same-titled cover by someone else is out; with no artist, the title (or
+    the record's artist) may match.
     """
-    ours = [s.casefold().strip() for s in ((terms.artist,) if terms.artist else (terms.title,))
-            if s and s.strip()]
-    theirs = [str(rec.get(k) or "").casefold().strip() for k in ("artistName", "trackName")]
+    ours = [_fold_name(s) for s in ((terms.artist,) if terms.artist else (terms.title,)) if s]
+    theirs = [_fold_name(str(rec.get(k) or "")) for k in ("artistName", "trackName")]
     return any(a and b and (a in b or b in a) for a in ours for b in theirs)
 
 
@@ -223,26 +252,14 @@ def split_pages(text: str, limit: int = PAGE_CHARS) -> List[str]:
     return [p.strip() for p in pages if p.strip()]
 
 
-_MD_CHARS = re.compile(r"([\\*_~`|\[\]<>])")
-_MD_LINE_START = re.compile(r"^(\s*)([#>-])", re.M)
-
-
-def escape_markdown(text: str) -> str:
-    """
-    Make community-submitted text render literally in an embed: no masked links
-    ("[x](https://...)"), spoilers, emphasis, code, headings or list markers. Pure.
-    """
-    escaped = _MD_CHARS.sub(lambda m: "\\" + m.group(1), text)
-    return _MD_LINE_START.sub(lambda m: m.group(1) + "\\" + m.group(2), escaped)
-
-
-def lyric_pages(text: str, limit: int = PAGE_CHARS,
+def lyric_pages(escaped_text: str, limit: int = PAGE_CHARS,
                 max_pages: int = MAX_PAGES) -> Tuple[List[str], bool]:
     """
-    The pages to show and whether more were left out. Pure. The text is escaped BEFORE it is
-    split, because escaping adds characters and every page must still fit `limit`.
+    The pages to show and whether more were left out. Pure. The caller passes text already
+    run through `markup.escape_markdown`: escaping must happen BEFORE the split, because it
+    adds characters and every page must still fit `limit`.
     """
-    pages = split_pages(escape_markdown(text), limit)
+    pages = split_pages(escaped_text, limit)
     return pages[:max_pages], len(pages) > max_pages
 
 
@@ -294,11 +311,15 @@ async def find_lyrics(terms: Terms, duration: Optional[float] = None) -> Optiona
         # attempt's best guess (a live cut), so keep looking until one matches.
         # ...but in the free-text round only one whose names loosely match what was asked
         # (a cover by someone else of the right length is not the song).
-        candidates = results if "q" not in params else [r for r in results if names_match(r, terms)]
+        free_text = "q" in params
+        candidates = [r for r in results if names_match(r, terms)] if free_text else results
         found = choose_result(candidates, duration, strict=True)
         if found is not None:
             return found
         if fallback is None:
-            # The duration preference only ever applies to name-matched records
-            fallback = choose_result(candidates, duration) or choose_result(results)
+            # A name-matched free-text record is the best guess (none was in tolerance, so
+            # duration can't help). When no name matches at all (romanized vs native names),
+            # the length is the only evidence left: keep the duration preference.
+            named = choose_result(candidates) if free_text and candidates else None
+            fallback = named or choose_result(results, duration)
     return fallback

@@ -12,6 +12,7 @@ from typing import List, Optional
 import discord
 
 import music
+from markup import escape_markdown
 from music import LoopMode, Track
 
 #----Palette------
@@ -182,7 +183,7 @@ def search_results_embed(query: str, tracks) -> discord.Embed:
     lines = []
     for i, track in enumerate(tracks, start=1):
         lines.append(
-            f"`{i}.` {track.title} `[{music.format_duration(track.duration)}]`"
+            f"`{i}.` {escape_markdown(track.title)} `[{music.format_duration(track.duration)}]`"
         )
     embed = discord.Embed(
         description=_clip(chr(10).join(lines), MAX_EMBED_DESC),

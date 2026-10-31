@@ -31,6 +31,7 @@ import mixer
 from music import LoopMode, MusicManager
 import websearch
 import lyrics
+import markup
 import llm
 import logs
 import models
@@ -1246,7 +1247,7 @@ class SearchResults(discord.ui.View):
             return
 
         await interaction.response.edit_message(
-            embed=ui.info_embed(f"Loading **{track.title}**..."), view=None)
+            embed=ui.info_embed(f"Loading **{markup.escape_markdown(track.title)}**..."), view=None)
         await advance_playback(guild)   # posts the now-playing card
         announce(guild, "play_now", title=track.title)
 
@@ -1860,13 +1861,14 @@ async def music_lyrics(ctx: MusicContext, song: str = "") -> MusicResult:
     if found is None:
         return _error("Couldn't find lyrics for **%s** (I searched for `%s`). "
                       "Try `/lyrics <artist - title>`."
-                      % (lyrics.escape_markdown(_shown(asked)),
+                      % (markup.escape_markdown(_shown(asked)),
                          _shown(terms.shown.replace("`", "'"))))
     if found.text is None:
         return Reply(embed=ui.info_embed("**%s** is an instrumental, so there are no lyrics."
-                                         % lyrics.escape_markdown(_shown(found.heading)),
+                                         % markup.escape_markdown(_shown(found.heading)),
                                          heading="Lyrics"))
-    pages, truncated = lyrics.lyric_pages(found.text)
+    # Escape BEFORE splitting: escaping adds characters, and every page must still fit
+    pages, truncated = lyrics.lyric_pages(markup.escape_markdown(found.text))
     for embed in ui.lyrics_embeds(found.heading, pages, truncated, lyrics.CONTINUES_NOTE):
         await ctx.interaction.followup.send(embed=embed)
     return ""
@@ -2008,7 +2010,7 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
         announce(guild, "queued", title=track.title, pos=len(player.queue))
         return ""
 
-    await status_msg.edit(content=HOURGLASS + " Loading **" + track.title + "**...")
+    await status_msg.edit(content=HOURGLASS + " Loading **" + markup.escape_markdown(track.title) + "**...")
     await advance_playback(guild)   # posts the now-playing card with controls
     announce(guild, "play_now", title=track.title)
     try:
@@ -2059,7 +2061,7 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
     player.skip_requested = True
     vc.stop()  # triggers the after-callback, which advances the queue
     announce(ctx.guild, "skip", title=skipped)
-    return _info(f"Skipped **{skipped}**.")
+    return _info(f"Skipped **{markup.escape_markdown(skipped)}**.")
 
 
 NO_HISTORY = "There's no previous track to go back to."
@@ -2101,7 +2103,7 @@ def go_back(guild: discord.Guild) -> Tuple[bool, str]:
     else:
         music.spawn(advance_playback(guild))
     announce(guild, "previous", title=prev.title)
-    return True, f"Going back to **{prev.title}**."
+    return True, f"Going back to **{markup.escape_markdown(prev.title)}**."
 
 
 async def music_previous(ctx: MusicContext) -> MusicResult:
@@ -2175,9 +2177,9 @@ async def _restart_playing(
             # fail after vc.stop() (while starting it): then nothing is playing and the
             # after-callback moves on once the lock is released - so say which it is.
             if music.music_active(vc, player):
-                return _error(f"I couldn't {failed}, so **{track.title}** is still playing "
+                return _error(f"I couldn't {failed}, so **{markup.escape_markdown(track.title)}** is still playing "
                               "as it was.")
-            return _error(f"I couldn't {failed}, and **{track.title}** stopped playing.")
+            return _error(f"I couldn't {failed}, and **{markup.escape_markdown(track.title)}** stopped playing.")
         if not moved:
             player.filter_name = previous
             return _info(stopped)
@@ -2225,8 +2227,8 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
     else:
         announce(guild, "seek", at=voicelines.speakable_time(target))
     if position is None:
-        return _info(f"Replaying **{track.title}** from the start.")
-    return _info(f"Jumped to **{music.format_duration(int(target))}** in **{track.title}**.")
+        return _info(f"Replaying **{markup.escape_markdown(track.title)}** from the start.")
+    return _info(f"Jumped to **{music.format_duration(int(target))}** in **{markup.escape_markdown(track.title)}**.")
 
 
 async def music_stop(ctx: MusicContext) -> MusicResult:
@@ -2382,7 +2384,7 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
 
     music.remove_at(queue, position)  # `target` above already proved it exists
     announce(ctx.guild, "remove", title=target.title)
-    return _info("Removed **" + target.title + "** from the queue.")
+    return _info("Removed **" + markup.escape_markdown(target.title) + "** from the queue.")
 
 
 async def music_shuffle(ctx: MusicContext) -> MusicResult:
@@ -2428,7 +2430,7 @@ async def music_skipto(ctx: MusicContext, position: int) -> MusicResult:
     # stop() fires the after-callback, which pulls the next track off the queue
     vc.stop()
     announce(ctx.guild, "skipto", title=target.title)
-    reply = NEXT + " Skipping to **" + target.title + "**"
+    reply = NEXT + " Skipping to **" + markup.escape_markdown(target.title) + "**"
     if dropped:
         reply += " (" + str(dropped) + " track(s) skipped)"
     return reply + "."
@@ -2460,7 +2462,7 @@ async def build_status(interaction: discord.Interaction) -> str:
     ffmpeg_state = "Found ✅" if music.find_ffmpeg() else "Missing ❌"
     if guild:
         mp = music_manager.player_for(guild.id)
-        playing = mp.current.title if mp.current else "nothing"
+        playing = markup.escape_markdown(mp.current.title) if mp.current else "nothing"
         music_state = f"{playing} | {len(mp.queue)} queued | loop {mp.loop_mode.value}"
     else:
         music_state = "n/a"

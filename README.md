@@ -293,14 +293,18 @@ give it the artist and title yourself.
 
 Track titles are tidied before searching: brackets such as `(Official Video)` or `【...】`, a
 `feat.` credit and anything after `|` are dropped, and `Artist - Song` is split into artist and
-song. For a local file (`/play` from `MUSIC_DIR`) the file extension and a leading track number are
-dropped first, so `01 - Artist - Song.flac` searches for Artist / Song. When Amy knows the track's
+song. For a local file (`/play` from `MUSIC_DIR`) the file extension is
+dropped first, and so is a leading track number: always in the `7. Song` form, and in the `NN - `
+form when it is zero-padded or an `Artist - Song` still follows (`01 - Artist - Song.flac` searches for Artist / Song; `21 - Adele.mp3` keeps its artist). When Amy knows the track's
 length she prefers a match within 5 seconds of it - from either of her two searches (artist +
 title, then free text; a free-text hit must also match the artist you searched for - or the
-title, when there was no artist - so a same-length cover by someone else doesn't win) - so a live cut or a 10-hour loop
+title, when there was no artist - ignoring accents, case and `&` vs `and`, so a same-length cover
+by someone else doesn't win; when nothing matches by name, e.g. a romanized artist against a
+native-script one, length alone decides) - so a live cut or a 10-hour loop
 loses to the studio version whenever one turns up; if none is that close she shows the first
 result. Lyrics are shown as plain text (markdown in them, such as links or `*stars*`, is escaped
-so it appears literally, and so are the song names in her "not found" and "instrumental" replies).
+so it appears literally, and so are the song names in her "not found" and "instrumental" replies,
+and the track titles in `/queue`, `/search` and her reply messages such as "Skipped ...").
 Plain lyrics are preferred; synced-only entries have their timestamps removed (blank lines between
 verses are kept); instrumentals say so. Long lyrics are sent as up to 3 cards (about
 12,000 characters) and then point to lrclib.net. Like `/queue`, the answer is public. If LRCLIB

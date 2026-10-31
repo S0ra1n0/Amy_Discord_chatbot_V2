@@ -17,6 +17,7 @@ from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Set, T
 import discord
 
 import mixer
+from markup import escape_markdown
 
 log = logging.getLogger("amy.music")
 
@@ -290,7 +291,7 @@ def render_queue(
     """
     lines: List[str] = []
     if current is not None:
-        lines.append(NOW_PLAYING_PREFIX + " **Now playing:** " + current.title
+        lines.append(NOW_PLAYING_PREFIX + " **Now playing:** " + escape_markdown(current.title)
                      + " `[" + format_duration(current.duration) + "]`")
         lines.append("   requested by " + current.requested_by)
     else:
@@ -311,7 +312,7 @@ def render_queue(
 
         for offset, track in enumerate(list(queue)[start_i:start_i + page_size]):
             position = start_i + offset + 1
-            lines.append("`" + str(position) + ".` " + track.title
+            lines.append("`" + str(position) + ".` " + escape_markdown(track.title)
                          + " `[" + format_duration(track.duration) + "]` — "
                          + track.requested_by)
         if pages > 1:

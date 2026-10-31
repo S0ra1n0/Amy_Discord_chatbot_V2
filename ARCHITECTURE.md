@@ -17,6 +17,7 @@ one guards against.
 | `ui.py` | Embeds, progress bar, the `Reply` wrapper | discord |
 | `websearch.py` | DuckDuckGo search, page fetching, the `web_search` tool definition | httpx |
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
+| `markup.py` | `escape_markdown`: makes stranger-controlled text (titles, lyrics) render literally in Discord | **nothing external** |
 | `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
@@ -440,20 +441,30 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **One embed per message.** Discord caps the total text of a message's embeds at 6000
   characters, so three 4000-character pages in one message would be rejected; `music_lyrics`
   sends each page as its own follow-up (`lyric_pages` caps at `MAX_PAGES`).
-- **Lyrics text is escaped before it is split** (`escape_markdown` inside `lyric_pages`): records
-  are community-submitted, and a masked link or spoiler would otherwise render. Escaping adds
-  characters, so splitting first could push a page over the embed limit. `split_pages` never cuts
-  right after a lone backslash and escapes a `#`, `>` or `-` that starts a continuation page.
-  **Names shown in replies are escaped too**: the not-found reply's title and the instrumental
-  reply's LRCLIB heading go through `escape_markdown` (after `_shown` truncates, so a cut can't
-  strand a backslash); the searched terms sit in an inline code span with backticks removed.
-- **Free-text matches must match the artist.** In `find_lyrics`' `q` round the duration
-  preference (strict pick AND fallback) applies only to records passing `names_match`: with an
-  artist in the terms, the record's artist (or its track name, for "Song - Artist" order) must
-  contain it or be contained by it, casefolded; with no artist, the title. If none pass, the
-  first usable record is used with no duration preference. Local files go through `local_title`
-  (extension and a 1-2 digit track number dropped) before `search_terms`. `split_pages` rejects
-  `limit < 2`.
+- **Anything a stranger controls is escaped with `markup.escape_markdown` before it goes into
+  message text or an embed DESCRIPTION** (lyrics records, YouTube titles, LRCLIB names): a masked
+  link or spoiler would otherwise render. That covers every reply that names a track
+  (/play and search-select "Loading", /skip, /previous, /skipto, /remove, /replay, /seek, the
+  /filter failure replies, /status, /queue, /search). Deliberately NOT escaped: embed TITLES
+  (`ui.py` player/lyrics/playlist cards; they render far less markdown), select-option labels,
+  anything spoken (`announce`, voicelines), logs and LLM context. `music_lyrics` escapes the lyrics BEFORE `lyric_pages` splits them
+  (escaping adds characters, so splitting first could push a page over the embed limit;
+  `lyrics.py` itself never escapes and imports only httpx). `split_pages` never cuts right after
+  a lone backslash and escapes a `#`, `>` or `-` that starts a continuation page. The not-found
+  reply's title and the instrumental reply's heading are escaped after `_shown` truncates (a cut
+  can't strand a backslash); the searched terms sit in an inline code span with backticks
+  removed. `music.render_queue` (/queue) and `ui.search_results_embed` escape track titles too.
+  `markup.py` is stdlib only so `music.py` can use it (`ui.py` imports `music.py`).
+- **Free-text matches must match the artist.** In `find_lyrics`' `q` round the strict duration
+  pick applies only to records passing `names_match`: with an artist in the terms, the record's
+  artist (or its track name, for "Song - Artist" order) must contain it or be contained by it
+  after `_fold_name` (accents on Latin letters dropped, casefolded, "&" = "and"; marks on
+  other scripts stay, so Japanese dakuten and Hangul are not folded); with no artist, the title. If
+  some pass but none is the right length, the first passing record is the guess. If NONE pass
+  (a romanized name vs a native one cannot be matched), the length is the only evidence, so the
+  duration preference over all results applies. Local files go through `local_title` (extension
+  dropped; a leading "7. " number always, a "NN - " one only when zero-padded or the rest still has " - ") before
+  `search_terms`. `split_pages` rejects `limit < 2`.
 - **Lyrics are never spoken** and never go to the model: `music_lyrics` has no `announce`.
 
 ## The model (Ollama)
