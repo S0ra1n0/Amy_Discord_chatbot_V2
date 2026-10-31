@@ -24,6 +24,8 @@ from typing import Callable, Deque, List, Optional
 
 import discord
 
+from logs import log_failure
+
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)   # see requirements-tts.txt
     import audioop
@@ -141,10 +143,15 @@ class Mixer(discord.AudioSource):
             # each failed attempt and play every other one. At most one 20 ms packet is
             # lost; queued speech waits for the next song's Mixer.
             self._failed = True
-            log.warning(f"Speech mixing failed, playing this song unmixed: {e!r}")
+            # Audio-thread boundary, so it stays broad - but nothing about mixing is an
+            # expected failure, so it always logs the traceback.
+            log_failure("Speech mixing failed, playing this song unmixed", e, (),
+                        level=logging.WARNING, logger=log)
             try:
                 return self._plain_music()
-            except Exception:
+            except Exception as e2:     # audio-thread boundary again
+                log_failure("The music source failed too, ending the track", e2, (),
+                            level=logging.WARNING, logger=log)
                 return b""      # the music source itself is broken: let the track end
         finally:
             self._frame += 1

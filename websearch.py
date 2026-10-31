@@ -37,7 +37,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from logs import log_failure
+
 log = logging.getLogger("amy.websearch")
+
+# What fetching a result page is EXPECTED to raise (see logs.log_failure): network trouble,
+# a bad URL, a body that won't decode (UnicodeError/LookupError are ValueError/LookupError).
+FETCH_ERRORS = (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError, OSError, ValueError,
+                LookupError, asyncio.TimeoutError)
 
 #----Configuration------
 DDG_HTML_URL: str = "https://html.duckduckgo.com/html/"
@@ -527,7 +534,10 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
             text = extract_page_text(body)
             return text if len(text) >= MIN_PAGE_CHARS else ""
         return ""       # too many redirects
-    except Exception:
+    except FETCH_ERRORS:
+        return ""       # a refused, reset or garbled page: expected, the snippet stands in
+    except Exception as e:      # last resort: an arbitrary web page must never break the answer
+        log_failure("Unexpected error reading a result page", e, (), level=logging.WARNING, logger=log)
         return ""
 
 
@@ -549,8 +559,8 @@ async def enrich(results: List[SearchResult], count: int = ENRICH_COUNT) -> List
         async with httpx.AsyncClient(timeout=PAGE_TIMEOUT, follow_redirects=False,
                                      headers=BROWSER_HEADERS) as client:
             bodies = await asyncio.gather(*(fetch_page(client, r.url) for r in targets))
-    except Exception as e:
-        log.warning(f"Page fetch failed: {e}")
+    except Exception as e:      # boundary: enrichment is a bonus, the snippets still stand
+        log_failure("Page fetch failed", e, FETCH_ERRORS, level=logging.WARNING, logger=log)
         return results
 
     got = 0
@@ -608,14 +618,14 @@ async def search(query: str, limit: int = DEFAULT_LIMIT,
     except (httpx.HTTPError, asyncio.TimeoutError) as e:
         log.warning(f"Web search failed: {e}")
         return []
-    except Exception as e:                      # never let search break a conversation
-        log.error(f"Unexpected web search error: {e}")
+    except Exception as e:                      # boundary: never let search break a conversation
+        log_failure("Unexpected web search error", e, (), logger=log)
         return []
 
     if with_content:
         try:
             await enrich(results)
-        except Exception as e:                  # enrichment is a bonus, never a failure
-            log.warning(f"Page enrichment failed: {e}")
+        except Exception as e:                  # boundary: enrichment is a bonus, never a failure
+            log_failure("Page enrichment failed", e, FETCH_ERRORS, level=logging.WARNING, logger=log)
     return results
 #--------------------------------------

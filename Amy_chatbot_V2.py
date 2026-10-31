@@ -2379,7 +2379,7 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
         return _error("There's no track at position " + str(position) + ".")
     # Users may only remove what they queued; admins may remove anything
     if target.requested_by != str(ctx.interaction.user) and not ctx.is_admin():
-        return (DENY + " That track was queued by " + target.requested_by
+        return (DENY + " That track was queued by " + markup.escape_markdown(target.requested_by)
                 + ". You can only remove your own.")
 
     music.remove_at(queue, position)  # `target` above already proved it exists
@@ -2446,7 +2446,7 @@ async def build_status(interaction: discord.Interaction) -> str:
         ollama_state = "Connected ✅"
     # Not running, not reachable, or answering 200 with something that isn't Ollama
     # (ValueError covers JSONDecodeError and pydantic's ValidationError).
-    except (httpx.HTTPError, OSError, ValueError, ollama.ResponseError):
+    except models.OLLAMA_ERRORS:
         ollama_state = "Unavailable ❌"
 
     stats = db.get_stats()

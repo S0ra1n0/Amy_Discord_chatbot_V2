@@ -147,11 +147,14 @@ class Boom:
 
 
 records = []
+tracebacks = []
 
 
 class Catch(logging.Handler):
     def emit(self, record):
         records.append(record.getMessage())
+        if record.exc_info:
+            tracebacks.append(record.exc_info[0])
 
 
 logging.getLogger("amy.mixer").addHandler(Catch())
@@ -173,6 +176,7 @@ check("the rest of the song plays in order, untouched - at most the one packet i
 check("...passed through as opus, no further mixing attempts", all(o for d, o in out if d))
 check("the queued speech is kept for the next song's mixer", bool(sq))
 check("and it was logged once", sum("mixing failed" in r for r in records) == 1, records)
+check("...with its traceback (a mixing failure is always a bug)", tracebacks == [RuntimeError], tracebacks)
 
 print()
 print("=== R3: music in 60 ms packets still mixes in 20 ms frames ===")

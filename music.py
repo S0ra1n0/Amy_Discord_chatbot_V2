@@ -17,6 +17,7 @@ from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, Set, T
 import discord
 
 import mixer
+from logs import log_failure
 from markup import escape_markdown
 
 log = logging.getLogger("amy.music")
@@ -293,7 +294,7 @@ def render_queue(
     if current is not None:
         lines.append(NOW_PLAYING_PREFIX + " **Now playing:** " + escape_markdown(current.title)
                      + " `[" + format_duration(current.duration) + "]`")
-        lines.append("   requested by " + current.requested_by)
+        lines.append("   requested by " + escape_markdown(current.requested_by))
     else:
         lines.append(NOW_PLAYING_PREFIX + " **Nothing is playing.**")
 
@@ -314,7 +315,7 @@ def render_queue(
             position = start_i + offset + 1
             lines.append("`" + str(position) + ".` " + escape_markdown(track.title)
                          + " `[" + format_duration(track.duration) + "]` — "
-                         + track.requested_by)
+                         + escape_markdown(track.requested_by))
         if pages > 1:
             lines.append("_Use `/queue <page>` to see more (1-" + str(pages) + ")._")
 
@@ -1164,8 +1165,10 @@ async def build_source(
                 options=options,
             )
         except Exception as e:
-            # Probing can fail on odd sources; PCM always works
-            log.warning(f"Opus probe failed, using PCM: {e}")
+            # Fallback boundary: probing can fail on odd sources in ways discord.py/FFmpeg
+            # don't type (PCM always works), so the cause is logged, not swallowed.
+            log_failure("Opus probe failed, using PCM", e,
+                        lookup_errors() + (discord.ClientException,), level=logging.WARNING, logger=log)
 
     source = discord.FFmpegPCMAudio(
         stream_url,
@@ -1192,8 +1195,8 @@ def _discard(source: discord.AudioSource) -> None:
     """Release a source that will never play. FFmpeg sources hold a running process."""
     try:
         source.cleanup()
-    except Exception:
-        pass
+    except Exception:       # best-effort cleanup of a source that never played
+        log.debug("Could not release an unused audio source", exc_info=True)
 
 
 def _start(voice_client: discord.VoiceClient, player: GuildPlayer, track: Track,
@@ -1357,7 +1360,7 @@ def make_after_callback(
             # The coroutine is created on the loop's own thread, inside the callback, so a
             # loop that has already closed never leaves an un-awaited coroutine behind.
             loop.call_soon_threadsafe(lambda: spawn(advance()))
-        except Exception as e:  # loop already closed during shutdown
+        except RuntimeError as e:  # "Event loop is closed": shutdown in progress
             log.warning(f"Could not schedule next track: {e}")
 
     return _after

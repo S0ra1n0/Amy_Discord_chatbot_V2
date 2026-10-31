@@ -51,7 +51,7 @@ class _SafeConsoleHandler(logging.StreamHandler):
                     raise
                 buffer.write(text.encode("utf-8", errors="replace"))
             self.flush()
-        except Exception:
+        except Exception:   # the logging contract: a logging failure goes to handleError, never up
             self.handleError(record)
 
 

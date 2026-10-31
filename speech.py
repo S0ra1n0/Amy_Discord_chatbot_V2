@@ -39,6 +39,8 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
     import audioop
 
+from logs import log_failure
+
 log = logging.getLogger("amy.speech")
 
 # Windows would flash a console window for every FFmpeg run without this.
@@ -736,9 +738,11 @@ class Speaker:
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(self._pool, self.engine.load)
-        except Exception as e:
+        except Exception as e:      # boundary: any engine/model load failure leaves her text-only
             self.state, self.problem = "failed", str(e) or type(e).__name__
-            log.warning(f"Voice unavailable, Amy will stay text-only: {self.problem}")
+            log_failure("Voice unavailable, Amy will stay text-only", e,
+                        (ImportError, OSError, RuntimeError, ValueError),
+                        level=logging.WARNING, logger=log)
             return False
         self.state, self.problem = "ready", None
         log.info(f"Voice ready ({self.engine.name})")
@@ -752,8 +756,10 @@ class Speaker:
         loop = asyncio.get_running_loop()
         try:
             pcm = await loop.run_in_executor(self._pool, self.engine.synthesize, text)
-        except Exception as e:
-            log.warning(f"Couldn't synthesise a sentence: {e}")
+        except Exception as e:      # boundary: a thread-pool engine call; speech just skips the sentence
+            log_failure("Couldn't synthesise a sentence", e,
+                        (OSError, RuntimeError, ValueError, subprocess.SubprocessError),
+                        level=logging.WARNING, logger=log)
             return []
         return to_discord_frames(normalise_peak(pcm, PEAK_TARGET * self.level),
                                  self.engine.rate)
@@ -801,7 +807,7 @@ def download_piper(model_dir: str = PIPER_DIR) -> List[str]:
             with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as out:
                 for block in iter(lambda: resp.read(1 << 20), b""):
                     out.write(block)
-        except BaseException:
+        except BaseException:   # even Ctrl+C: don't leave a half-written .part file, then re-raise
             if os.path.exists(part):
                 os.remove(part)
             raise

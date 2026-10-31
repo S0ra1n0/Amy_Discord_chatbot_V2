@@ -64,3 +64,6 @@ AGENTS.md
 
 # Voice lab output (tools/voicelab.py)
 voicelab_out/
+
+# VS Code Code Runner scratch file
+tempCodeRunnerFile.py

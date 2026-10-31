@@ -115,7 +115,7 @@ def apply_migrations(conn: sqlite3.Connection, migrations: List[str]) -> int:
                 "BEGIN;\n" + migrations[version]
                 + f"\nPRAGMA user_version = {version + 1};\nCOMMIT;"
             )
-        except Exception:
+        except Exception:   # roll back the half-applied migration, then re-raise it
             if conn.in_transaction:
                 conn.rollback()
             raise
@@ -130,7 +130,7 @@ class ConversationDB:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         try:
             self._create_tables()
-        except Exception:
+        except Exception:   # close the connection, then re-raise
             # A refused or failed migration raises out of __init__, so nothing else will
             # ever close this connection - and on Windows it keeps the file locked.
             self.conn.close()

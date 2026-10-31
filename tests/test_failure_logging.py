@@ -184,4 +184,111 @@ try:
 finally:
     amy.ollama.list = real_list
 
+print()
+print("=== models.py: only Ollama's own failures are absorbed ===")
+import models as _models
+
+mm = amy.model_manager
+
+
+def switch_with(exc):
+    def _list():
+        raise exc
+    amy.ollama.list = _list
+    return asyncio.run(mm.switch("some-model"))
+
+
+real_list = amy.ollama.list
+try:
+    check("switch: a refused connection is reported politely",
+          "Could not reach Ollama" in switch_with(ConnectionError("refused")))
+    check("switch: a pydantic/JSON ValueError is reported politely",
+          "Could not reach Ollama" in switch_with(ValueError("not json")))
+    try:
+        switch_with(AttributeError("a real bug"))
+        bug_surfaced = False
+    except AttributeError:
+        bug_surfaced = True
+    check("switch: a bug in the listing surfaces instead of reading as 'unreachable'", bug_surfaced)
+finally:
+    amy.ollama.list = real_list
+import inspect
+check("OLLAMA_ERRORS is the one tuple /status uses too",
+      "OLLAMA_ERRORS" in inspect.getsource(amy.build_status)
+      and issubclass(ConnectionError, _models.OLLAMA_ERRORS))
+
+real_chat_p = _models.ollama.chat
+probe_results = {}
+for label, reply, exc in (("an empty reply ({})", {}, None), ("a reply without content", {"message": None}, None),
+                          ("a KeyError", None, KeyError("message")),
+                          ("a refused connection", None, ConnectionError("refused"))):
+    def _chat(*a, _reply=reply, _exc=exc, **kw):
+        if _exc is not None:
+            raise _exc
+        return _reply
+    _models.ollama.chat = _chat
+    cap.records.clear()
+    try:
+        probe_results[label] = (asyncio.run(mm.probe_think_mode("m")), list(cap.records))
+    except Exception as e:                                      # noqa: BLE001
+        probe_results[label] = ("raised %r" % e, list(cap.records))
+    finally:
+        _models.ollama.chat = real_chat_p
+for label, (res, recs) in probe_results.items():
+    check("probe: %s counts as unverified (None), switch can still finish" % label, res is None)
+check("probe: a malformed reply shape is logged with its traceback",
+      any(r.exc_info is not None for r in probe_results["an empty reply ({})"][1]))
+check("probe: Ollama's own failure is one line, no traceback",
+      probe_results["a refused connection"][1] and all(r.exc_info is None for r in probe_results["a refused connection"][1]))
+
+cap.records.clear()
+real_chat = _models.ollama.chat
+
+
+def _boom_chat(*a, **kw):
+    raise KeyError("a real bug")
+
+
+_models.ollama.chat = _boom_chat
+try:
+    out = asyncio.run(mm.paraphrase("sys", "text", 5))
+finally:
+    _models.ollama.chat = real_chat
+check("paraphrase: any failure still falls back (None)", out is None)
+check("...and an unexpected one is logged with its traceback",
+      any(r.exc_info is not None and r.exc_info[0] is KeyError for r in cap.records), cap.records)
+
+print()
+print("=== websearch.fetch_page: expected failures quiet, bugs logged ===")
+import httpx
+import websearch
+
+real_public = websearch.host_is_public
+
+
+def fetch_with(exc):
+    async def _public(host):
+        raise exc
+    websearch.host_is_public = _public
+
+    async def go():
+        async with httpx.AsyncClient() as c:
+            return await websearch.fetch_page(c, "https://example.test/page")
+    cap.records.clear()
+    try:
+        return asyncio.run(go())
+    finally:
+        websearch.host_is_public = real_public
+
+
+check("a network error gives '' without a warning",
+      fetch_with(httpx.ConnectError("no route")) == "" and not [r for r in cap.records if r.levelno >= logging.WARNING])
+check("a bad URL / decode problem gives '' without a warning",
+      fetch_with(httpx.InvalidURL("bad")) == "" and fetch_with(UnicodeError("bad")) == ""
+      and not [r for r in cap.records if r.levelno >= logging.WARNING])
+check("an unexpected error still gives '' ...", fetch_with(TypeError("a real bug")) == "")
+check("...and is logged with its traceback",
+      any(r.levelno == logging.WARNING and r.exc_info is not None and r.exc_info[0] is TypeError
+          for r in cap.records), cap.records)
+
 finish("ALL FAILURE-LOGGING TESTS PASSED")

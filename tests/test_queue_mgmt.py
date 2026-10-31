@@ -282,4 +282,14 @@ finally:
     music.spawn = _real_spawn
 check("P4: ...and starts it through spawn, so the task is held", len(_spawned) == 1, _spawned)
 
+_closed = asyncio.new_event_loop()
+_closed.close()
+try:
+    music.make_after_callback(_closed, lambda: None)(None)     # type: ignore[arg-type,return-value]
+    _survived = True
+except Exception as e:                                          # noqa: BLE001
+    _survived = False
+    print("   raised", repr(e))
+check("the after-callback survives a closed loop (shutdown) instead of raising", _survived)
+
 finish("ALL QUEUE MANAGEMENT TESTS PASSED")

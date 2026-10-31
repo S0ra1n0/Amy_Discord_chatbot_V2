@@ -167,4 +167,39 @@ check("finished card has no timestamp",
       "<t:" not in str([f.value for f in ui.now_playing_embed(_t, stopped=True, elapsed=63, now=1000.0).fields]))
 check("elapsed past end has no Ends line", "<t:" not in _pos_value(elapsed=999, now=1000.0))
 
+print()
+print("=== stranger-controlled text is escaped (web results, requester names) ===")
+from types import SimpleNamespace as NS
+BS = chr(92)
+web = ui.search_web_embed("q", [
+    NS(title="Evil](https://evil.example) [more", url="https://ok.example/a", snippet="**bold** ||spoiler||"),
+    NS(title="Paren", url="https://ok.example/a_(b)", snippet=""),
+    NS(title="Spacey", url="https://ok.example/a b", snippet=""),
+    NS(title="Script", url="javascript:alert(1)", snippet=""),
+])
+d = web.description
+line1 = d.split("\n")[0]
+check("web title cannot close the link early (brackets removed, not merely escaped)",
+      line1.count("](") == 1 and line1.endswith("](https://ok.example/a)") and "evil.example)" not in line1.split("](")[1]
+      and line1.startswith("`1.` [Evil)(https://evil.example) (more]("), line1)
+check("web snippet escaped (bold and spoiler)",
+      BS + "*" + BS + "*bold" in d and BS + "|" + BS + "|spoiler" in d, d)
+check("')' in a URL is percent-encoded", "](https://ok.example/a_(b%29)" in d, d)
+check("a URL with whitespace is listed without a link", "[Spacey]" not in d and "`3.` Spacey" in d, d)
+check("a non-http URL is listed without a link", "javascript:" not in d and "`4.` Script" in d, d)
+check("safe_link_url: normal URL unchanged", ui.safe_link_url("https://a.b/c?d=1") == "https://a.b/c?d=1")
+check("safe_link_url: a trailing newline is rejected", ui.safe_link_url("https://a.b/c\n") is None)
+check("safe_link_url: empty/None rejected", ui.safe_link_url("") is None and ui.safe_link_url(None) is None)
+
+NAME = "**x**||y||"
+ESC_NAME = BS + "*" + BS + "*x" + BS + "*" + BS + "*" + BS + "|" + BS + "|y" + BS + "|" + BS + "|"
+fields = {f.name: f.value for f in ui.now_playing_embed(T(who=NAME)).fields}
+check("now playing 'Requested by' escaped", fields["Requested by"] == ESC_NAME, fields["Requested by"])
+fields = {f.name: f.value for f in ui.queued_embed(T(who=NAME), 2).fields}
+check("queued 'Requested by' escaped", fields["Requested by"] == ESC_NAME, fields["Requested by"])
+check("a very long requester name stays within the field limit",
+      len(ui._requester(T(who="*" * 5000))) <= ui.MAX_FIELD_VALUE)
+q = music.render_queue(T(who=NAME), deque([T(who=NAME)]), LoopMode.OFF)
+check("/queue: requester names escaped (now playing and queued)", q.count(ESC_NAME) == 2 and NAME not in q, q)
+
 finish("ALL UI TESTS PASSED")

@@ -79,7 +79,9 @@ she searches, then answers in her own words citing what she found. Ordinary ques
 
 `/websearch <query>` does the same search manually and shows the raw results, which is
 useful when you want the sources themselves, or when she judges a question doesn't need
-looking up.
+looking up. Titles and snippets from the web are shown as plain text (links and
+formatting in them are escaped) and a result whose address can't safely be linked is listed
+without a link.
 
 > **How reliable is the automatic part?** The model decides, so it's a judgement call rather
 > than a rule. In testing it searched all four time-sensitive questions and correctly skipped
@@ -304,7 +306,7 @@ native-script one, length alone decides) - so a live cut or a 10-hour loop
 loses to the studio version whenever one turns up; if none is that close she shows the first
 result. Lyrics are shown as plain text (markdown in them, such as links or `*stars*`, is escaped
 so it appears literally, and so are the song names in her "not found" and "instrumental" replies,
-and the track titles in `/queue`, `/search` and her reply messages such as "Skipped ...").
+and the track titles - and who requested them - in `/queue`, `/search`, the player cards and her reply messages such as "Skipped ...").
 Plain lyrics are preferred; synced-only entries have their timestamps removed (blank lines between
 verses are kept); instrumentals say so. Long lyrics are sent as up to 3 cards (about
 12,000 characters) and then point to lrclib.net. Like `/queue`, the answer is public. If LRCLIB

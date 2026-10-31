@@ -679,6 +679,10 @@ check("/skip asks the queue to advance", p.skip_requested and it.guild.voice_cli
 
 PHISH = "[Free Nitro](https://phish.example)"
 ESC = "\\[Free Nitro\\](https://phish.example)"
+p, it = setup(USER, "userA", ["theirs"], owners={"theirs": "**x**||y||"})
+out = run_music(amy, "remove", [1], interaction=it)
+check("/remove denial escapes the other requester's display name",
+      "queued by \\*\\*x\\*\\*\\|\\|y\\|\\|." in out and "**x**" not in out, out)
 p, it = setup(USER, "userA", ["t1"])
 p.current = make_track(amy, PHISH)
 out = slash("skip", it)

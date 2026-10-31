@@ -13,13 +13,21 @@ import logging
 import time
 from typing import List, Optional, Tuple, Union
 
+import httpx
 import ollama
 
+import logs
 from database import ConversationDB
 from llm import (extract_model_names, judge_probe_reply, normalise_think_mode,
                  startup_model_choice, think_value)
 
 log = logging.getLogger("amy.models")
+
+# What a call to Ollama is EXPECTED to raise: not running or unreachable (httpx/OSError; the
+# client turns a refused connect into ConnectionError), or answering 200 with something that
+# isn't Ollama (ValueError covers JSONDecodeError and pydantic's ValidationError), or an
+# error reply. Anything else (a TypeError, an AttributeError) is a bug and must surface.
+OLLAMA_ERRORS = (httpx.HTTPError, OSError, ValueError, ollama.ResponseError)
 
 # Bounds on the /model reasoning probe. Switching models forces Ollama to load the new one,
 # so an unbounded probe can take minutes - one measured run sat at 337s. A leaking model
@@ -106,8 +114,12 @@ class ModelManager:
                 log.warning(f"Probing {model_name} in '{mode}' mode timed out "
                             f"after {PROBE_TIMEOUT}s")
                 return None
-            except Exception as e:
-                log.warning(f"Could not probe {model_name} in '{mode}' mode: {e}")
+            except OLLAMA_ERRORS + (KeyError, AttributeError, TypeError) as e:
+                # A malformed reply shape (KeyError/AttributeError/TypeError from ask) also
+                # means "unverified": switch() must still finish after releasing the old
+                # model. Those get a traceback; Ollama's own failures one line.
+                logs.log_failure(f"Could not probe {model_name} in '{mode}' mode", e,
+                                 OLLAMA_ERRORS, level=logging.WARNING, logger=log)
                 return None
 
             if judge_probe_reply(content, thinking):
@@ -124,7 +136,7 @@ class ModelManager:
         loop = asyncio.get_running_loop()
         try:
             available = await loop.run_in_executor(None, ollama.list)
-        except Exception as e:
+        except OLLAMA_ERRORS as e:
             return f"\U0001F6AB Could not reach Ollama to verify the model: {e}"
 
         model_names = extract_model_names(available)
@@ -141,7 +153,7 @@ class ModelManager:
             try:
                 await loop.run_in_executor(None, set_model_residency, previous, 0)
                 log.info(f"Released {previous} from memory")
-            except Exception as e:
+            except OLLAMA_ERRORS as e:
                 log.warning(f"Could not release {previous}: {e}")
 
         # Establish how this model handles reasoning before committing to it. Without this,
@@ -188,8 +200,9 @@ class ModelManager:
         started = time.monotonic()
         try:
             await asyncio.get_running_loop().run_in_executor(None, self.preload, target)
-        except Exception as e:
-            log.warning(f"Could not warm '{target}', the first reply will be slower: {e}")
+        except Exception as e:      # boundary: a failed warm-up must never stop the bot
+            logs.log_failure(f"Could not warm '{target}', the first reply will be slower", e,
+                             OLLAMA_ERRORS + (asyncio.TimeoutError,), level=logging.WARNING, logger=log)
             return False
         log.info(f"Model '{target}' warmed in {time.monotonic() - started:.1f}s "
                  f"(stays loaded for {self.keep_alive})")
@@ -212,8 +225,8 @@ class ModelManager:
         try:
             listing = await asyncio.get_running_loop().run_in_executor(None, ollama.list)
             installed: Optional[List[str]] = extract_model_names(listing)
-        except Exception:
-            installed = None                        # can't tell - so don't conclude anything
+        except OLLAMA_ERRORS:
+            installed = None                      # can't tell - so don't conclude anything
 
         chosen = startup_model_choice(saved, self.default, loaded, installed)
         if chosen == saved:
@@ -254,8 +267,9 @@ class ModelManager:
         except asyncio.TimeoutError:
             log.info(f"Paraphrase took longer than {timeout}s; using the fallback")
             return None
-        except Exception as e:
-            log.warning(f"Paraphrase failed, using the fallback: {e}")
+        except Exception as e:      # boundary: a spoken paraphrase is optional, the caller has a fallback
+            logs.log_failure("Paraphrase failed, using the fallback", e, OLLAMA_ERRORS,
+                             level=logging.WARNING, logger=log)
             return None
         return content or None
 

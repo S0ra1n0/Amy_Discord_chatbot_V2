@@ -236,9 +236,15 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   anything that raises inside `Mixer.read` fails the mixer.
 - **No silent `pass` without a reason.** The quiet case is a best-effort
   `except discord.HTTPException: pass` on a cosmetic edit or delete.
-- **Scope: this audit covered `Amy_chatbot_V2.py` only.** The other modules still hold 17 broad
-  catches (music, mixer, models, speech, websearch; some are legitimate boundaries like
-  `Mixer.read`). They are not audited yet.
+- **Every module has been audited.** Calls to Ollama catch `models.OLLAMA_ERRORS`
+  (`httpx.HTTPError`/`OSError`/`ValueError`/`ollama.ResponseError`; `/status` uses the same
+  tuple); the after-callback catches `RuntimeError` (a closed loop); page fetches catch
+  `websearch.FETCH_ERRORS` and log anything else with a traceback. The remaining broad catches
+  are boundaries and say so in a comment: `Mixer.read` (audio thread), `ModelManager.warm` and
+  `paraphrase`, `Speaker.start`/`frames_for`, the web search/enrichment wrappers, the Opus
+  probe fallback, and best-effort source cleanup - each logs through `log_failure` (or
+  `exc_info`). `database.py`'s and `speech.download_piper`'s broad catches clean up and
+  re-raise, and `_SafeConsoleHandler.emit` follows the logging contract (`handleError`).
 
 ## Settings
 
@@ -445,7 +451,13 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   message text or an embed DESCRIPTION** (lyrics records, YouTube titles, LRCLIB names): a masked
   link or spoiler would otherwise render. That covers every reply that names a track
   (/play and search-select "Loading", /skip, /previous, /skipto, /remove, /replay, /seek, the
-  /filter failure replies, /status, /queue, /search). Deliberately NOT escaped: embed TITLES
+  /filter failure replies, /status, /queue, /search), plus requester display names (/queue,
+  the "Requested by" embed fields, the /remove refusal) and /websearch results
+  (`ui.search_web_embed`: the snippet is escaped; the title is used as masked-link TEXT, where
+  Discord may not honour `\]`, so its `[` and `]` are replaced by parentheses before escaping
+  rather than relying on escapes; `ui.safe_link_url` allows only http(s) without whitespace
+  and percent-encodes `)`, otherwise the result is listed without a link).
+  Deliberately NOT escaped: embed TITLES
   (`ui.py` player/lyrics/playlist cards; they render far less markdown), select-option labels,
   anything spoken (`announce`, voicelines), logs and LLM context. `music_lyrics` escapes the lyrics BEFORE `lyric_pages` splits them
   (escaping adds characters, so splitting first could push a page over the embed limit;

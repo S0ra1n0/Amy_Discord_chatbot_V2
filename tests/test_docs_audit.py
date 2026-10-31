@@ -113,7 +113,51 @@ gone = sorted(n for n in named if not re.search(r"\b%s\b" % re.escape(n), all_sr
 check("every code name it mentions exists (%d checked)" % len(named), not gone,
       "no longer in the source: %s" % gone)
 check("the scan found names at all", len(named) > 50, "found %d" % len(named))
-for mod in sorted(glob.glob("*.py")):
+import fnmatch
+
+
+def is_gitignored(name, lines):
+    """A top-level file named by a .gitignore pattern (no directories, no negation)."""
+    pats = [l.strip() for l in lines if l.strip() and not l.lstrip().startswith(("#", "!"))
+            and "/" not in l.strip()]
+    return any(fnmatch.fnmatch(name, p) for p in pats)
+
+
+def tracked_python_files():
+    """Top-level .py files git tracks, or None when git isn't usable here."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "ls-files", "*.py"], capture_output=True, text=True,
+                             encoding="utf-8", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return {l.strip() for l in out.stdout.splitlines() if l.strip() and "/" not in l}
+
+
+def modules_to_document(mods, lines, tracked=None):
+    """
+    The modules the table must list: everything except scratch files that are gitignored AND
+    untracked - a broad pattern added later can never hide a real (tracked) module.
+    """
+    return [m for m in mods if (tracked is not None and m in tracked) or not is_gitignored(m, lines)]
+
+
+_ignore_lines = open(".gitignore", encoding="utf-8").read().splitlines()
+check("a gitignored scratch file is recognised (Code Runner's tempCodeRunnerFile.py)",
+      is_gitignored("tempCodeRunnerFile.py", _ignore_lines) and not is_gitignored("speech.py", _ignore_lines))
+# A recreated scratch file (never committed) must not fail the suite
+check("the table check skips a scratch file but not a real module",
+      modules_to_document(["speech.py", "tempCodeRunnerFile.py"], _ignore_lines) == ["speech.py"])
+_tracked = tracked_python_files()
+check("git can list the tracked modules", _tracked is not None and "speech.py" in _tracked, _tracked)
+check("a tracked module is never skipped, even if a broad pattern would ignore it",
+      modules_to_document(["speech.py"], ["*.py"], {"speech.py"}) == ["speech.py"]
+      and modules_to_document(["scratch.py"], ["*.py"], {"speech.py"}) == [])
+check("no tracked .py is skipped by the real .gitignore",
+      not _tracked or set(modules_to_document(sorted(_tracked), _ignore_lines, _tracked)) == _tracked)
+for mod in modules_to_document(sorted(glob.glob("*.py")), _ignore_lines, _tracked):
     check("module %s is in its table" % mod, "| `%s` |" % mod in arch)
 check("README links to it", "ARCHITECTURE.md" in readme)
 
@@ -146,7 +190,7 @@ print("=== .gitignore patterns actually match ===")
 gitignore = open(".gitignore", encoding="utf-8").read().splitlines()
 trailing = [l for l in gitignore if l.strip() and not l.lstrip().startswith("#") and " #" in l]
 check("no pattern line has a comment after it", not trailing, str(trailing))
-for must in ("*.log.*", "kokoro_model/", "piper_model/", "amy_memory.db", ".env"):
+for must in ("*.log.*", "tempCodeRunnerFile.py", "kokoro_model/", "piper_model/", "amy_memory.db", ".env"):
     check("%s is ignored" % must, must in [l.strip() for l in gitignore])
 
 print()

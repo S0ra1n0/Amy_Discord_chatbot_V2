@@ -5,6 +5,7 @@ Kept free of bot state so every builder can be constructed and asserted offline,
 the same property that makes music.render_queue and voice.decide_join_action testable.
 """
 
+import re
 import time
 from dataclasses import dataclass
 from typing import List, Optional
@@ -33,6 +34,30 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "\u2026"
+
+
+def _md_clip(text: str, limit: int) -> str:
+    """
+    Stranger-controlled text for a description or field: trimmed, THEN escaped (a cut after
+    escaping could strand a backslash). Escaping at most doubles the length, so the result
+    stays within `limit` when the text is first clipped to half of it.
+    """
+    return escape_markdown(_clip(text, limit // 2))
+
+
+def _requester(track: Track) -> str:
+    """The "Requested by" field: a Discord display name, which can carry markdown."""
+    return _md_clip(track.requested_by, MAX_FIELD_VALUE)
+
+
+def safe_link_url(url: str) -> Optional[str]:
+    """
+    A URL that is safe inside a masked link "[text](url)", or None. Only http(s), no
+    whitespace (it would end the URL); ")" is percent-encoded so it can't close the link early.
+    """
+    if not re.fullmatch(r"https?://\S+", url or ""):
+        return None
+    return url.replace(")", "%29")
 
 
 @dataclass
@@ -100,7 +125,7 @@ def now_playing_embed(
     else:
         embed.add_field(name="Duration",
                         value=music.format_duration(track.duration), inline=True)
-    embed.add_field(name="Requested by", value=_clip(track.requested_by, MAX_FIELD_VALUE), inline=True)
+    embed.add_field(name="Requested by", value=_requester(track), inline=True)
     embed.add_field(name="Volume", value=f"{int(volume * 100)}%", inline=True)
 
     if queue_len:
@@ -138,7 +163,7 @@ def queued_embed(track: Track, position: int) -> discord.Embed:
     embed.set_author(name="Added to queue")
     embed.add_field(name="Duration", value=music.format_duration(track.duration), inline=True)
     embed.add_field(name="Position", value=str(position), inline=True)
-    embed.add_field(name="Requested by", value=_clip(track.requested_by, MAX_FIELD_VALUE), inline=True)
+    embed.add_field(name="Requested by", value=_requester(track), inline=True)
     if track.thumbnail:
         embed.set_thumbnail(url=track.thumbnail)
     return embed
@@ -204,9 +229,14 @@ def search_web_embed(query: str, results) -> discord.Embed:
 
     lines = []
     for i, r in enumerate(results, start=1):
-        lines.append("`%d.` [%s](%s)" % (i, _clip(r.title, 120), r.url))
+        # Brackets become parentheses BEFORE escaping: Discord may not honour "\]" inside
+        # link text, so a title must not be able to contain a closing bracket at all.
+        title = _md_clip(r.title.replace("[", "(").replace("]", ")"), 240)
+        url = safe_link_url(r.url)
+        # A result whose URL can't be put in a masked link is listed as plain text
+        lines.append("`%d.` [%s](%s)" % (i, title, url) if url else "`%d.` %s" % (i, title))
         if r.snippet:
-            lines.append("_%s_" % _clip(r.snippet, 200))
+            lines.append("_%s_" % _md_clip(r.snippet, 400))
     embed = discord.Embed(
         description=_clip(chr(10).join(lines), MAX_EMBED_DESC), colour=COLOUR_INFO)
     embed.set_author(name="Web search: %s" % _clip(query, 200))
