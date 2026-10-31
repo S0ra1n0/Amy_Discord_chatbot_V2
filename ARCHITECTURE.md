@@ -177,10 +177,22 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   clock BEFORE `finish_playback` resets it; `played_enough`): an unreadable stream ends at
   once and would otherwise chain through the Mix forever. The pick is the first entry of YouTube's Mix (`related_tracks`, bounded with
   `playlistend`: the Mix is endless) not among `player.history`, the ended song and
-  `last_played`, not live and at most `AUTOPLAY_MAX_SECONDS`, compared by video id (`youtube_video_id`). The lookup runs under the player
-  lock like a stream resolve and re-checks afterwards: a moved `generation` (a `/stop`) means
-  nothing plays, a song queued meanwhile plays instead (and is not announced "Up next":
-  the `/play` speaks for itself). Any failure finishes as before. The lookup yields up to
+  `last_played`, not live and at most `AUTOPLAY_MAX_SECONDS`, compared by video id (`youtube_video_id`).
+  **The lookup runs with the player lock RELEASED** (2-20 s): `advance_playback` decides under
+  the lock, sets `player.autoplay_lookup` (a token; `current` stays the ended song, so
+  `/join`'s `start_waiting_queue` and `stop_all`'s history rule are unchanged), releases the
+  lock for `autoplay_candidates`, then re-takes it and re-checks in this order: marker still
+  ours (else another advance took over: do nothing, no finish card), vc connected (else
+  close the card, `reset` and clear the saved queue), `generation` unmoved (a `/stop`:
+  finish), no track started, then a song queued meanwhile plays instead (not announced "Up
+  next": the `/play` speaks for itself), else the picks - unless `/autoplay off` came
+  meanwhile, which drops them (a queued song still plays). Any other `advance_playback` that gets the lock first (a `/play`, a `/previous`)
+  calls `supersede_autoplay_lookup`, which clears the marker, sets `current = None` (the
+  ended song is already on `history` and `last_played`, and a set `current` would make a
+  `/loop` mode replay or rotate it instead of the queued song) and suppresses "Up next".
+  Cancellation anywhere in the unlocked or re-locking stretch clears a marker that is still
+  ours. `reset` clears the marker too; `stop_all` does not (the lookup must see the moved `generation`). Any
+  failure finishes as before. The lookup yields up to
   `AUTOPLAY_ATTEMPTS` spares; a pick that fails to start moves to the next, and when they run
   out playback finishes (a user-queued track that fails still just skips). The pick goes
   through the normal play path, so the usual "Up next" applies.
@@ -318,13 +330,15 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `/seek` rebuilding the stream. Nothing is audible then and `current` names the track just
   left, so going back would queue behind the track already loading. It is synchronous on
   purpose, so nothing can change between its checks and the queue edit, and the button and
-  `/previous` both call it, so they share checks and wording.
+  `/previous` both call it, so they share checks and wording. During autoplay's Mix lookup the
+  lock is free, so it is NOT refused: it goes back to the song that just ended.
 - **Fire-and-forget tasks go through `music.spawn()`**, which holds a reference until they
   finish. asyncio keeps only a weak one, and the Python docs warn an unreferenced task can be
   collected before it completes. In practice a task waiting on a lock or I/O is kept alive by
   that wait, so this is about not depending on it - no lost track has actually been seen.
-- **The periodic snapshot skips a player whose lock is held.** Mid-advance, the next track
-  exists only in a local variable.
+- **The periodic snapshot skips a player whose lock is held, or whose `autoplay_lookup` is
+  set.** Mid-advance, the next track exists only in a local variable; mid-lookup, `current` is
+  still the ended song.
 - **Stream URLs expire** (about 6 hours). Metadata is resolved when a track is queued; the
   stream URL only when it plays. Never resolve a whole queue up front.
 - **At 100% volume Opus passes straight through**; below that it must be decoded to PCM,

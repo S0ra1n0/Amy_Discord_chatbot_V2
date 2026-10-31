@@ -885,6 +885,28 @@ class GuildPlayer:
         # to resolve; a start that finds the generation moved on abandons itself rather
         # than undoing the stop.
         self.generation: int = 0
+        # Set (to a fresh token) while autoplay's slow Mix lookup runs with the lock FREE; see
+        # advance_playback. `current` still names the ended track meanwhile.
+        self.autoplay_lookup: Optional[object] = None
+
+    def begin_autoplay_lookup(self) -> object:
+        """Mark a lookup in flight and return its token (the lookup keeps it to re-check)."""
+        self.autoplay_lookup = token = object()
+        return token
+
+    def supersede_autoplay_lookup(self) -> bool:
+        """
+        Another advance is taking over from a lookup in flight: clear its marker, so the lookup
+        finds it gone and does nothing. Returns whether there was one. The lookup's advance
+        already recorded the ended track (on `history`, and as `last_played`), so `current` is
+        cleared: the advance then behaves like one on an idle player. Leaving it set made a
+        loop mode replay it (TRACK) or rotate it (QUEUE) instead of playing what was queued.
+        """
+        if self.autoplay_lookup is None:
+            return False
+        self.autoplay_lookup = None
+        self.current = None
+        return True
 
     def cancel_idle(self) -> None:
         if self.idle_task is not None and not self.idle_task.done():
@@ -956,11 +978,12 @@ class GuildPlayer:
         self.back_requested = False
         self.current = None
         self.resume_position = 0.0
-        self.generation += 1
+        self.generation += 1     # (a lookup in flight keeps its marker: it sees this and finishes)
 
     def reset(self) -> None:
         self.cancel_idle()
         self.stop_all()
+        self.autoplay_lookup = None      # leaving ends a lookup in flight: it does nothing
         self.now_playing_msg = None
         self.last_played = None
         self.history.clear()      # leaving voice ends the session

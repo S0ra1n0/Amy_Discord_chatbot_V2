@@ -185,9 +185,16 @@ async def _play(vc, player, track, after, start_at=0.0):
     return True
 
 
+gate = entered = None     # a test sets both to hold the lookup open (see lock_free below)
+
+
 async def _related(seed, *a, **kw):
     lookups.append(seed)
     await asyncio.sleep(0)
+    if gate is not None:
+        assert entered is not None
+        entered.set()               # the lookup is in flight
+        await gate.wait()           # ...until the test lets it finish
     for fn in hooks:
         fn()
     if isinstance(mix, Exception):
@@ -316,6 +323,211 @@ try:
     check("a /play landing during the lookup plays instead of the autoplay pick",
           [t.title for t in played] == ["requested"], [t.title for t in played])
     check("...and is not announced as 'Up next' (the /play speaks for itself)", said == [], said)
+
+    # ---- the lookup runs with the player lock FREE ----------------------------------------
+    print()
+    print("=== the Mix lookup does not hold the player lock ===")
+
+    running = {}        # the advance task under test, for a body that cancels it
+
+    def drive(gid, body, *, mix_result=(yt(1), yt(2), yt(3)), cancels=False):
+        """
+        A song ends naturally; `body(p, guild, vc)` runs while the Mix lookup is held open, then
+        the lookup is released. Returns (player, vc, whatever body returned).
+        """
+        global gate, entered, mix
+        ch = RealVoiceChannel(10, "Chung", [Member(0, None, name="u0")])
+        vc = VoiceClient(ch)
+        vc.stopped = True
+        guild = Guild(OWNER, Member(USER, ch), vc, guild_id=gid)
+        amy.music_manager.cleanup(gid)
+        p = amy.music_manager.player_for(gid)
+        p.current = yt(1)
+        p.started_at = time.monotonic() - 60.0
+        mix = list(mix_result)
+        amy.autoplay_enabled, amy.up_next_enabled = True, True
+        for lst in (played, said, finished, lookups):
+            lst.clear()
+        bad.clear()
+        hooks.clear()
+
+        async def go():
+            global gate, entered
+            gate, entered = asyncio.Event(), asyncio.Event()
+            task = running["task"] = asyncio.ensure_future(amy.advance_playback(guild))
+            await asyncio.wait_for(entered.wait(), 2)
+            try:
+                result = await body(p, guild, vc)
+            finally:
+                gate.set()
+            if cancels:
+                await asyncio.wait([task], timeout=2)
+                assert task.cancelled()
+                return result
+            await asyncio.wait_for(task, 2)
+            return result
+        try:
+            return p, vc, asyncio.run(go())
+        finally:
+            gate = entered = None
+
+    async def probe_lock(p, guild, vc):
+        free = not p.lock.locked()
+        if free:                # a command taking the lock (/seek, /filter) is not held up
+            await asyncio.wait_for(p.lock.acquire(), 0.5)
+            p.lock.release()
+        return free, p.autoplay_lookup is not None, p.current
+    p, vc, (free, marked, cur) = drive(8020, probe_lock)
+    check("lock free during lookup: the player lock is FREE while the Mix is fetched", free)
+    check("...the lookup is marked, and `current` is still the ended song",
+          marked and cur is not None and cur.title == "song 1", (marked, cur))
+    check("...and once it finishes the related song plays, marker cleared",
+          [t.title for t in played] == ["song 2"] and p.autoplay_lookup is None
+          and said == [("up_next", "song 2")], (played, said))
+
+    async def play_meanwhile(p, guild, vc):
+        p.queue.append(yt(9, "requested"))      # what /play does, then it advances itself
+        try:
+            await asyncio.wait_for(amy.advance_playback(guild), 1)
+        except asyncio.TimeoutError:
+            return False
+        return [t.title for t in played], gate.is_set()
+    p, vc, got = drive(8021, play_meanwhile)
+    check("/play during lookup completes without waiting for the lookup",
+          got == (["requested"], False), got)
+    check("...the user's song plays and the autoplay pick is discarded, no 'Up next'",
+          [t.title for t in played] == ["requested"] and said == []
+          and p.current is not None and p.current.title == "requested", (played, said))
+    check("...the lookup did not finish playback, and the ended song is in history once",
+          finished == [] and [t.title for t in p.history] == ["song 1"] and not p.queue,
+          (finished, [t.title for t in p.history]))
+
+    async def previous_meanwhile(p, guild, vc):
+        went = amy.go_back(guild)
+        await asyncio.sleep(0.05)               # the spawned advance runs
+        return went, [t.title for t in played]
+    p, vc, got = drive(8022, previous_meanwhile)
+    check("/previous during lookup is not refused: it goes back to the song that ended",
+          got == ((True, "Going back to **song 1**."), ["song 1"]), got)
+    check("...the lookup then discards its pick: one song, announced 'previous' only",
+          [t.title for t in played] == ["song 1"] and said == [("previous", "song 1")]
+          and finished == [], (played, said, finished))
+    check("...and that song is not left on the history while it plays",
+          list(p.history) == [], [t.title for t in p.history])
+
+    async def stop_then_play(p, guild, vc):
+        p.stop_all()                            # /stop...
+        p.queue.append(yt(9, "requested"))      # ...then a /play before the lookup returns
+        await asyncio.wait_for(amy.advance_playback(guild), 1)
+    p, vc, _ = drive(8023, stop_then_play)
+    check("/stop then /play during lookup: the new song plays, the lookup does nothing more",
+          [t.title for t in played] == ["requested"] and finished == [] and said == [],
+          (played, finished, said))
+
+    async def leave_meanwhile(p, guild, vc):
+        vc.disconnected = True
+        p.reset()                               # /leave
+    p, vc, _ = drive(8024, leave_meanwhile)
+    check("/leave during lookup: nothing plays, no finish card", played == [] and finished == []
+          and p.current is None, (played, finished))
+
+    async def stop_meanwhile(p, guild, vc):
+        p.stop_all()
+    p, vc, _ = drive(8025, stop_meanwhile)
+    check("/stop during a held-open lookup still wins: nothing plays, playback finishes",
+          played == [] and finished != [] and said == [], (played, finished, said))
+
+    # ---- review fixes: loop modes, a dropped vc, /autoplay off, cancellation ---------------
+    print()
+    print("=== lock-free lookup: loop modes, vc gone, /autoplay off, cancellation ===")
+
+    def loop_then_play(mode):
+        async def body(p, guild, vc):
+            p.loop_mode = mode                  # /loop during the lookup...
+            p.queue.append(yt(9, "requested"))  # ...then /play
+            await asyncio.wait_for(amy.advance_playback(guild), 1)
+        return body
+    for label, mode in (("TRACK", music.LoopMode.TRACK), ("QUEUE", music.LoopMode.QUEUE)):
+        p, vc, _ = drive(8030 + mode.value.__len__(), loop_then_play(mode))
+        check("/loop %s set during the lookup, then /play: the requested song plays, not the "
+              "ended one" % label, [t.title for t in played] == ["requested"], played)
+        check("...it leaves the queue empty and the ended song on the history once",
+              not p.queue and [t.title for t in p.history] == ["song 1"],
+              ([t.title for t in p.queue], [t.title for t in p.history]))
+
+    async def previous_under_track(p, guild, vc):
+        p.loop_mode = music.LoopMode.TRACK
+        amy.go_back(guild)
+        await asyncio.sleep(0.05)
+    p, vc, _ = drive(8040, previous_under_track)
+    check("/previous under TRACK loop during the lookup: plays the ended song once, "
+          "history empty", [t.title for t in played] == ["song 1"] and not p.queue
+          and list(p.history) == [], (played, [t.title for t in p.history]))
+
+    # the vc check is the deciding one: nothing else has touched the player
+    async def vc_drops(p, guild, vc):
+        vc.disconnected = True
+        amy.db.save_player_state(8050, [music.track_to_dict(yt(1))], loop_mode="off",
+                                 volume=1.0, voice_channel_id=10, text_channel_id=None,
+                                 resume_position=5.0)
+    p, vc, _ = drive(8050, vc_drops)
+    check("vc dropped during the lookup: nothing plays, the card is closed",
+          played == [] and finished != [], (played, finished))
+    check("...the saved queue is cleared and the player wiped",
+          amy.db.load_player_state(8050) is None and p.current is None and not p.history,
+          amy.db.load_player_state(8050))
+
+    async def autoplay_off(p, guild, vc):
+        amy.autoplay_enabled = False
+    p, vc, _ = drive(8060, autoplay_off)
+    check("/autoplay off during the lookup cancels the pick: nothing plays, playback finishes",
+          played == [] and finished != [] and said == [], (played, finished, said))
+    amy.autoplay_enabled = True
+
+    async def autoplay_off_queued(p, guild, vc):
+        amy.autoplay_enabled = False
+        p.queue.append(yt(9, "requested"))
+        # the queued song's own advance is not run: the lookup's second stretch must pick it up
+    p, vc, _ = drive(8061, autoplay_off_queued)
+    check("...but a song queued meanwhile still plays",
+          [t.title for t in played] == ["requested"] and said == [], (played, said))
+    amy.autoplay_enabled = True
+
+    async def cancel_in_lookup(p, guild, vc):
+        running["task"].cancel()
+        await asyncio.sleep(0)
+    p, vc, _ = drive(8070, cancel_in_lookup, cancels=True)
+    check("cancelled during the lookup: the marker is cleared", p.autoplay_lookup is None)
+
+    async def cancel_waiting_for_lock(p, guild, vc):
+        await p.lock.acquire()                  # a command holds the lock...
+        gate.set()
+        await asyncio.sleep(0.05)               # ...the lookup returns and waits for it
+        marked = p.autoplay_lookup is not None
+        running["task"].cancel()
+        await asyncio.sleep(0)
+        p.lock.release()
+        return marked
+    p, vc, marked = drive(8071, cancel_waiting_for_lock, cancels=True)
+    check("cancelled while waiting for the lock: the marker is cleared (was set: %s)" % marked,
+          marked and p.autoplay_lookup is None)
+
+    # the periodic snapshot leaves a player alone while its marker is set
+    snaps = []
+    _real_snap = amy.snapshot_player
+    amy.snapshot_player = lambda gid: snaps.append(gid)
+
+    async def snapshot_meanwhile(p, guild, vc):
+        await amy.snapshot_queues_task.coro()
+        return list(snaps)
+    try:
+        p, vc, got = drive(8080, snapshot_meanwhile)
+        check("snapshot_queues_task skips a player whose autoplay marker is set", 8080 not in got, got)
+        snaps.clear()
+        asyncio.run(amy.snapshot_queues_task.coro())
+        check("...and snapshots it once the marker is gone", 8080 in snaps, snaps)
+    finally:
+        amy.snapshot_player = _real_snap
 finally:
     (music.play_track, music.related_tracks, amy.refresh_now_playing, amy.announce,
      amy.finish_playback, amy.autoplay_enabled, amy.up_next_enabled) = _real

@@ -515,10 +515,11 @@ async def snapshot_queues_task() -> None:
     Skips a player whose lock is held. advance_playback pops the next track into a local
     and spends seconds resolving it while player.current still holds the finished one; a
     snapshot taken then saved neither, so a crash in that window lost the next track. Once
-    the change completes, advance_playback snapshots it itself.
+    the change completes, advance_playback snapshots it itself. The same goes for the lock-free
+    autoplay lookup (`autoplay_lookup` set): `current` is still the ended song then.
     """
     for guild_id, player in list(music_manager.players.items()):
-        if player.lock.locked():
+        if player.lock.locked() or player.autoplay_lookup is not None:
             continue
         snapshot_player(guild_id)
 
@@ -1299,37 +1300,39 @@ async def finish_playback(guild: discord.Guild, player: music.GuildPlayer) -> No
     player.idle_task = asyncio.create_task(idle_disconnect(guild))
 
 
-async def autoplay_pick(guild: discord.Guild, vc: discord.VoiceClient,
-                        player: music.GuildPlayer, last: Optional[music.Track], *,
-                        force_next: bool, going_back: bool,
-                        played: float) -> Tuple[List[music.Track], bool]:
-    """
-    The queue ran dry: (songs to try in order, whether they came from the user's queue). An
-    empty list means finish. Called by advance_playback under the player lock. Never raises.
-    Looking the Mix up takes seconds, so afterwards it re-checks what the world looks like: a
-    /stop (generation moved) wins, and a /play that queued a song meanwhile gets played in
-    its place (flagged, so it isn't also announced as "Up next": the command speaks for itself).
-    Up to AUTOPLAY_ATTEMPTS related songs come back from the one lookup, for a pick that
-    won't start.
-    """
+def autoplay_applies(vc: discord.VoiceClient, player: music.GuildPlayer,
+                     last: Optional[music.Track], *, force_next: bool, going_back: bool,
+                     played: float) -> bool:
+    """Whether the queue running dry after `last` should be followed by a related song."""
     channel = voice.active_channel(vc)
-    if not music.should_autoplay(
-            enabled=autoplay_enabled, last=last, force_next=force_next,
-            going_back=going_back, humans=voice.humans_in(channel) if channel else 0,
-            played=played):
-        return [], False
-    assert last is not None             # should_autoplay refuses None
-    generation = player.generation
+    return music.should_autoplay(
+        enabled=autoplay_enabled, last=last, force_next=force_next,
+        going_back=going_back, humans=voice.humans_in(channel) if channel else 0,
+        played=played)
+
+
+async def autoplay_candidates(last: music.Track) -> List[music.Track]:
+    """
+    The songs YouTube's Mix relates to `last`. Takes seconds, so advance_playback calls it
+    with the player lock RELEASED. Never raises: a failure is logged and means no candidates.
+    """
     try:
-        candidates = await music.related_tracks(last)
+        return await music.related_tracks(last)
     except Exception as e:      # whatever failed, she just finishes instead of autoplaying
         logs.log_failure(f"Autoplay: could not get songs related to '{last.title}'", e,
                     music.lookup_errors(), logging.WARNING)
-        return [], False
-    if player.generation != generation or not vc.is_connected():
-        log.info("Autoplay: playback was stopped while looking for a song")
-        return [], False
-    if player.queue:                    # a /play landed during the lookup: it goes first
+        return []
+
+
+def autoplay_choice(player: music.GuildPlayer, last: music.Track,
+                    candidates: List[music.Track]) -> Tuple[List[music.Track], bool]:
+    """
+    After the lookup, under the player lock: (songs to try in order, whether they came from the
+    user's queue). An empty list means finish. A /play that queued a song meanwhile goes first
+    (flagged, so it isn't also announced as "Up next": the command speaks for itself).
+    Up to AUTOPLAY_ATTEMPTS related songs come back, for a pick that won't start.
+    """
+    if player.queue:
         return [player.queue.popleft()], True
     picks = music.autoplay_picks(
         candidates, music.recent_video_ids([*player.history, last, player.last_played]))
@@ -1340,10 +1343,68 @@ async def autoplay_pick(guild: discord.Guild, vc: discord.VoiceClient,
     return picks, False
 
 
+async def play_attempts(guild: discord.Guild, vc: discord.VoiceClient,
+                        player: music.GuildPlayer, attempts: List[music.Track], *,
+                        previous: Optional[music.Track], force_next: bool, going_back: bool,
+                        resumed: bool, autoplayed: bool, user_queued: bool) -> None:
+    """Start the first of `attempts` that plays. Called by advance_playback under the lock."""
+    loop = asyncio.get_running_loop()
+    after = music.make_after_callback(loop, lambda: advance_playback(guild))
+    # A restored queue starts mid-track; every other advance starts at zero.
+    start_at = player.resume_position
+    player.resume_position = 0.0
+    for attempt, next_track in enumerate(attempts):
+        started = False
+        try:
+            if not await music.play_track(vc, player, next_track, after, start_at=start_at):
+                # /stop landed while the track was loading. Nothing was playing for its
+                # vc.stop() to interrupt, so no after-callback will tidy up - do it here.
+                await finish_playback(guild, player)
+                return
+            started = True
+            player.last_played = next_track
+            # Announce NOW, before any await: refresh_now_playing is a Discord edit that
+            # can take a while, and /skip, /skipto and /stop don't take the player lock -
+            # one landing in that wait would be followed by a stale "Up next, <skipped
+            # song>". A failure to speak must not be mistaken for a bad track either.
+            # A song a /play queued during the autoplay lookup is not announced: the
+            # command says "Now playing" itself.
+            if up_next_enabled and not user_queued and voicelines.should_announce_next(
+                    previous, next_track, force_next=force_next, going_back=going_back,
+                    resumed=resumed):
+                try:
+                    announce(guild, "up_next", title=next_track.title)
+                except Exception:
+                    log.exception("Could not announce the next song")
+            await refresh_now_playing(guild)
+            snapshot_player(guild.id)   # record the new track and a fresh position
+            return
+        except Exception as e:      # any failure skips this track, never the whole queue
+            logs.log_failure(f"Could not play '{next_track.title}'", e,
+                        music.lookup_errors() + DISCORD_ERRORS)
+            if autoplayed and not started:
+                # Nothing the user asked for: try the next related song from the same
+                # lookup, and finish when they are used up.
+                if attempt + 1 < len(attempts):
+                    continue
+                await finish_playback(guild, player)
+                return
+            # Skip the bad track rather than stalling the whole queue
+            player.current = None
+            music.spawn(advance_playback(guild))
+            return
+
+
 async def advance_playback(guild: discord.Guild) -> None:
     """
     Play the next track. Called when one finishes, and to kick off the first track.
     Runs under the player lock so a finishing track and a new /play can't race.
+
+    Autoplay's Mix lookup is the one slow step that does NOT hold the lock: the first locked
+    stretch decides it applies and marks the player (`autoplay_lookup`), the lock is released
+    for the lookup, and a second locked stretch re-checks everything. Any other advance that
+    gets the lock meanwhile (a /play, a /previous) supersedes the marker and wins; the lookup
+    then finds its marker gone and does nothing. See ARCHITECTURE.md, "Autoplay".
     """
     player = music_manager.player_for(guild.id)
     async with player.lock:
@@ -1360,6 +1421,10 @@ async def advance_playback(guild: discord.Guild) -> None:
         if music.music_active(vc, player):
             return
 
+        # This advance takes over from an autoplay lookup still in flight, if any. What it
+        # then plays was asked for by a command that speaks for itself, so no "Up next".
+        took_over = player.supersede_autoplay_lookup()
+
         # A user-requested skip overrides TRACK loop for this one advance; a /previous has
         # already arranged the queue. Both are one-shot.
         force_next, going_back = player.skip_requested, player.back_requested
@@ -1371,64 +1436,59 @@ async def advance_playback(guild: discord.Guild) -> None:
             player.current, player.queue, player.history, player.loop_mode,
             force_next=force_next, going_back=going_back,
         )
-        attempts = [next_track] if next_track is not None else []
-        autoplayed = user_queued = False
-        if next_track is None:
-            # Only a song that ended on its own: /stop, /leave and the Stop button clear
-            # `current`, so `previous` is None and autoplay stays out of it.
-            attempts, user_queued = await autoplay_pick(
-                guild, vc, player, previous, force_next=force_next, going_back=going_back,
-                played=played)
-            autoplayed = bool(attempts) and not user_queued
-        if not attempts:
+        if next_track is not None:
+            await play_attempts(guild, vc, player, [next_track], previous=previous,
+                                force_next=force_next, going_back=going_back,
+                                resumed=resumed, autoplayed=False, user_queued=took_over)
+            return
+        # Autoplay follows only a song that ended on its own: /stop, /leave and the Stop
+        # button clear `current`, so `previous` is None and it stays out of it.
+        if previous is None or not autoplay_applies(
+                vc, player, previous, force_next=force_next, going_back=going_back,
+                played=played):
             await finish_playback(guild, player)
             return
+        # `current` stays the ended track while the lock is free: /join's start_waiting_queue
+        # and stop_all's history rule both rely on that.
+        token = player.begin_autoplay_lookup()
+        generation = player.generation
 
-        loop = asyncio.get_running_loop()
-        after = music.make_after_callback(loop, lambda: advance_playback(guild))
-        # A restored queue starts mid-track; every other advance starts at zero.
-        start_at = player.resume_position
-        player.resume_position = 0.0
-        for attempt, next_track in enumerate(attempts):
-            started = False
-            try:
-                if not await music.play_track(vc, player, next_track, after, start_at=start_at):
-                    # /stop landed while the track was loading. Nothing was playing for its
-                    # vc.stop() to interrupt, so no after-callback will tidy up - do it here.
-                    await finish_playback(guild, player)
-                    return
-                started = True
-                player.last_played = next_track
-                # Announce NOW, before any await: refresh_now_playing is a Discord edit that
-                # can take a while, and /skip, /skipto and /stop don't take the player lock -
-                # one landing in that wait would be followed by a stale "Up next, <skipped
-                # song>". A failure to speak must not be mistaken for a bad track either.
-                # A song a /play queued during the autoplay lookup is not announced: the
-                # command says "Now playing" itself.
-                if up_next_enabled and not user_queued and voicelines.should_announce_next(
-                        previous, next_track, force_next=force_next, going_back=going_back,
-                        resumed=resumed):
-                    try:
-                        announce(guild, "up_next", title=next_track.title)
-                    except Exception:
-                        log.exception("Could not announce the next song")
-                await refresh_now_playing(guild)
-                snapshot_player(guild.id)   # record the new track and a fresh position
+    # The lock is free here, so /play, /seek, /filter and /previous are not held up.
+    try:
+        candidates = await autoplay_candidates(previous)
+        async with player.lock:
+            if player.autoplay_lookup is not token:
+                log.info("Autoplay: another advance took over during the lookup")
                 return
-            except Exception as e:      # any failure skips this track, never the whole queue
-                logs.log_failure(f"Could not play '{next_track.title}'", e,
-                            music.lookup_errors() + DISCORD_ERRORS)
-                if autoplayed and not started:
-                    # Nothing the user asked for: try the next related song from the same
-                    # lookup, and finish when they are used up.
-                    if attempt + 1 < len(attempts):
-                        continue
-                    await finish_playback(guild, player)
-                    return
-                # Skip the bad track rather than stalling the whole queue
-                player.current = None
-                music.spawn(advance_playback(guild))
+            player.autoplay_lookup = None
+            vc = voice.get_voice_client(guild)
+            if vc is None or not vc.is_connected():
+                # Kicked or disconnected meanwhile: close the live card and forget the
+                # saved queue, then wipe the player (as the top of this function does).
+                await finish_playback(guild, player)
+                player.reset()
+                db.clear_player_state(guild.id)
                 return
+            if player.generation != generation:
+                log.info("Autoplay: playback was stopped while looking for a song")
+                await finish_playback(guild, player)
+                return
+            if music.music_active(vc, player):
+                return
+            # /autoplay off during the lookup cancels the pick; a queued song still plays.
+            attempts, user_queued = autoplay_choice(
+                player, previous, candidates if autoplay_enabled else [])
+            if not attempts:
+                await finish_playback(guild, player)
+                return
+            await play_attempts(guild, vc, player, attempts, previous=previous,
+                                force_next=force_next, going_back=going_back,
+                                resumed=resumed, autoplayed=not user_queued,
+                                user_queued=user_queued)
+    except asyncio.CancelledError:      # shutting down: don't leave the marker set
+        if player.autoplay_lookup is token:
+            player.autoplay_lookup = None
+        raise
 
 
 async def idle_disconnect(guild: discord.Guild) -> None:
@@ -2014,6 +2074,8 @@ def go_back(guild: discord.Guild) -> Tuple[bool, str]:
     rebuilding the stream. In that window nothing is audible and `current` still names the
     track just left, so going back used to queue the previous song behind the one already
     loading (or behind an endless TRACK-loop repeat) while replying that it had gone back.
+    NOT refused during autoplay's Mix lookup (the lock is free then): nothing is playing, so
+    it goes back to the song that just ended, and that advance supersedes the lookup.
 
     Never waits on the stream: while something plays, vc.stop() hands over to the
     after-callback; when nothing does, the advance runs in the background, since resolving
