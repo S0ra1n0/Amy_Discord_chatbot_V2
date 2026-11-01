@@ -51,24 +51,28 @@ Simply message Amy naturally — she maintains conversation context and responds
 | `/create [name]`         | Create a new voice channel and have Amy join it (e.g., `/create Music Room`) | Admin only |
 | `/play [query]`          | Queue a track — song name, YouTube/audio URL, or local file path          | In-channel |
 | `/search [song]`         | Show the top 5 matches and pick one from a menu                           | In-channel |
-| `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel |
+| `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel (DJ if a role is set) |
 | `/skip`                  | Skip the current track                                                    | In-channel |
-| `/previous`               | Go back to the previous track                                             | In-channel |
+| `/previous`               | Go back to the previous track                                             | In-channel (DJ if a role is set) |
 | `/shush`                  | Stop Amy talking mid-sentence (the music carries on)                      | In-channel |
-| `/seek [position]`       | Jump to a spot in the current track (`1:30`, `1:02:03` or `90`)           | In-channel |
-| `/replay`                | Restart the current track from the beginning                              | In-channel |
-| `/stop`                  | Stop playback and clear the queue (Amy stays in the channel)              | In-channel or admin |
+| `/seek [position]`       | Jump to a spot in the current track (`1:30`, `1:02:03` or `90`)           | In-channel (DJ if a role is set) |
+| `/replay`                | Restart the current track from the beginning                              | In-channel (DJ if a role is set) |
+| `/stop`                  | Stop playback and clear the queue (Amy stays in the channel)              | In-channel (DJ if a role is set) or admin |
 | `/queue [page]`          | Show what's playing and what's queued, 10 per page                        | Everyone   |
-| `/remove [position]`     | Remove a queued track (your own; admins can remove any)                   | In-channel |
-| `/skipto [position]`     | Jump ahead to a queued track, dropping the ones before it                 | In-channel |
-| `/shuffle`               | Shuffle the queued tracks (current track keeps playing)                   | In-channel |
+| `/remove [position]`     | Remove a queued track (your own; admins can remove any, and so can DJs once a DJ role is set) | In-channel |
+| `/skipto [position]`     | Jump ahead to a queued track, dropping the ones before it                 | In-channel (DJ if a role is set) |
+| `/shuffle`               | Shuffle the queued tracks (current track keeps playing)                   | In-channel (DJ if a role is set) |
 | `/clearqueue`            | Empty the queue without stopping the current track                        | Admin only |
 | `/nowplaying`            | Show the current track                                                    | Everyone   |
 | `/lyrics [song]`         | Show lyrics for the current track, or search for `artist - title`         | Everyone   |
-| `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel |
-| `/autoplay [on\|off]` | Keep playing related songs when the queue ends (per server, remembered; no argument shows this server's setting) | In-channel |
-| `/filter [off\|bass boost\|nightcore\|slowed]` | Change how the music sounds (no argument shows it); see [Audio filters](#audio-filters) | In-channel |
+| `/loop [off\|track\|queue]` | Set repeat mode                                                        | In-channel (DJ if a role is set) |
+| `/autoplay [on\|off]` | Keep playing related songs when the queue ends (per server, remembered; no argument shows this server's setting) | In-channel (DJ if a role is set) |
+| `/filter [off\|bass boost\|nightcore\|slowed]` | Change how the music sounds (no argument shows it); see [Audio filters](#audio-filters) | In-channel (DJ if a role is set) |
 | `/volume [0-100]`        | Show or set playback volume                                               | Admin only |
+| `/dj [show\|role\|clear\|votes] [role] [share]` | This server's DJ role and skip-vote share (`show` lists them and who is a DJ now); see [DJ role](#dj-role) | Admin only |
+
+"In-channel" means you are in Amy's voice channel. With a DJ role set, the shared-playback
+commands narrow to DJs - see [DJ role](#dj-role) for the full table.
 
 ### Web search
 
@@ -394,8 +398,11 @@ whose saved row can't be read is skipped individually rather than failing the wh
 
 The now-playing card carries four buttons — **Previous**, **Pause/Resume**, **Skip** and **Stop**. **Previous** (and `/previous`) plays the last track again and puts the interrupted one straight after it; repeating it walks further back, up to 20 tracks. History is kept in memory, so a restart clears it. For the second or two while the next track is loading, Previous asks you to try again a moment later instead of guessing: going back mid-load used to queue the previous song behind the one already loading.
 
-They follow exactly the same permission rule as the equivalent commands: you must be in Amy's
-voice channel, or be an admin. Pressing one without permission gets a private (ephemeral)
+They follow exactly the same permission rule as the equivalent commands (each button runs its
+command's own code, including the [DJ role](#dj-role) check): you must be in Amy's voice
+channel, or be an admin. With a [DJ role](#dj-role) set, Previous, Pause/Resume and Stop also
+need DJ; Skip follows the skip rule there, and Shush stays open to everyone in the call. Pressing
+one without permission gets a private (ephemeral)
 refusal that nobody else sees, so a button is never a way around a command's check.
 
 Pause/Resume, Skip and Stop now run the very same code as `/pause` `/resume`, `/skip` and `/stop`
@@ -411,6 +418,54 @@ before this update still work: their songs are matched by name, as they always w
 The buttons are *persistent*: they have no expiry and keep working after Amy restarts. A
 default Discord component set expires after three minutes, which would leave dead buttons
 partway through a song.
+
+### DJ role
+
+By default nothing changes: everyone in Amy's voice channel can use every music control, as
+before. An admin can make playback shared and orderly by naming a **DJ role** with
+`/dj action:role role:@DJ` (stored by the role's id, so renaming it is safe; `/dj action:clear`
+removes it; `/dj action:show` lists the role, the skip-vote share and who is a DJ right now,
+privately). If the saved role is later deleted in Discord, it counts as no role and `show` says so.
+
+To set it up:
+
+1. Create the role in Discord first (Server Settings > Roles) and give it to the people you
+   trust. `/dj action:role` only picks an existing role. `@everyone` is refused, and so is a
+   role that belongs to a bot or integration (nobody can be given those by hand).
+2. Run `/dj action:role role:@DJ`, then `/dj action:show` to check who counts as a DJ now.
+3. `/dj action:clear` undoes it. You, as an admin, are always a DJ, and `/dj` is admin-only.
+
+Amy reads who holds the role through the Server Members Intent, which she already needs
+([Step 5](#step-5-enable-the-server-members-intent-required)); without it the check cannot work.
+She does not need the Manage Roles permission, because she never changes anyone's roles.
+`/dj action:show` replies with three lines: the role (or "none"), the skip-vote share, and the
+DJs in Amy's channel now (up to 15 names, then "and N more"; "I'm not in a voice channel." when
+she is not in a call).
+
+Everyone gets one of four levels, highest first:
+
+| Level | Who |
+|---|---|
+| Admin | server owner, Administrator, or the `ADMIN_ROLE_NAME` role - always a DJ, even outside the call |
+| DJ | in Amy's channel and holds the DJ role, **or is the only person in the call**; with no DJ role set, everyone in the call |
+| Listener | in Amy's channel, not a DJ |
+| Outsider | not in Amy's channel |
+
+| Control | With a DJ role set | With no DJ role (default) |
+|---|---|---|
+| `/stop`, `/skipto`, `/previous`, `/seek`, `/replay`, `/loop`, `/shuffle`, `/pause`, `/resume`, `/filter <preset>`, `/autoplay on/off`, removing someone else's song, and the Stop / Previous / Pause buttons | DJ (or admin) | anyone in the call, except removing someone else's song, which stays admin-only |
+| `/skip` and the Skip button | DJ, admin, whoever queued the song, or someone alone with Amy; a listener skipping someone else's song is told "Only a DJ can skip someone else's song." | anyone in the call (as before) |
+| `/play`, the `/search` menu, `/remove` on your own song, `/shush` and the Shush button | anyone in the call | anyone in the call |
+| `/queue`, `/nowplaying`, `/lyrics`, `/filter` and `/autoplay` with no argument | everyone | everyone |
+| `/volume`, `/clearqueue`, `/dj`, `/say`, `/voice`, ... | admin only (unchanged) | admin only |
+| `/join`, `/leave` | unchanged | unchanged |
+
+A refused click or command gets a private reply, whether or not a DJ role is set (a person outside the call is refused privately too, so the channel stays quiet): "Only a DJ can do that (you need the **Name**
+role)." The role is named, never pinged. A refusal for a deferred command (`/play`, `/seek`,
+`/replay`, `/filter`) first removes the public "thinking" message so the reply stays private.
+`/dj action:votes share:half|majority|two-thirds` stores how much of the call must vote to skip
+(default `half`); skip voting itself is not built yet, so the setting only waits for it.
+Both settings are per server and survive a restart.
 
 Amy keeps **one** now-playing card per server and edits it in place as tracks change, rather
 than posting a new message for every track in a long queue. `/nowplaying` always posts a
@@ -726,7 +781,7 @@ python tests/run_tests.py             # offline suites only (~27s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-31 suites (23 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+32 suites (24 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README, or if the suite counts stated here drift from `tests/run_tests.py`.
 Line endings: the repo is LF everywhere (`.gitattributes`: `* text=auto eol=lf`), so commits carry no "LF will be replaced by CRLF" warnings; editors on Windows should keep LF.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
@@ -735,6 +790,13 @@ which is exactly what CI does: every push and pull request runs the offline suit
 since they need YouTube, Ollama and a real bot token. A suite whose dependency is missing — Ollama not running, say — is reported as **SKIPPED**, never as passed. See [tests/README.md](tests/README.md).
 
 ## Troubleshooting
+
+**"Only a DJ can do that":**
+
+A DJ role is set on this server and you don't hold it. Ask an admin to give you the role, or to
+run `/dj action:clear`. If the saved role was deleted in Discord, `/dj action:show` says so and
+everyone in the call is a DJ again. If a role is given but nothing changes, check that the
+Server Members Intent is on (Step 5).
 
 **Amy replies "I ran out of room before I could finish that answer":**
 

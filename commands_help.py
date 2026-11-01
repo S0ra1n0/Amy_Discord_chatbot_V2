@@ -29,7 +29,8 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/lyrics [song]` - Lyrics for the current track, or search one
 `/loop [off|track|queue]` - Set repeat mode
 `/autoplay [on|off]` - Play related songs when the queue ends
-`/filter [preset]` - Bass boost, nightcore, slowed or off"""
+`/filter [preset]` - Bass boost, nightcore, slowed or off
+(With a DJ role set, only DJs can pause, stop, seek, loop, shuffle, filter, autoplay and skip other people's songs; whoever queued a song, or someone alone with me, can still skip it; anyone in the call can /play, /search and /shush.)"""
 
 HELP_ADMIN = """
 **Commands — Admin only:**
@@ -40,6 +41,7 @@ HELP_ADMIN = """
 `/status` - Show bot, Ollama, voice and memory status
 `/model [name]` - Show or switch the model (remembered)
 `/create [name]` - Create a voice channel and join it
+`/dj [show|role|clear|votes] [role] [share]` - This server's DJ role and skip-vote share
 `/volume [0-100]` - Show or set playback volume
 `/clearqueue` - Empty the queue (current track keeps playing)"""
 

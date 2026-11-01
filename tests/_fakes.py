@@ -244,6 +244,7 @@ class Followup:
 
     async def send(self, content=None, *, embed=None, view=None, ephemeral=False, wait=False):
         m = SentMessage(content, embed, view)
+        m.kind, m.ephemeral = "followup", ephemeral
         self._owner.sent.append(m)
         return m if wait else None
 
@@ -282,6 +283,13 @@ class Interaction:
         self.sent = []
         self.response = Response(self)
         self.followup = Followup(self)
+        self.deleted_original = 0        # delete_original_response calls
+        self.delete_raises = None        # an exception instance to raise from it
+
+    async def delete_original_response(self):
+        self.deleted_original += 1
+        if self.delete_raises is not None:
+            raise self.delete_raises
 
 
 def text_of(result, interaction=None):

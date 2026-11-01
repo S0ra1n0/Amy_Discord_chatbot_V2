@@ -31,6 +31,7 @@ OFFLINE = [
     "test_queue_cmds.py",
     "test_autoplay.py",
     "test_filters.py",
+    "test_access.py",
     "test_voice_cmds.py",
     "test_regression.py",
     "test_security.py",

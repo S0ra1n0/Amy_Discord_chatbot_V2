@@ -74,6 +74,8 @@ class Reply:
     # A refusal or failure (`_error`). A player button, which answers a success by updating the
     # card, answers one of these with an ephemeral message instead.
     error: bool = False
+    # Show it only to the person who ran the command (a permission refusal, `_refusal`).
+    private: bool = False
 
 
 #----Embed Builders------

@@ -17,6 +17,7 @@ one guards against.
 | `ui.py` | Embeds, progress bar, the `Reply` wrapper | discord |
 | `websearch.py` | DuckDuckGo search, page fetching, the `web_search` tool definition | httpx |
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
+| `access.py` | Who may do what with the music: the `Level` enum, `access_level`, the one `ACTIONS` table, `allowed` and `skip_decision` | **nothing external** |
 | `markup.py` | `escape_markdown`: makes stranger-controlled text (titles, lyrics) render literally in Discord | **nothing external** |
 | `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
@@ -270,7 +271,11 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   word counts as unset. The bot reads it with `autoplay_on(guild_id)` / `up_next_on(guild_id)`
   (`ConversationDB.guild_bool`, cached per `(guild, key, default)` and dropped when either level
   is written, so a track advance doesn't query SQLite). **Never** keep a per-server setting in a
-  module global. The planned DJ role and vote share (DJ_PLAN.md) are meant to live in `guild_settings` too.
+  module global. The DJ role and vote share live in `guild_settings` too (`config.DJ_ROLE_KEY`,
+  `config.VOTE_SHARE_KEY`; no bot-wide row, unset = no role / `half`). They are strings, which the
+  flag cache doesn't hold, so `vote_share` and `saved_dj_role` read SQLite directly: once per
+  control click, never per track advance. The role is stored by id; `dj_role_id` treats an id
+  the guild no longer has (or junk) as unset, so a deleted role can never lock anyone out.
 
 ## Database
 
@@ -419,13 +424,29 @@ whole truth table is then tested offline. Try this before writing "needs manual 
 - **`MusicContext`** resolves the player, voice client and member once per call.
   `ctx.connected()` returns the voice client only if it's actually connected, typed so the
   checker narrows it. Commands that need a connection check that first, then permission.
-- **There is one playback-permission rule**, `may_control_playback`: in Amy's channel, or an
-  admin. Commands use it through `ctx.may_control()` and the player buttons call it directly,
-  so a button can't bypass a command's check or the other way round. Everything that asks it
-  uses it, rather than copying it: `/leave` (`voice_leave`) and the `/search` picker too (the
-  picker, when Amy is connected, refuses a user outside her channel with `/play`'s wording;
-  she may only be absent from that check while she is not yet connected, where the picker joins
-  the user's own channel like `/play`).
+- **Every music control asks `access.py`** (the one place for "who may do what"). The levels,
+  highest first: Admin (owner / Administrator / `ADMIN_ROLE_NAME`, even outside the call), DJ
+  (in Amy's channel and holds the server's DJ role, or alone with her; with NO DJ role set,
+  everyone in the call), Listener (in the channel, not a DJ), Outsider. `ACTIONS` maps every
+  control to the lowest level that may do it: DJ-only is shared playback (stop, skip without a
+  vote, skipto, previous, seek, replay, filter, loop, shuffle, pause/resume, autoplay on/off,
+  removing someone else's song); Listener is play, the `/search` pick, skipping or removing your
+  own song, shush; looking (queue, nowplaying, lyrics, the status forms of filter/autoplay) is
+  open to all. `member_level(guild, user_id)` gathers the facts (the bot's side) and
+  `MusicContext.refusal(action, outsider_text)` / `access_refusal` turn a "no" into the words:
+  the command's own "You need to be in my voice channel ..." for an outsider, "Only a DJ can do
+  that (you need the **Role** role)." for a listener - the role is named (escaped), never pinged,
+  and the refusal is `Reply(private=True)`, which `send_reply` shows ephemerally (for a deferred
+  command it first deletes the public "thinking" message). A new control gets an `ACTIONS` entry
+  and a `refusal` call in its handler, or `tests/test_access.py` fails (it walks every
+  `music_*` handler and spies on `access.allowed`). `ADMIN_WITHOUT_ROLE` keeps today's rule where
+  it was stricter than "everyone in the call": with no DJ role, only an admin removes somebody
+  else's song. `/volume` and `/clearqueue` stay `is_admin()` checks. Skipping goes through
+  `skip_decision` instead (admin; outsider never; no DJ role: anyone in the call, for now; with
+  one: a DJ, the requester or someone alone) - a later phase adds the vote there.
+  `may_control_playback` ("in Amy's channel, or an admin") remains only for `/leave`
+  (`voice_leave`), which keeps its own rule; the `/search` picker asks `search_pick` and, while
+  Amy is not yet connected, joins the user's own channel like `/play`.
 - **Buttons go through the command handlers.** The player buttons build a `MusicContext` from
   the click and call `music_skip`, `music_stop` and `music_pause`/`music_resume`; they do not
   re-implement them (the Stop button once skipped the queue snapshot). A refusal comes back as
@@ -434,8 +455,9 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `music_pause`/`music_resume`, so the card is edited once, by the click response (a second
   REST edit through `refresh_now_playing` could miss the 3-second window). The `/search`
   picker's "not in my channel" refusal is ephemeral and leaves the shared menu in place. A rule added to a command therefore applies to its
-  button. `interaction_check` stays as a first gate. `Previous` shares `go_back`, `Shush`
-  shares `shush`.
+  button. `PlayerControls` has no blanket `interaction_check` (a listener may click Shush but not
+  Pause when a DJ role is set): `Previous` calls `music_previous`, which shares `go_back`; `Shush`
+  asks the same `shush` action as `/shush` before `shush`.
 - Fast commands go through `simple_music(interaction, handler, *args)`; read-only ones pass
   `cooldown=False`. Slow ones (`/play`, `/search`, `/seek`, `/replay`) gate, defer, then call
   their handler themselves - `test_slash.py` reads each callback's source for the defer.

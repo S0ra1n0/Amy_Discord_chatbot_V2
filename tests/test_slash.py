@@ -71,7 +71,8 @@ for cmd, param, lo, hi in [
 
 print()
 print("=== admin gating ===")
-ADMIN = {"create", "clearqueue", "volume", "toggle", "status", "model", "forget", "say", "voice"}
+ADMIN = {"create", "clearqueue", "volume", "toggle", "status", "model", "forget", "say", "voice",
+         "dj"}
 for c in commands:
     has_check = bool(getattr(c, "checks", []))
     if c.name in ADMIN:
@@ -94,7 +95,8 @@ print()
 print("=== guild-only where a guild is required ===")
 GUILD_ONLY = {"join", "leave", "create", "play", "search", "pause", "resume", "skip",
               "stop", "queue", "nowplaying", "remove", "skipto", "shuffle", "loop",
-              "clearqueue", "volume", "forget", "seek", "replay", "previous", "say", "shush", "autoplay", "filter"}
+              "clearqueue", "volume", "forget", "seek", "replay", "previous", "say", "shush", "autoplay", "filter",
+              "dj"}
 for name in sorted(GUILD_ONLY):
     c = by_name[name]
     allowed = getattr(c, "allowed_contexts", None)

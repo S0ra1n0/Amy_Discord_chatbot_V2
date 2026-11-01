@@ -24,6 +24,8 @@ from commands_help import help_pages
 from database import (DEFAULT_MAX_MESSAGES, MIN_MAX_MESSAGES, ConversationDB,
                       SchemaTooNewError)
 import config
+import access
+from access import Level
 import voice
 from voice import DISCORD_ERRORS, VOICE_ERRORS, VoiceManager
 import music
@@ -353,8 +355,18 @@ async def send_reply(interaction: discord.Interaction, result,
             kwargs["embed"] = result.embed
         if result.view is not None:
             kwargs["view"] = result.view
-        if ephemeral:
+        if ephemeral or result.private:
             kwargs["ephemeral"] = True
+        if result.private and interaction.response.is_done():
+            # A deferred command's first follow-up takes over the PUBLIC "thinking" message and
+            # its visibility, so a private refusal would show to everyone. Drop that message
+            # first; the follow-up is then a new, truly ephemeral one. This assumes the original
+            # response is still that deferred "thinking" message: a handler must never return a
+            # private refusal after sending its own first follow-up (it would delete that).
+            try:
+                await interaction.delete_original_response()
+            except discord.HTTPException:
+                pass    # best effort (NotFound is one): the refusal is still sent below
         if interaction.response.is_done():
             await interaction.followup.send(**kwargs)
         else:
@@ -989,14 +1001,19 @@ NEXT: str = "⏭"           # next track
 #----Player Buttons------
 def may_control_playback(guild: Optional[discord.Guild], user_id: int) -> bool:
     """
-    The one playback-permission rule: you must be in Amy's voice channel, or be an admin.
-    Used by both the music commands (MusicContext.may_control) and the player buttons, so
-    neither can become a way around the other.
+    "In Amy's voice channel, or an admin": what /leave asks. The music controls use the
+    finer access levels instead (member_level / access.py), which reduce to this same rule
+    when the server has no DJ role.
     """
     if guild is None:
         return False
     if is_admin_member(guild, user_id):
         return True
+    return in_amys_channel(guild, user_id)
+
+
+def in_amys_channel(guild: discord.Guild, user_id: int) -> bool:
+    """Whether this user is in the voice channel Amy is connected to."""
     current = voice.active_channel(voice.get_voice_client(guild))
     if current is None:
         return False
@@ -1005,6 +1022,77 @@ def may_control_playback(guild: Optional[discord.Guild], user_id: int) -> bool:
         member and member.voice and member.voice.channel
         and member.voice.channel.id == current.id
     )
+
+
+#----DJ role and access levels------
+# The DJ role and the vote share are PER SERVER (`guild_settings`, keys in config.py). They are
+# read straight from SQLite on every use rather than through the cached flag lookup: that cache
+# holds booleans, and these are read once per control click, never per track advance.
+def vote_share(guild_id: int) -> str:
+    """The server's skip-vote share: half (the default), majority or two-thirds."""
+    return config.parse_vote_share(db.get_guild_setting(guild_id, config.VOTE_SHARE_KEY))
+
+
+def saved_dj_role(guild: discord.Guild) -> Tuple[Optional[int], bool]:
+    """(the saved DJ role id or None, whether that role still exists in the server)."""
+    saved = config.parse_role_id(db.get_guild_setting(guild.id, config.DJ_ROLE_KEY))
+    if saved is None:
+        return None, False
+    return saved, guild.get_role(saved) is not None
+
+
+def dj_role_id(guild: discord.Guild) -> Optional[int]:
+    """The DJ role in force: the saved one, unless it was deleted (then there is none)."""
+    saved, exists = saved_dj_role(guild)
+    return saved if exists else None
+
+
+def alone_with_amy(guild: discord.Guild, user_id: int) -> bool:
+    """In Amy's channel and the only person (not a bot) there."""
+    if not in_amys_channel(guild, user_id):
+        return False
+    current = voice.active_channel(voice.get_voice_client(guild))
+    return current is not None and voice.humans_in(current) == 1
+
+
+def member_level(guild: discord.Guild, user_id: int) -> Level:
+    """
+    The access level of a user right now (access.py has the rules; this gathers the facts).
+    Every music command and player button decides through it, so none can skip the check.
+    """
+    role_id = dj_role_id(guild)
+    member = guild.get_member(user_id)
+    in_channel = in_amys_channel(guild, user_id)
+    has_role = bool(role_id is not None and member is not None
+                    and any(r.id == role_id for r in member.roles))
+    return access.access_level(is_admin_member(guild, user_id), in_channel,
+                               role_id is not None, has_role, alone_with_amy(guild, user_id))
+
+
+def dj_only_text(guild: discord.Guild) -> str:
+    """Refusal for a listener. Names the DJ role (escaped); never pings it."""
+    role = guild.get_role(dj_role_id(guild) or 0)
+    suffix = f" (you need the **{markup.escape_markdown(role.name)}** role)" if role else ""
+    return f"Only a DJ can do that{suffix}."
+
+
+def access_refusal(guild: discord.Guild, user_id: int, action: str,
+                   outsider_text: str) -> Optional[str]:
+    """
+    None when the user may do `action`; otherwise the words to refuse with - `outsider_text`
+    for someone outside Amy's channel (each command keeps its own wording), the DJ line for
+    a listener.
+    """
+    level = member_level(guild, user_id)
+    role_set = dj_role_id(guild) is not None
+    if access.allowed(level, action, role_set):
+        return None
+    if level < Level.LISTENER:
+        return outsider_text
+    if access.required_level(action, role_set) >= Level.ADMIN:
+        return ADMIN_ONLY_MSG       # a DJ role can't help: only an admin may
+    return dj_only_text(guild)
+#----------------------------------------------
 
 
 class PlayerControls(discord.ui.View):
@@ -1027,25 +1115,20 @@ class PlayerControls(discord.ui.View):
         if speaker is None:
             self.remove_item(self.shush_button)
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if may_control_playback(interaction.guild, interaction.user.id):
-            return True
-        await interaction.response.send_message(
-            embed=ui.error_embed("You need to be in my voice channel (or an admin) to use these."),
-            ephemeral=True,
-        )
-        return False
+    # No blanket interaction_check: each button runs the command's own handler, which asks
+    # access.py for ITS action (a listener may Shush but not Pause, with a DJ role set).
 
     @discord.ui.button(label="Previous", emoji="⏮", style=discord.ButtonStyle.secondary,
                        custom_id="amy:previous")
     async def previous_button(self, interaction: discord.Interaction,
                               button: discord.ui.Button) -> None:
-        if interaction.guild is None:
+        guild = interaction.guild
+        if guild is None:
             return
-        went_back, message = go_back(interaction.guild)
-        if not went_back:
-            await interaction.response.send_message(embed=ui.error_embed(message),
-                                                    ephemeral=True)
+        # The same handler as /previous (permission, then go_back)
+        result = await music_previous(MusicContext.build(interaction, guild))
+        if isinstance(result, Reply) and result.error:
+            await send_reply(interaction, result, ephemeral=True)
             return
         await interaction.response.defer()   # the now-playing card updates itself
 
@@ -1112,7 +1195,14 @@ class PlayerControls(discord.ui.View):
                        custom_id="amy:shush")
     async def shush_button(self, interaction: discord.Interaction,
                            button: discord.ui.Button) -> None:
-        if interaction.guild is None or not shush(interaction.guild):
+        guild = interaction.guild
+        if guild is None:
+            return
+        refused = MusicContext.build(interaction, guild).refusal("shush", SHUSH_OUTSIDER)
+        if refused is not None:       # the same check as /shush (music_shush)
+            await send_reply(interaction, refused, ephemeral=True)
+            return
+        if not shush(guild):
             await interaction.response.send_message(
                 embed=ui.info_embed("I'm not saying anything right now."), ephemeral=True)
             return
@@ -1212,13 +1302,14 @@ class SearchResults(discord.ui.View):
                 await interaction.response.edit_message(
                     embed=ui.error_embed("I couldn't join your voice channel."), view=None)
                 return
-        elif not may_control_playback(guild, interaction.user.id):
+        else:
             # Same rule and wording as /play: queueing needs you in Amy's channel (or admin)
             # Private to the clicker: the shared results and menu stay, so they can join and retry
-            await interaction.response.send_message(
-                embed=ui.error_embed("You need to be in my voice channel to queue tracks."),
-                ephemeral=True)
-            return
+            refusal = access_refusal(guild, interaction.user.id, "search_pick", PLAY_OUTSIDER)
+            if refusal is not None:
+                await interaction.response.send_message(
+                    embed=ui.error_embed(refusal), ephemeral=True)
+                return
 
         player.text_channel_id = interaction.channel_id
         player.queue.append(track)
@@ -1762,12 +1853,19 @@ async def say_goodbye(guild: discord.Guild) -> None:
 
 NOT_CONNECTED = "I'm not in a voice channel."
 NOT_WITH_AMY = "You need to be in my voice channel to do that."
+PLAY_OUTSIDER = "You need to be in my voice channel to queue tracks."
+SHUSH_OUTSIDER = "You need to be in my voice channel to do that."
 ADMIN_ONLY_MSG = "You don't have permission to use this command. (Admin only)"
 MusicResult = Union[str, Reply]
 
 
 def _error(text: str) -> Reply:
     return Reply(embed=ui.error_embed(text), error=True)
+
+
+def _refusal(text: str) -> Reply:
+    """A permission refusal: an error shown only to whoever asked."""
+    return Reply(embed=ui.error_embed(text), error=True, private=True)
 
 
 def _info(text: str) -> Reply:
@@ -1795,9 +1893,14 @@ class MusicContext:
     def is_admin(self) -> bool:
         return is_admin_member(self.guild, self.user_id)
 
-    def may_control(self) -> bool:
-        # The same rule the player buttons use, so neither can become a way around the other.
-        return may_control_playback(self.guild, self.user_id)
+    def refusal(self, action: str, outsider_text: str = NOT_WITH_AMY) -> Optional[Reply]:
+        """
+        None when this user may do `action` (a name in access.ACTIONS); otherwise the private
+        refusal to return. The one gate every music control goes through - the player buttons
+        reach it by calling the command handlers.
+        """
+        text = access_refusal(self.guild, self.user_id, action, outsider_text)
+        return None if text is None else _refusal(text)
 
     def connected(self) -> Optional[discord.VoiceClient]:
         """The voice client if Amy is connected, else None - narrows for the type checker."""
@@ -1807,11 +1910,17 @@ class MusicContext:
 # --- read-only, no connection needed ---
 
 async def music_queue(ctx: MusicContext, page: int = 1) -> MusicResult:
+    refused = ctx.refusal("queue_view")     # open to everyone; asked so the table stays the truth
+    if refused is not None:
+        return refused
     p = ctx.player
     return Reply(embed=ui.queue_embed(p.current, p.queue, p.loop_mode, page=page))
 
 
 async def music_nowplaying(ctx: MusicContext) -> MusicResult:
+    refused = ctx.refusal("nowplaying")
+    if refused is not None:
+        return refused
     p = ctx.player
     if p.current is None:
         return _info("Nothing is playing right now.")
@@ -1833,6 +1942,9 @@ async def music_lyrics(ctx: MusicContext, song: str = "") -> MusicResult:
     command defers first. Public like /queue; never spoken. Sends the pages itself (one
     embed per message: Discord caps a message's embeds at 6000 characters in total).
     """
+    refused = ctx.refusal("lyrics")
+    if refused is not None:
+        return refused
     song = song.strip()
     duration: Optional[float] = None
     asked = song
@@ -1940,8 +2052,10 @@ async def music_play(ctx: MusicContext, query: str) -> MusicResult:
         except Exception as e:  # command boundary: the user always gets an answer
             logs.log_failure("Voice connect failed", e, DISCORD_ERRORS)
             return _error("I couldn't join your voice channel. Please try again.")
-    elif not ctx.may_control():
-        return _error("You need to be in my voice channel to queue tracks.")
+    else:
+        refused = ctx.refusal("play", PLAY_OUTSIDER)
+        if refused is not None:
+            return refused
 
     # advance_playback has no message context, so remember where to post the card
     player.text_channel_id = ctx.interaction.channel_id
@@ -2025,8 +2139,9 @@ async def music_pause(ctx: MusicContext, refresh: bool = True) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("pause")
+    if refused is not None:
+        return refused
     if not music.pause_music(vc, ctx.player):
         return _error("Nothing is playing.")
     announce(ctx.guild, "pause")
@@ -2039,8 +2154,9 @@ async def music_resume(ctx: MusicContext, refresh: bool = True) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("resume")
+    if refused is not None:
+        return refused
     if not music.resume_music(vc, ctx.player):
         return _error("Nothing is paused.")
     announce(ctx.guild, "resume")
@@ -2049,12 +2165,33 @@ async def music_resume(ctx: MusicContext, refresh: bool = True) -> MusicResult:
     return _info("Resumed.")
 
 
+def skip_refusal(ctx: MusicContext) -> Optional[Reply]:
+    """
+    None when this user may skip the current song at once, else the private refusal.
+    The one skip decision (access.skip_decision), shared by /skip and the Skip button; Phase 3
+    makes a listener's skip of someone else's song a vote here.
+    """
+    guild = ctx.guild
+    level = member_level(guild, ctx.user_id)
+    current = ctx.player.current
+    mine = current is not None and music.is_requester(
+        current, ctx.user_id, str(ctx.interaction.user))
+    verdict = access.skip_decision(level, mine, alone_with_amy(guild, ctx.user_id),
+                                   dj_role_id(guild) is not None)
+    if verdict is access.SkipDecision.ALLOWED:
+        return None
+    if verdict is access.SkipDecision.NOT_IN_CALL:
+        return _refusal("You need to be in my voice channel to skip.")
+    return _refusal("Only a DJ can skip someone else's song.")
+
+
 async def music_skip(ctx: MusicContext) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error("You need to be in my voice channel to skip.")
+    refused = skip_refusal(ctx)
+    if refused is not None:
+        return refused
     if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
     player = ctx.player
@@ -2110,8 +2247,9 @@ def go_back(guild: discord.Guild) -> Tuple[bool, str]:
 async def music_previous(ctx: MusicContext) -> MusicResult:
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error("You need to be in my voice channel to go back.")
+    refused = ctx.refusal("previous", "You need to be in my voice channel to go back.")
+    if refused is not None:
+        return refused
     went_back, message = go_back(ctx.guild)
     return _info(message) if went_back else _error(message)
 
@@ -2119,8 +2257,9 @@ async def music_previous(ctx: MusicContext) -> MusicResult:
 async def music_shush(ctx: MusicContext) -> MusicResult:
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error("You need to be in my voice channel to do that.")
+    refused = ctx.refusal("shush", SHUSH_OUTSIDER)
+    if refused is not None:
+        return refused
     if not shush(ctx.guild):
         return _info("I'm not saying anything right now.")
     return _info("Okay, I'll be quiet.")
@@ -2195,8 +2334,9 @@ async def _restart_current(ctx: MusicContext, position: Optional[str]) -> MusicR
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("replay" if position is None else "seek")
+    if refused is not None:
+        return refused
     if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
     player, guild = ctx.player, ctx.guild
@@ -2236,8 +2376,9 @@ async def music_stop(ctx: MusicContext) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error("You need to be in my voice channel (or be an admin) to stop playback.")
+    refused = ctx.refusal("stop", "You need to be in my voice channel (or be an admin) to stop playback.")
+    if refused is not None:
+        return refused
     ctx.player.stop_all()       # also cancels a track that is still being prepared
     # Stop only. vc.stop() fires the after-callback, which finds an empty queue,
     # shows the finished card and starts the idle timer - so Amy still leaves on her
@@ -2277,8 +2418,9 @@ async def music_volume(ctx: MusicContext, level: Optional[int] = None) -> MusicR
 async def music_loop(ctx: MusicContext, mode: LoopMode) -> MusicResult:
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("loop")
+    if refused is not None:
+        return refused
     ctx.player.loop_mode = mode
     announce(ctx.guild, f"loop_{mode.value}")
     return _info(f"Loop set to **{mode.value}**.")
@@ -2299,15 +2441,17 @@ async def music_filter(ctx: MusicContext, preset: Optional[str] = None) -> Music
     """
     player = ctx.player
     if preset is None:
-        return _info(filter_status(player.filter_name))
+        refused = ctx.refusal("filter_status")
+        return refused if refused is not None else _info(filter_status(player.filter_name))
     name = music.normalise_filter(preset)
     if name is None:
         return _error("I don't know that filter. Choose: " + ", ".join(music.FILTER_PRESETS) + ".")
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("filter_set")
+    if refused is not None:
+        return refused
     off = name == music.FILTER_OFF
     event, later = ("filter_off", "filter_off_later") if off else ("filter", "filter_later")
     if name == player.filter_name:       # cheap early out; re-checked under the lock below
@@ -2357,11 +2501,13 @@ def autoplay_status(guild_id: int) -> str:
 async def music_autoplay(ctx: MusicContext, state: Optional[bool] = None) -> MusicResult:
     """Show autoplay, or (state given) switch it for this server - with /loop's permission rule."""
     if state is None:
-        return _info(autoplay_status(ctx.guild.id))
+        refused = ctx.refusal("autoplay_status")
+        return refused if refused is not None else _info(autoplay_status(ctx.guild.id))
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("autoplay_set")
+    if refused is not None:
+        return refused
     db.set_guild_bool(ctx.guild.id, config.AUTOPLAY_KEY, state)   # survives a restart
     log.info(f"Autoplay is now {'on' if state else 'off'} in guild {ctx.guild.id}")
     return _info(autoplay_status(ctx.guild.id))
@@ -2370,16 +2516,22 @@ async def music_autoplay(ctx: MusicContext, state: Optional[bool] = None) -> Mus
 async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("remove_own")      # in the call (or an admin) before anything else
+    if refused is not None:
+        return refused
     queue = ctx.player.queue
     target = music.peek_at(queue, position)
     if target is None:
         return _error("There's no track at position " + str(position) + ".")
-    # Users may only remove what they queued; admins may remove anything
-    if not music.is_requester(target, ctx.user_id, str(ctx.interaction.user)) and not ctx.is_admin():
-        return (DENY + " That track was queued by " + markup.escape_markdown(target.requested_by)
-                + ". You can only remove your own.")
+    # Users may only remove what they queued; admins may remove anything, and so may a DJ
+    # when the server has a DJ role (access.ADMIN_WITHOUT_ROLE keeps today's rule otherwise)
+    if not music.is_requester(target, ctx.user_id, str(ctx.interaction.user)):
+        role_set = dj_role_id(ctx.guild) is not None
+        if not access.allowed(member_level(ctx.guild, ctx.user_id), "remove_other", role_set):
+            if role_set:
+                return _refusal(dj_only_text(ctx.guild))
+            return (DENY + " That track was queued by " + markup.escape_markdown(target.requested_by)
+                    + ". You can only remove your own.")
 
     music.remove_at(queue, position)  # `target` above already proved it exists
     announce(ctx.guild, "remove", title=target.title)
@@ -2389,8 +2541,9 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
 async def music_shuffle(ctx: MusicContext) -> MusicResult:
     if ctx.connected() is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("shuffle")
+    if refused is not None:
+        return refused
     queue = ctx.player.queue
     if len(queue) < 2:
         return _error("Not enough tracks queued to shuffle.")
@@ -2417,8 +2570,9 @@ async def music_skipto(ctx: MusicContext, position: int) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    if not ctx.may_control():
-        return _error(NOT_WITH_AMY)
+    refused = ctx.refusal("skipto")
+    if refused is not None:
+        return refused
     player = ctx.player
     target = music.peek_at(player.queue, position)
     if target is None:
@@ -2964,6 +3118,93 @@ async def slash_voice(interaction: discord.Interaction,
         parts.append("I'll say what's up next in this server (when my voice is on)."
                      if up_next_enabled else "I won't announce the next song in this server.")
     await interaction.response.send_message(" ".join(parts))
+
+
+VOTE_SHARE_WORDS = {
+    "half": "at least half of the people in my voice channel",
+    "majority": "more than half of the people in my voice channel",
+    "two-thirds": "at least two thirds of the people in my voice channel",
+}
+MAX_DJ_NAMES = 15
+
+
+def dj_overview(guild: discord.Guild) -> str:
+    """The /dj show report: the role, the vote share and who is a DJ in Amy's channel now."""
+    saved, exists = saved_dj_role(guild)
+    role = guild.get_role(saved) if saved is not None and exists else None
+    if role is not None:
+        role_line = f"**{markup.escape_markdown(role.name)}** (by id, so renaming it is safe)"
+    elif saved is not None:
+        role_line = ("the saved role was deleted, so there is none for now - everyone in the "
+                     "call is a DJ until you set a new one")
+    else:
+        role_line = "none - everyone in the call is a DJ"
+    share = vote_share(guild.id)
+    current = voice.active_channel(voice.get_voice_client(guild))
+    if current is None:
+        djs = "I'm not in a voice channel."
+    else:
+        names = [markup.escape_markdown(m.display_name) for m in current.members
+                 if not m.bot and member_level(guild, m.id) >= Level.DJ]
+        shown = ", ".join(names[:MAX_DJ_NAMES]) + (
+            f" and {len(names) - MAX_DJ_NAMES} more" if len(names) > MAX_DJ_NAMES else "")
+        djs = shown if names else "nobody right now"
+    return (f"**DJ role:** {role_line}\n"
+            f"**Skip votes:** {share} ({VOTE_SHARE_WORDS[share]}; skip voting itself is not active yet)\n"
+            f"**DJs in my channel now:** {djs}")
+
+
+def dj_update(guild: discord.Guild, action: str, role: Optional[discord.Role],
+              share: Optional[str]) -> Reply:
+    """/dj role | clear | votes: store the choice for this server (show is dj_overview)."""
+    if action == "role":
+        if role is None:
+            return _error("Pick the role to use: `/dj action:role role:@Role`.")
+        if role.id == guild.id:
+            return _error("That is @everyone - pick a real role, or use `/dj action:clear` "
+                          "to let everyone in the call be a DJ.")
+        if role.is_bot_managed() or role.is_integration():
+            return _error("That role belongs to a bot or an integration, so no member can hold "
+                          "it. Pick a role people can have (the server booster role is fine).")
+        db.set_guild_setting(guild.id, config.DJ_ROLE_KEY, str(role.id))
+        log.info(f"DJ role set to {role.id} in guild {guild.id}")
+        return _info(f"The DJ role is now **{markup.escape_markdown(role.name)}**. Only members "
+                     "with it, anyone alone with me, and admins can control playback; everyone "
+                     "in the call can still queue songs and skip their own.")
+    if action == "clear":
+        db.clear_guild_setting(guild.id, config.DJ_ROLE_KEY)
+        log.info(f"DJ role cleared in guild {guild.id}")
+        return _info("No DJ role: everyone in my voice channel is a DJ again.")
+    if action == "votes":
+        if share is None or share not in config.VOTE_SHARES:
+            return _error("Pick the share: " + ", ".join(f"`{s}`" for s in config.VOTE_SHARES) + ".")
+        db.set_guild_setting(guild.id, config.VOTE_SHARE_KEY, share)
+        log.info(f"Vote share set to {share} in guild {guild.id}")
+        return _info(f"Skip votes will need **{share}**: {VOTE_SHARE_WORDS[share]}. "
+                     "(Skip voting itself is not active yet; the setting is saved.)")
+    return _info(dj_overview(guild))
+
+
+@tree.command(name="dj", description="Show or set this server's DJ role and skip-vote share")
+@app_commands.describe(action="show, set the role, clear it, or set the vote share",
+                       role="The DJ role (for action: role)",
+                       share="How much of the call must vote (for action: votes)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="show", value="show"),
+    app_commands.Choice(name="role", value="role"),
+    app_commands.Choice(name="clear", value="clear"),
+    app_commands.Choice(name="votes", value="votes"),
+], share=[app_commands.Choice(name=s, value=s) for s in config.VOTE_SHARES])
+@app_commands.guild_only()
+@admin_only()
+async def slash_dj(interaction: discord.Interaction, action: app_commands.Choice[str],
+                   role: Optional[discord.Role] = None,
+                   share: Optional[app_commands.Choice[str]] = None) -> None:
+    guild = await require_guild(interaction)
+    if guild is None:
+        return
+    reply = dj_update(guild, action.value, role, share.value if share else None)
+    await send_reply(interaction, reply, ephemeral=True)
 
 
 @tree.command(name="toggle", description="Enable or disable Amy's chat replies")

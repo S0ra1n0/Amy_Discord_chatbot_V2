@@ -37,9 +37,31 @@ def parse_bool(name: str, raw: Optional[str], default: bool) -> Tuple[bool, Opti
 
 
 # Keys of the per-server settings (database `guild_settings`; the same names are the bot-wide
-# `settings` rows they inherit from). Phase 2 adds the DJ role and vote share beside these.
+# `settings` rows they inherit from). The DJ role and vote share have no bot-wide row: unset
+# means "no DJ role" and "half".
 AUTOPLAY_KEY = "autoplay"
 UP_NEXT_KEY = "up_next"
+DJ_ROLE_KEY = "dj_role"            # a Discord role id as a decimal string
+VOTE_SHARE_KEY = "vote_share"      # one of VOTE_SHARES
+
+# How much of the call must vote to skip someone else's song (counted in Phase 3).
+VOTE_SHARES = ("half", "majority", "two-thirds")
+DEFAULT_VOTE_SHARE = "half"
+
+
+def parse_vote_share(raw: Optional[str]) -> str:
+    """A stored vote share; anything unrecognised (a hand-edited row) is the default."""
+    word = (raw or "").strip().lower()
+    return word if word in VOTE_SHARES else DEFAULT_VOTE_SHARE
+
+
+def parse_role_id(raw: Optional[str]) -> Optional[int]:
+    """A stored role id (decimal digits), or None when nothing usable is stored."""
+    text = (raw or "").strip()
+    if not text.isascii() or not text.isdigit():
+        return None
+    value = int(text)
+    return value if value > 0 else None
 
 
 def resolve_bool(guild_raw: Optional[str], bot_raw: Optional[str], default: bool) -> bool:
