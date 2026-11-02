@@ -25,7 +25,8 @@ one guards against.
 | `logs.py` | Logging setup: console plus a rotating file, and `log_failure` for boundary catch-alls | **nothing external** |
 | `mixer.py` | `SpeechQueue` and `Mixer`: Amy's voice mixed over the music, with ducking and the hold-music mode | discord |
 | `voicelines.py` | What Amy says out loud: confirmation phrasings, speakable titles and times, how a chat reply becomes speech, the paraphrase prompt | llm, speech (both pure) |
-| `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engines (Kokoro, Piper) and the `Speaker` | Kokoro/PyTorch or Piper/onnxruntime **only when loaded** |
+| `speech.py` | Amy's voice: text clean-up, English check, sentence splitting, voice recipes, audio framing, the swappable engines (Kokoro, Piper) and the `Speaker` | Kokoro/PyTorch **only when loaded**; Piper never (it runs in `piper_worker.py`'s process) |
+| `piper_worker.py` | Piper as its own process: loads the voice, answers one JSON line per sentence on stdin with a length-prefixed PCM frame on stdout, exits when stdin closes. Never imported by Amy; started by `PiperEngine` | piper, onnxruntime (its own process); **no Amy module** |
 | `database.py` | SQLite: history, bot-wide and per-server settings (with a cached flag lookup), voice channels, queue snapshots, schema migrations | sqlite3 |
 | `commands_help.py` | `/help` text | — |
 
@@ -58,19 +59,61 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   numbers (a speaking style per input length), so a blend is their weighted sum.
   `KokoroEngine.set_recipe` swaps it without reloading the model (~0.1s vs ~9s), which is
   what `tools/voicelab.py` uses to render many voices in one run.
-- **Piper is a second, optional engine and follows the same rules.** `TTS_ENGINE` (`kokoro`
-  by default) picks it; `piper` and `onnxruntime` are imported only inside `PiperEngine.load`,
-  via `importlib`, after the voice files and `find_spec` have been checked
-  (`test_speech.py` fails if importing `speech` pulls either in). `piper-tts` is **GPL-3.0**
-  and Amy is MIT, so it lives in `requirements-piper.txt`, never in `requirements.txt` or the
-  tests' needs; CI does not install it (`test_piper_live.py` SKIPs without it).
+- **Piper is a second, optional engine, and Amy's process never imports `piper` or
+  `onnxruntime`.** `TTS_ENGINE` (`kokoro` by default) picks it. `piper-tts` is **GPL-3.0** and
+  Amy is MIT, so Piper runs in its own process: `PiperEngine` is only a client that starts
+  `piper_worker.py` with `sys.executable`. `PiperEngine.load` checks the voice files and uses
+  `importlib.util.find_spec` (never an import) to see the packages are installed; only the
+  stand-in worker of the tests skips that check. `test_piper_worker.py` fails if `speech.py`
+  imports either name by any spelling, if they appear in `sys.modules` after a load, or if
+  `piper_worker.py` imports any Amy module (it must stay a separate program). `piper-tts` lives
+  in `requirements-piper.txt`, never in `requirements.txt` or the tests' needs; CI does not
+  install it (`test_piper_live.py` SKIPs without it).
+- **The worker protocol is two lines.** Request: one JSON line `{"text": ...}` on the worker's
+  stdin. Reply: a 4-byte little-endian signed length on stdout, then that many bytes - 16-bit
+  mono PCM when it is 0 or more (0 = nothing to say), or, when NEGATIVE, an error frame whose
+  bytes are the exception's type name only (the traceback goes to stderr). The first line the
+  worker prints is `{"ready": true, "rate": Hz, "threads": n}`. Stdout carries the protocol and
+  nothing else: at start-up the worker keeps a private copy of the real stdout
+  (`os.dup(1)`), points file descriptor 1 at stderr (`os.dup2(2, 1)`) and `sys.stdout` too, so
+  neither a Python print nor a native library writing to fd 1 can corrupt a reply. Logs go to
+  stderr, which the client drains in a thread so a chatty worker can never fill the pipe.
+  A reply header larger than `PIPER_MAX_FRAME` is a broken worker, rejected at once.
+- **The worker gets a clean environment and its stderr stays out of WARNING.** `PiperEngine`
+  starts it with `piper_worker_env(os.environ)`: a copy without secret-looking names
+  (`DISCORD_TOKEN`, anything with TOKEN, SECRET, PASSW, CREDENTIAL, API_KEY, PRIVATE_KEY).
+  The worker's stderr can hold an earlier sentence's traceback (speech is chat content), so a
+  restart's WARNING carries only the reason and exit code and the stderr tail goes to DEBUG;
+  only a start-up failure (`SpeechUnavailable`, before any text was sent) quotes the tail.
+- **A bad worker is replaced once, a bad sentence is skipped.** `PiperEngine._raw` holds one
+  lock per conversation. A worker that exits, breaks the pipe, sends nonsense or takes longer
+  than `PIPER_REQUEST_TIMEOUT` (a `threading.Timer` watchdog kills it) is killed, restarted
+  and the sentence asked again - once; the second failure raises and `Speaker` skips the
+  sentence. An error frame is the worker saying "this text failed", not a crash: no restart.
+  Restarts log at WARNING without the sentence (chat content is DEBUG at most). A worker that
+  doesn't say ready within `PIPER_STARTUP_TIMEOUT`, or exits first, is a `SpeechUnavailable`
+  carrying the tail of its stderr.
+- **The worker dies with Amy - two layers.** (1) `piper_worker.py` exits when its stdin
+  reaches end of file; the pipe closes when Amy's process ends for any reason, even a kill. But
+  a worker stuck mid-sentence never looks at stdin, so (2) on Windows `PiperEngine._tie_to_amy`
+  puts every worker in a Job Object with kill-on-close (`_KillOnCloseJob`, ctypes) whose only
+  handle Amy holds: when her process dies, Windows kills the worker whatever it is doing
+  (nested jobs need Windows 8+; if the job can't be made or joined, one WARNING and only layer 1
+  remains). Elsewhere the worker polls its parent id (`piper_worker.watch_parent`; never
+  `os.kill(pid, 0)` on Windows, which terminates). Small gap: a hard kill in the instant between
+  the process starting and being added to the job relies on layer 1. `PiperEngine.close`
+  (called by `Speaker.close`, and by an `atexit` hook as a safety net) closes stdin, waits
+  `PIPER_CLOSE_WAIT`, then kills and closes the job. After `close` the engine refuses to speak
+  rather than silently starting a new worker, and a worker that finishes starting while
+  `close()` runs is disposed by `_adopt` (close sets `_closed` first). A `load()` whose warm-up
+  fails calls `close()` before re-raising, so it never leaves a worker behind.
 - **The Piper voice is pinned and checksummed.** `PIPER_REVISION` plus `PIPER_SHA256`:
   `python speech.py download-piper` fetches `en_GB-cori-medium` into `piper_model/` over plain
   HTTPS, verifies each file, and only then moves it into place - so a half or altered download
   can never be loaded.
 - **Piper's CPU use is bounded by `TTS_THREADS`.** `PiperVoice.load` builds its own onnxruntime
-  session with every core, so `PiperEngine.load` builds the session itself with
-  `intra_op_num_threads = threads` and hands it to `PiperVoice`.
+  session with every core, so the worker (`piper_worker.load_synth`) builds the session itself
+  with `intra_op_num_threads = threads` (passed as `--threads`) and hands it to `PiperVoice`.
 - **Piper's polish is an FFmpeg step that may be missing, and speech must survive that.**
   `PiperEngine.load` asks the injected FFmpeg (`music.find_ffmpeg()` passed in by the bot;
   `speech.py` never imports `music.py`) which filters it has. No FFmpeg, no `rubberband` or no

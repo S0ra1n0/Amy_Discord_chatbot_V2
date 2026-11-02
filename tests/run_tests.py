@@ -44,6 +44,7 @@ OFFLINE = [
     "test_logs.py",
     "test_failure_logging.py",
     "test_speech.py",
+    "test_piper_worker.py",
     "test_mixer.py",
     "test_voicelines.py",
     "test_docs_audit.py",

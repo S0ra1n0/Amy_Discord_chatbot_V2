@@ -5,8 +5,9 @@
 # requirements-tts.txt: the pins below match it, so installing one doesn't move the other.
 #
 # Licence: piper-tts is GPL-3.0-or-later (https://pypi.org/project/piper-tts/), while Amy is
-# MIT. That is why Piper is a separate, optional install that Amy only imports while it is
-# running with TTS_ENGINE=piper - it is not bundled, not listed in requirements.txt, and not
+# MIT. That is why Piper is a separate, optional install and why Amy's own process never
+# imports it: only piper_worker.py, a small separate program that Amy starts while running
+# with TTS_ENGINE=piper, does. It is not bundled, not listed in requirements.txt, and not
 # needed by the test suite. (Information, not legal advice.)
 -r requirements.txt
 -c constraints-piper.txt

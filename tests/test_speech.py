@@ -452,24 +452,22 @@ print()
 print("=== PiperEngine.synthesize: text fixes, chain, and graceful fallback ===")
 
 
-class _Chunk:
-    def __init__(self, data):
-        self.audio_int16_bytes = data
+class _FakeWorker:
+    """Stands in for the Piper worker process: records what the engine asks it to say."""
 
-
-class _FakeVoice:
     def __init__(self):
         self.texts = []
 
-    def synthesize(self, text, cfg):
-        self.texts.append(text)
-        yield _Chunk(b"\x01\x00" * 100)
-        yield _Chunk(b"\x02\x00" * 100)
+    def raw(self, spoken):
+        self.texts.append(spoken)
+        return b"\x01\x00" * 100 + b"\x02\x00" * 100
 
 
 def loaded_engine(chain):
     eng = speech.PiperEngine("v.onnx", ffmpeg="ffmpeg-x")
-    eng._voice = _FakeVoice()
+    eng._worker_fake = _FakeWorker()
+    eng._raw = eng._worker_fake.raw          # type: ignore[method-assign]
+    eng._loaded = True
     eng.chain = chain
     return eng
 
@@ -477,7 +475,7 @@ def loaded_engine(chain):
 eng = loaded_engine(None)
 out = eng.synthesize("Kygo feat. Conrad, #3 at 1:05.")
 check("the text fixes run before Piper sees the text",
-      eng._voice.texts == ["Kygo featuring Conrad, number 3 at 1 oh 5."], eng._voice.texts)
+      eng._worker_fake.texts == ["Kygo featuring Conrad, number 3 at 1 oh 5."], eng._worker_fake.texts)
 check("chunks are joined and, with no chain, returned as they are",
       out == b"\x01\x00" * 100 + b"\x02\x00" * 100)
 check("text with nothing speakable gives no audio and doesn't call Piper",

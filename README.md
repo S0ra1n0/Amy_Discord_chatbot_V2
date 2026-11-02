@@ -774,7 +774,8 @@ Then, in `.env`, keep `TTS=on` and add `TTS_ENGINE=piper`, and restart. To go ba
 - **What is tuned:** the voice files are only the raw voice. Amy's sound, chosen by ear on 2026-10-28 and re-tuned on 2026-10-29 (it had sounded unstable and a bit unclear, then a listening round for a higher, clearer, calmer voice), is that voice a little slower (`PIPER_LENGTH=1.07`; above 1.0 is slower, range 0.5 to 2.0), made steadier and calmer (less random variation in sound and rhythm, fixed in the code), shifted up 1.5 semitones with its character kept (`PIPER_PITCH=1.5`, in semitones from -4 to 4; `0` skips the step) and with a voice EQ that brings the mid range forward (`PIPER_SOFT=on`: +2.5 dB around 1 kHz and a light de-esser; the setting keeps its old name). These are the defaults, so `TTS_ENGINE=piper` on its own gives the chosen voice. `PIPER_VOICE` points at a different `.onnx` voice file (blank = the cori voice; a relative path is from the bot's folder).
 - **The pitch shift and voice EQ run through FFmpeg**, which Amy already needs for music. The pitch shift needs an FFmpeg with the `rubberband` filter (the winget "full" build has it). If FFmpeg or a filter is missing, or a run fails, she logs one warning and speaks without that step - she never goes silent over it. `TTS_SPEED` and `AMY_VOICE` belong to Kokoro and are ignored with Piper; `TTS_THREADS` limits both.
 - **Song-list pronunciation.** Piper reads text through espeak-ng, which fumbles some things people type in track lists, so Piper's text is tidied first: "feat." and "ft." become "featuring" (and no longer end the sentence), "#3" becomes "number 3", "2 min" becomes "2 minutes", "1:05" becomes "1 oh 5", and a short list of names is respelt so they sound right (Sade, Måneskin, Einaudi, Beyoncé, Dua Lipa - the `PIPER_NAMES` list in `speech.py`, easy to extend). This does not apply to Kokoro.
-- **Licences:** the Piper program (`piper-tts`) is **GPL-3.0**, while Amy is MIT. That is why it is a separate, optional install that Amy only loads when you choose it - it isn't bundled and isn't in `requirements.txt` (this is information, not legal advice). The cori voice was trained on public-domain LibriVox recordings (its model card says so) and is published in the MIT-licensed `rhasspy/piper-voices` collection.
+- **Piper runs in its own process.** Amy does not load Piper herself: when the voice loads she starts a small program, `piper_worker.py` (Amy's own MIT code), which loads Piper and the voice and does the speaking; Amy sends it a sentence over a pipe and gets the audio back. If the worker crashes or hangs (30 seconds without an answer) Amy replaces it and says that sentence again, once; if that fails too she skips the sentence and carries on. It is stopped when Amy shuts down, and it stops by itself if Amy is killed (on Windows even in the middle of a sentence, because Amy ties it to her own process; elsewhere the pipe closing or the worker watching its parent does it). The worker is started without Amy's secrets (such as the Discord token). A restart takes a few seconds, logged in `amy.log` as "Piper: the worker failed ... restarting it". Speed is the same as before (about 0.3 seconds a sentence including the FFmpeg step).
+- **Licences:** the Piper program (`piper-tts`) is **GPL-3.0**, while Amy is MIT. That is why it is a separate, optional install, and why Amy never imports it: only the separate `piper_worker.py` process does, which keeps the GPL code at arm's length. It isn't bundled and isn't in `requirements.txt` (this is information, not legal advice). The cori voice was trained on public-domain LibriVox recordings (its model card says so) and is published in the MIT-licensed `rhasspy/piper-voices` collection.
 
 ## Project Structure
 
@@ -793,7 +794,8 @@ Amy_chatbot_V2/
 ├── config.py               # Reading settings: warns on bad values instead of crashing
 ├── models.py               # Which Ollama model is active: /model, probing, warm-up
 ├── logs.py                 # Logging: the console, plus a rotating amy.log
-├── speech.py               # Amy's voice: text clean-up, speech engine (optional)
+├── speech.py               # Amy's voice: text clean-up, speech engines (optional)
+├── piper_worker.py         # Runs Piper in its own process, talking to Amy over a pipe (optional)
 ├── mixer.py                # Mixes her voice over the music, lowering it while she talks
 ├── voicelines.py           # What she says out loud: spoken replies, music confirmations, "up next"
 ├── commands_help.py        # Help command text
@@ -830,7 +832,7 @@ python tests/run_tests.py             # offline suites only (~27s)
 python tests/run_tests.py --all       # + network and live-Discord checks
 ```
 
-32 suites (24 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
+33 suites (25 offline, 7 network, 1 live) covering queue logic, speech text handling, voice mixing, spoken lines, voice permissions, embed limits, the `MUSIC_DIR` sandbox, database migrations,
 and a docs audit that fails if a command is missing from the help text or this README, or if the suite counts stated here drift from `tests/run_tests.py`.
 Line endings: the repo is LF everywhere (`.gitattributes`: `* text=auto eol=lf`), so commits carry no "LF will be replaced by CRLF" warnings; editors on Windows should keep LF.
 Offline suites need no network, no Discord token and no `.env` — they run on a fresh clone,
@@ -884,6 +886,10 @@ single transaction, keeping all history and settings.
 **Amy doesn't speak in the call:**
 
 Run `/voice` (admins) — it says what's wrong. In order: `TTS=on` must be set in `.env` (then restart); the voice must be switched on (`/voice on`); the engine must have loaded (about 10 seconds after login — if it says *failed*, the reason tells you what to run, usually `pip install -r requirements-tts.txt` or `python speech.py download`; with `TTS_ENGINE=piper`, `pip install -r requirements-piper.txt` or `python speech.py download-piper`); and Amy must be in a voice channel. Remember she only speaks her chat replies to people who are in the call with her, and only in English.
+
+**With `TTS_ENGINE=piper`, `/voice` says "Piper's worker ..." or `amy.log` shows "Piper: the worker failed":**
+
+Piper runs as a separate program (`piper_worker.py`). "didn't get ready within 60s" or "exited before it was ready" at start-up means the worker couldn't load the voice; the message ends with the last lines the worker printed (usually a missing or damaged voice file, or `pip install -r requirements-piper.txt` not run in the same `.venv` Amy uses). "failed ... restarting it and trying that sentence again" in the log during a call means the worker crashed or hung and was replaced; this is harmless once in a while. (The warning gives the reason and exit code only; the worker's own error output is in `amy.log` only at DEBUG, which the log file doesn't keep, so run the live test below to see it.) If every sentence logs it, run `python tests/test_piper_live.py` to see the real error. Sentences that fail twice are skipped silently in the call; the log has a "Couldn't synthesise a sentence" warning.
 
 **Her voice or the music stutters while she talks:**
 

@@ -60,8 +60,12 @@ async def main():
     if not sp.ready:
         return
     check("the voice's own sample rate is used (22050 Hz)", engine.rate == 22050, engine.rate)
-    check("TTS_THREADS bounds onnxruntime's threads",
-          engine._voice.session.get_session_options().intra_op_num_threads == THREADS)
+    check("TTS_THREADS bounds onnxruntime's threads (as reported by the worker's own session)",
+          engine.worker_threads == THREADS, engine.worker_threads)
+    check("Piper runs in a separate process, and Amy's own process never imported it",
+          engine._worker is not None and engine._worker.proc.pid != os.getpid()
+          and "piper" not in sys.modules and "onnxruntime" not in sys.modules,
+          [m for m in ("piper", "onnxruntime") if m in sys.modules])
     # An FFmpeg build without rubberband (or the EQ filters) is supported: Amy warns and skips
     # that part. Only other warnings mean something is wrong.
     unexpected = [m for m in warnings.messages
@@ -78,7 +82,13 @@ async def main():
     frames = await sp.frames_for(SENTENCE)
     took = time.perf_counter() - t0
     seconds = len(frames) * 0.02
-    print("  short sentence: %.2fs to make %.1fs of speech" % (took, seconds))
+    print("  first sentence after load: %.2fs to make %.1fs of speech" % (took, seconds))
+    times = []
+    for _ in range(5):
+        t0 = time.perf_counter()
+        await sp.frames_for(SENTENCE)
+        times.append(time.perf_counter() - t0)
+    print("  next five sentences: %s (mean %.2fs)" % (", ".join("%.2f" % t for t in times), sum(times) / len(times)))
     check("a short sentence is ready in under %.0fs" % MAX_SENTENCE_SECONDS, took < MAX_SENTENCE_SECONDS, took)
     check("it produces real speech, not silence or a blip", 2 < seconds < 9, seconds)
     check("every frame is 20 ms of 48 kHz stereo (22.05 kHz resampled)",
@@ -113,8 +123,24 @@ async def main():
         check("...with one warning", len(warnings.messages) == 1 and "FFmpeg" in warnings.messages[0],
               warnings.messages)
 
-    # The pronunciation fixes, through the real espeak-ng that Piper uses
-    voice = engine._voice
+    # A worker killed from outside (a crash, the OOM killer) is replaced and the sentence still comes
+    first = engine._worker
+    assert first is not None
+    first.kill()
+    first.proc.wait(10)
+    before = len(warnings.messages)
+    t0 = time.perf_counter()
+    revived = await sp.frames_for(SENTENCE)
+    print("  sentence after killing the worker (restart + retry): %.2fs" % (time.perf_counter() - t0))
+    check("a killed worker is restarted and the sentence is still spoken",
+          bool(revived) and engine._worker is not first and engine._worker is not None
+          and engine._worker.proc.poll() is None, len(revived))
+    del warnings.messages[before:]    # the restart's own warning (or none, if it was noticed before the call)
+
+    # The pronunciation fixes, through the real espeak-ng that Piper uses. Phonemizing needs the
+    # Piper package itself, which is imported HERE, in the test, never by Amy's engine.
+    import piper
+    voice = piper.PiperVoice.load(speech.PIPER_MODEL)
 
     def phonemes(text):
         return " | ".join("".join(s) for s in voice.phonemize(speech.piper_text(text)))
@@ -133,7 +159,13 @@ async def main():
     parts = speech.split_sentences(cleaned)
     spoken = [await sp.frames_for(p) for p in parts]
     check("a cleaned reply with a credit and a number is spoken", spoken and all(spoken), parts)
+    last = engine._worker
+    assert last is not None
+    t0 = time.perf_counter()
     sp.close()
+    check("closing the Speaker stops the worker promptly and cleanly",
+          engine._worker is None and last.proc.poll() == 0 and time.perf_counter() - t0 < 5,
+          (last.proc.poll(), time.perf_counter() - t0))
     logging.getLogger("amy.speech").removeHandler(warnings)
 
 asyncio.run(main())

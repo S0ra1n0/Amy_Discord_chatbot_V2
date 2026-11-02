@@ -2,10 +2,11 @@
 Amy's voice: turning reply text into audio for a voice call.
 
 Pure helpers - text clean-up, the English check, sentence splitting, voice recipes, audio
-framing - plus a swappable engine. Kokoro (and PyTorch) or Piper (and onnxruntime) are
-imported only when TTS is turned on and that engine is chosen, so neither the bot nor the test
-suite needs them installed; `tests/test_speech.py` checks that importing this module pulls in
-none of them.
+framing - plus a swappable engine. Kokoro (and PyTorch) is imported only when TTS is turned on
+and that engine is chosen. Piper (GPL-3.0) is never imported here at all: it runs in its own
+process, `piper_worker.py`, and `PiperEngine` talks to it over a pipe. So neither the bot nor
+the test suite needs either installed; `tests/test_speech.py` checks that importing this
+module pulls in none of them.
 
 One-time setup for the Kokoro voice, after `pip install -r requirements-tts.txt`:
 
@@ -20,6 +21,8 @@ One-time setup for the Piper voice (TTS_ENGINE=piper), after
 The rules this follows are in ARCHITECTURE.md under "Speech".
 """
 import asyncio
+import atexit
+import collections
 import concurrent.futures
 import hashlib
 import importlib
@@ -28,8 +31,10 @@ import json
 import logging
 import os
 import re
+import struct
 import subprocess
 import sys
+import threading
 import urllib.request
 import warnings
 from typing import Any, List, Optional, Sequence, Tuple
@@ -102,6 +107,15 @@ DEFAULT_PIPER_PITCH = 1.5            # semitones; 0 = leave the pitch alone (no 
 PIPER_NOISE_SCALE = 0.25
 PIPER_NOISE_W = 0.25
 PIPER_FFMPEG_TIMEOUT = 20.0          # seconds, for one sentence through the filter chain
+# Piper runs in its own process (piper_worker.py): piper-tts is GPL-3.0 and Amy is MIT, so
+# Amy's process never imports it. The timings below are generous bounds, not expectations
+# (loading takes ~1s, a sentence ~0.15s); a worker that blows one is killed and replaced.
+PIPER_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "piper_worker.py")
+PIPER_STARTUP_TIMEOUT = 60.0         # seconds for the worker to load the voice and say "ready"
+PIPER_REQUEST_TIMEOUT = 30.0         # seconds for one sentence's reply
+PIPER_CLOSE_WAIT = 3.0               # seconds a worker gets to exit after its stdin closes
+PIPER_STDERR_LINES = 40              # how much of the worker's stderr is kept for error messages
+PIPER_MAX_FRAME = 64 * 1024 * 1024   # a reply claiming more than this is a broken worker
 
 
 # ---- Text clean-up -------------------------------------------------------------------------
@@ -478,6 +492,9 @@ class SpeechEngine:
     def synthesize(self, text: str) -> bytes:
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release whatever the engine holds (a worker process). Safe to call twice."""
+
 
 class KokoroEngine(SpeechEngine):
     """Kokoro on the CPU, from the pinned local files only."""
@@ -560,11 +577,170 @@ def missing_piper_files(model_path: str) -> List[str]:
     return [p for p in (model_path, model_path + ".json") if not os.path.isfile(p)]
 
 
+class _WorkerGone(Exception):
+    """The Piper worker died, hung or spoke nonsense; the reason is the message."""
+
+
+# Names that look like secrets. The worker only needs PATH and the system folders, so it gets a
+# copy of Amy's environment without these (DISCORD_TOKEN is the one that exists today).
+_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|PRIVATE_?KEY", re.I)
+
+
+def piper_worker_env(environ: Any) -> dict:
+    """The environment for the Piper worker: a copy of `environ` minus secret-looking names. Pure."""
+    return {k: v for k, v in environ.items() if not _SECRET_NAME.search(k)}
+
+
+class _KillOnCloseJob:
+    """
+    A Windows Job Object that kills every process in it when its last handle closes. Amy holds
+    the only handle, so when her process dies for any reason (even a hard kill) Windows kills
+    the Piper worker too - also when the worker is stuck mid-sentence and would never notice its
+    stdin closing. Raises OSError if the job can't be made or a process can't be added (Windows
+    before 8 can't nest jobs); the caller then falls back to the stdin-EOF rule.
+    """
+
+    def __init__(self) -> None:
+        if sys.platform != "win32":
+            raise OSError("job objects are Windows only")
+        import ctypes
+        from ctypes import wintypes
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", _Basic), ("IoInfo", _IoCounters),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        self._k32 = k32
+        handle = k32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        info = _Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000          # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            k32.CloseHandle(handle)
+            raise error
+        self._handle: Optional[int] = handle
+
+    def add(self, proc: "subprocess.Popen[bytes]") -> None:
+        import ctypes
+        if self._handle is None:
+            raise OSError("the job is closed")
+        if not self._k32.AssignProcessToJobObject(self._handle, int(getattr(proc, "_handle"))):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self) -> None:
+        """Close the handle - which kills whatever is still in the job."""
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            self._k32.CloseHandle(handle)
+
+
+class _PiperWorker:
+    """One running piper_worker.py: the process, its pipes, and the tail of its stderr."""
+
+    def __init__(self, cmd: List[str], env: Optional[dict] = None) -> None:
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, creationflags=_NO_WINDOW, env=env)
+        assert self.proc.stdin and self.proc.stdout and self.proc.stderr
+        self.stdin, self.stdout = self.proc.stdin, self.proc.stdout
+        self._tail: "collections.deque[str]" = collections.deque(maxlen=PIPER_STDERR_LINES)
+        # Always drained: a chatty worker must never fill the pipe and block itself.
+        self._drain = threading.Thread(target=self._drain_stderr, args=(self.proc.stderr,),
+                                       name="piper-stderr", daemon=True)
+        self._drain.start()
+
+    def _drain_stderr(self, pipe: Any) -> None:
+        try:
+            for raw in pipe:
+                self._tail.append(raw.decode("utf-8", "replace").rstrip())
+        except (OSError, ValueError):
+            pass                # the pipe was closed under us: the worker is being cleaned up
+
+    def stderr_tail(self, lines: int = 8) -> str:
+        self._drain.join(1.0)   # the process is gone by now; let the reader finish its last lines
+        return " | ".join(l for l in list(self._tail)[-lines:] if l)[-600:]
+
+    def read_exact(self, n: int) -> bytes:
+        """Exactly n bytes from the worker, or _WorkerGone if its output ends first."""
+        data = self.stdout.read(n) if n else b""
+        if len(data) != n:
+            raise _WorkerGone("it stopped answering (its output ended)")
+        return data
+
+    def kill(self) -> None:
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
+
+    def dispose(self) -> None:
+        """Make sure the process is dead and every pipe is closed. Safe to call twice."""
+        self.kill()
+        try:
+            self.proc.wait(PIPER_CLOSE_WAIT)
+        except subprocess.TimeoutExpired:
+            log.warning("Piper: the worker process wouldn't die")
+        for pipe in (self.stdin, self.stdout, self.proc.stderr):
+            try:
+                if pipe:
+                    pipe.close()
+            except (OSError, ValueError):
+                pass
+
+
+class _Watchdog:
+    """Kills a worker if the `with` block (a blocking pipe read) takes longer than `seconds`."""
+
+    def __init__(self, worker: _PiperWorker, seconds: float) -> None:
+        self.fired = False
+        self._worker = worker
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+
+    def _fire(self) -> None:
+        self.fired = True
+        self._worker.kill()
+
+    def __enter__(self) -> "_Watchdog":
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._timer.cancel()
+
+
 class PiperEngine(SpeechEngine):
     """
     Piper (a small ONNX voice, GPL-3.0 package, optional) on the CPU, from local files only.
 
-    Text -> `piper_text` -> Piper -> optionally FFmpeg's filter chain (`piper_filter_chain`)
+    Piper runs in its OWN process, `piper_worker.py`, so Amy's process never imports the GPL
+    code: this class is the client. It starts the worker, sends one sentence per line over the
+    worker's stdin and reads 16-bit mono PCM back (the protocol is in piper_worker.py). A worker
+    that dies, hangs past PIPER_REQUEST_TIMEOUT or breaks the protocol is killed and restarted
+    ONCE, and the sentence retried once; if that fails too, the call raises and Speaker skips
+    the sentence. The worker exits on its own when its stdin closes, even if Amy is killed.
+
+    Text -> `piper_text` -> worker -> optionally FFmpeg's filter chain (`piper_filter_chain`)
     -> 16-bit mono at the voice's own rate. Everything after Piper degrades quietly: no FFmpeg,
     no rubberband or a failing filter run all mean "speak without that step", with one warning.
     """
@@ -573,16 +749,27 @@ class PiperEngine(SpeechEngine):
 
     def __init__(self, model_path: str = PIPER_MODEL, length: float = DEFAULT_PIPER_LENGTH,
                  pitch: float = DEFAULT_PIPER_PITCH, soft: bool = True,
-                 threads: int = DEFAULT_THREADS, ffmpeg: Optional[str] = None) -> None:
+                 threads: int = DEFAULT_THREADS, ffmpeg: Optional[str] = None,
+                 worker_script: str = PIPER_WORKER,
+                 startup_timeout: float = PIPER_STARTUP_TIMEOUT,
+                 request_timeout: float = PIPER_REQUEST_TIMEOUT) -> None:
         self.model_path = model_path
         self.length = length
         self.pitch = pitch
         self.soft = soft
         self.threads = threads
         self.ffmpeg = ffmpeg                    # injected: speech.py must not import music.py
+        self.worker_script = worker_script      # tests point this at a stand-in
+        self.startup_timeout = startup_timeout
+        self.request_timeout = request_timeout
         self.chain: Optional[str] = None        # decided in load()
-        self._voice: Any = None
-        self._cfg: Any = None
+        self._worker: Optional[_PiperWorker] = None
+        self._lock = threading.Lock()           # one conversation on the pipe at a time
+        self._loaded = False
+        self._closed = False
+        self.worker_threads = 0                 # reported by the worker's ready line
+        self._job: Optional[_KillOnCloseJob] = None     # Windows: kills the worker if Amy dies
+        self._job_failed = False
         self._ffmpeg_warned = False
 
     def load(self) -> None:
@@ -595,25 +782,119 @@ class PiperEngine(SpeechEngine):
             raise SpeechUnavailable(f"Piper's voice file isn't there ({names} at {self.model_path}). "
                                     "Check PIPER_VOICE in .env, or leave it blank to use the "
                                     "downloaded cori voice.")
-        if importlib.util.find_spec("piper") is None or importlib.util.find_spec("onnxruntime") is None:
+        # Looked up, never imported: the packages live in the worker's process, not Amy's. A
+        # stand-in worker (tests) brings its own and needs neither package.
+        if self.worker_script == PIPER_WORKER and (importlib.util.find_spec("piper") is None
+                                                   or importlib.util.find_spec("onnxruntime") is None):
             raise SpeechUnavailable("Piper isn't installed. Run: pip install -r requirements-piper.txt")
-        piper = importlib.import_module("piper")
-        ort = importlib.import_module("onnxruntime")
-        with open(self.model_path + ".json", encoding="utf-8") as f:
-            config = piper.PiperConfig.from_dict(json.load(f))
-        # Built here rather than with PiperVoice.load(): that one makes its own onnxruntime
-        # session, which takes every core, and TTS_THREADS has to bound speech's CPU use.
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = self.threads
-        options.inter_op_num_threads = 1
-        session = ort.InferenceSession(self.model_path, sess_options=options,
-                                       providers=["CPUExecutionProvider"])
-        self._voice = piper.PiperVoice(config=config, session=session)
-        self._cfg = piper.SynthesisConfig(length_scale=self.length, noise_scale=PIPER_NOISE_SCALE,
-                                          noise_w_scale=PIPER_NOISE_W)
-        self.rate = int(config.sample_rate)
-        self.chain = self._plan_chain()
-        self.synthesize("Ready.")       # the first call is slow; pay it here, not mid-call
+        if not os.path.isfile(self.worker_script):
+            raise SpeechUnavailable(f"Piper's worker program isn't there ({self.worker_script})")
+        self._closed = False
+        with self._lock:
+            self._adopt(self._start_worker())
+        self._loaded = True
+        atexit.register(self.close)     # safety net: never leave a worker behind at exit
+        try:
+            self.chain = self._plan_chain()
+            self.synthesize("Ready.")   # the first call is slow; pay it here, not mid-call
+        except Exception:               # boundary: a failed load must not leave a worker running
+            self.close()
+            raise
+
+    def _adopt(self, worker: _PiperWorker) -> None:
+        """
+        Make `worker` the engine's worker - unless close() ran while it was starting, in which
+        case it is disposed at once. close() sets `_closed` before it takes the worker, so one
+        of the two always ends the process.
+        """
+        self._worker = worker
+        if self._closed:
+            self._worker = None
+            worker.dispose()
+            self._drop_job()
+            raise SpeechUnavailable("Piper isn't loaded")
+
+    def _tie_to_amy(self, worker: _PiperWorker) -> None:
+        """
+        Windows: put the worker in a kill-on-close Job Object, so it dies with Amy even when
+        stuck mid-sentence. If that can't be done, warn once and rely on the stdin-EOF rule
+        (the worker then exits after its current sentence).
+        """
+        if sys.platform != "win32" or self._job_failed:
+            return
+        try:
+            if self._job is None:
+                self._job = _KillOnCloseJob()
+            self._job.add(worker.proc)
+        except OSError as e:
+            self._job_failed = True
+            log.warning(f"Piper: couldn't tie the worker to Amy's process ({e}) - if Amy is killed "
+                        "mid-sentence, the worker only exits once that sentence is finished")
+
+    def _start_worker(self) -> _PiperWorker:
+        """
+        Start piper_worker.py and wait (at most startup_timeout) for its ready line. Raises
+        SpeechUnavailable, with the tail of the worker's stderr, if it can't. Sets self.rate.
+        """
+        cmd = [sys.executable, self.worker_script, "--model", self.model_path,
+               "--threads", str(self.threads), "--length", repr(float(self.length)),
+               "--noise", repr(PIPER_NOISE_SCALE), "--noise-w", repr(PIPER_NOISE_W)]
+        try:
+            worker = _PiperWorker(cmd, env=piper_worker_env(os.environ))
+        except OSError as e:
+            raise SpeechUnavailable(f"Piper's worker couldn't start ({e})") from e
+        self._tie_to_amy(worker)
+        with _Watchdog(worker, self.startup_timeout) as dog:
+            line = worker.stdout.readline()
+        rate = 0
+        hello: Any = {}
+        try:
+            hello = json.loads(line) if line else {}
+            if isinstance(hello, dict) and hello.get("ready") is True:
+                rate = int(hello["rate"])
+        except (ValueError, KeyError, TypeError):
+            pass
+        if rate <= 0:
+            if dog.fired:
+                why = f"didn't get ready within {self.startup_timeout:.0f}s"
+            elif line:
+                why = "started with an unexpected first line"
+            else:
+                try:
+                    code: Any = worker.proc.wait(2.0)    # EOF can arrive a moment before the exit is reaped
+                except subprocess.TimeoutExpired:
+                    code = "?"
+                why = f"exited before it was ready (code {code})"
+            worker.dispose()
+            tail = worker.stderr_tail()
+            raise SpeechUnavailable(f"Piper's worker {why}" + (f": {tail}" if tail else ""))
+        self.rate = rate
+        self.worker_threads = int(hello.get("threads", 0))     # what its session really got
+        return worker
+
+    def close(self) -> None:
+        """Stop the worker: close its stdin (its signal to exit), give it a moment, then kill."""
+        self._closed = True
+        self._loaded = False
+        worker, self._worker = self._worker, None
+        atexit.unregister(self.close)
+        if worker is not None:
+            try:
+                worker.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                worker.proc.wait(PIPER_CLOSE_WAIT)
+            except subprocess.TimeoutExpired:
+                log.warning("Piper: the worker didn't exit when asked - killing it")
+            worker.dispose()
+        self._drop_job()
+
+    def _drop_job(self) -> None:
+        """Close the Job Object handle (which kills anything left in it)."""
+        job, self._job = self._job, None
+        if job is not None:
+            job.close()
 
     def _plan_chain(self) -> Optional[str]:
         """Work out which filters FFmpeg can really run here; warn once about each gap."""
@@ -672,15 +953,71 @@ class PiperEngine(SpeechEngine):
         return pcm
 
     def synthesize(self, text: str) -> bytes:
-        if self._voice is None:
+        if not self._loaded:
             raise SpeechUnavailable("Piper isn't loaded")
         spoken = piper_text(text)
         if not spoken:
             return b""
-        pcm = b"".join(chunk.audio_int16_bytes for chunk in self._voice.synthesize(spoken, self._cfg))
+        pcm = self._raw(spoken)
         if not pcm or not self.chain:
             return pcm
         return self._filter(pcm)
+
+    def _raw(self, spoken: str) -> bytes:
+        """
+        Piper's own audio for `spoken`, from the worker. A worker that is gone, hangs or
+        breaks the protocol is replaced and the sentence asked again - once. The second failure
+        raises. A synthesis error the worker reports itself (an error frame) is not a crash:
+        the worker stays, and the call raises without a retry.
+        """
+        with self._lock:
+            for attempt in (1, 2):
+                if self._closed:
+                    raise SpeechUnavailable("Piper isn't loaded")
+                worker = self._worker
+                if worker is None or worker.proc.poll() is not None:
+                    if worker is not None:
+                        worker.dispose()
+                    worker = self._start_worker()
+                    self._adopt(worker)
+                try:
+                    return self._ask(worker, spoken)
+                except _WorkerGone as e:
+                    worker.dispose()
+                    self._worker = None
+                    code = worker.proc.returncode
+                    # WARNING carries the reason only. The worker's stderr can hold an earlier
+                    # sentence's traceback (speech is chat content), so it is DEBUG.
+                    if attempt == 1:
+                        log.warning(f"Piper: the worker failed ({e}, exit code {code}) - "
+                                    "restarting it and trying that sentence again")
+                        tail = worker.stderr_tail()
+                        if tail:
+                            log.debug(f"Piper worker stderr: {tail}")
+                    else:
+                        raise RuntimeError(f"Piper's worker failed twice ({e})") from e
+        raise AssertionError("unreachable")      # pragma: no cover
+
+    def _ask(self, worker: _PiperWorker, spoken: str) -> bytes:
+        """One request/reply on `worker`. _WorkerGone for anything wrong with the worker itself."""
+        request = (json.dumps({"text": spoken}) + "\n").encode("ascii")     # JSON escapes non-ASCII
+        with _Watchdog(worker, self.request_timeout) as dog:
+            try:
+                worker.stdin.write(request)
+                worker.stdin.flush()
+                (n,) = struct.unpack("<i", worker.read_exact(4))
+                if abs(n) > PIPER_MAX_FRAME:
+                    raise _WorkerGone(f"it sent a frame of {n} bytes")
+                body = worker.read_exact(abs(n))
+            except (OSError, ValueError, _WorkerGone) as e:
+                if dog.fired:
+                    raise _WorkerGone(f"no answer within {self.request_timeout:.0f}s") from e
+                if isinstance(e, _WorkerGone):
+                    raise
+                raise _WorkerGone(f"the pipe broke ({type(e).__name__})") from e
+        if n < 0:
+            raise RuntimeError(f"Piper couldn't say that sentence ({body.decode('utf-8', 'replace')})")
+        return body
 
 
 class FakeEngine(SpeechEngine):
@@ -766,6 +1103,7 @@ class Speaker:
 
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
+        self.engine.close()                      # stops a Piper worker; a no-op for the others
 
 
 # ---- One-time download -------------------------------------------------------------------------
