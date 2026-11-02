@@ -20,6 +20,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - Persistent conversation memory stored in SQLite (survives restarts, remembers last 10 messages per channel)
 - Automatic daily pruning of old conversation history
 - Admin access control — admin commands restricted to server owner or users with the `Admin` role
+- **DJ role and skip votes** — an admin can name a DJ role for shared playback, and skipping someone else's song is a vote of the people in the call (see [DJ role](#dj-role))
 - Rate limiting — non-admin users are capped at 5 chat messages per hour, and 3 voice commands per minute
 - Amy only chats when spoken to — tag her (or her bot role), reply to one of her messages, or DM her; `@everyone` and messages tagging other people don't count, and a bare tag with no text is ignored
 - Amy only chats with people — Discord's own system messages (such as "X joined the server"), messages from other bots and messages with no text (sticker- or image-only) are ignored: no reply, no rate-limit charge
@@ -780,12 +781,15 @@ Amy_chatbot_V2/
 ├── ui.py                   # Embed builders and the reply wrapper
 ├── websearch.py            # DuckDuckGo search and the web_search tool
 ├── lyrics.py               # /lyrics: title cleanup, LRCLIB lookup, paging
+├── access.py               # Who may do what with the music: access levels, the DJ role table, skip-vote counting (pure helpers)
+├── markup.py               # Escapes Discord markdown in titles and names so they show as plain text
 ├── llm.py                  # Reasoning modes, model choice, system prompt, streamed-reply decisions (pure helpers)
 ├── config.py               # Reading settings: warns on bad values instead of crashing
 ├── models.py               # Which Ollama model is active: /model, probing, warm-up
 ├── logs.py                 # Logging: the console, plus a rotating amy.log
 ├── speech.py               # Amy's voice: text clean-up, speech engine (optional)
 ├── mixer.py                # Mixes her voice over the music, lowering it while she talks
+├── voicelines.py           # What she says out loud: spoken replies, music confirmations, "up next"
 ├── commands_help.py        # Help command text
 ├── tests/                  # Test suites (see tests/README.md)
 ├── tools/voicelab.py       # Compare voices and blends for AMY_VOICE, with pitch
