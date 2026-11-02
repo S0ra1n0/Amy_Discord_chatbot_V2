@@ -29,7 +29,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 
 ### Chat
 
-**Tag `@Amy` or reply to one of her messages** — she only chats when spoken to, so a message that tags someone else, or no one, is left alone (in a DM every message is for her). Her own tag is removed before the model sees the text, and other mentions are shown as plain names (`@Bob`, `#general`). She maintains conversation context and responds thoughtfully. Amy replies with a live streaming message that updates in real-time as she generates her response, so you see output immediately instead of waiting for the full reply.
+**Tag `@Amy` or reply to one of her messages** — she only chats when spoken to, so a message that tags someone else, or no one, is left alone (in a DM every message is for her). Her own tag is removed before the model sees the text, and other mentions are shown as plain names (`@Bob`, `#general`). She knows whether the people you tag are online, idle, on do-not-disturb or offline, and whether they are in a voice channel ("is @Bob online?"), and she won't web-search them as if they were public figures (this needs the Presence Intent, see Step 5; invisible members read as offline). She maintains conversation context and responds thoughtfully. Amy replies with a live streaming message that updates in real-time as she generates her response, so you see output immediately instead of waiting for the full reply.
 
 > **Note:** Non-admin users are limited to **5 messages per hour**. Admins (server owner or `Admin` role) have no limit.
 
@@ -438,7 +438,7 @@ To set it up:
 3. `/dj action:clear` undoes it. You, as an admin, are always a DJ, and `/dj` is admin-only.
 
 Amy reads who holds the role through the Server Members Intent, which she already needs
-([Step 5](#step-5-enable-the-server-members-intent-required)); without it the check cannot work.
+([Step 5](#step-5-enable-the-privileged-intents-server-members-message-content-presence-required)); without it the check cannot work.
 She does not need the Manage Roles permission, because she never changes anyone's roles.
 `/dj action:show` replies with three lines: the role (or "none"), the skip-vote share, and the
 DJs in Amy's channel now (up to 15 names, then "and N more"; "I'm not in a voice channel." when
@@ -613,13 +613,19 @@ naming it, without printing either value.
 - `MUSIC_DIR` is optional and blank by default, which **disables local file playback**. Set it to a music folder to let `/play` read files from there. Only that folder is reachable.
 - `TTS`, `TTS_ENGINE`, `AMY_VOICE`, `TTS_SPEED`, `PIPER_VOICE`, `PIPER_LENGTH`, `PIPER_PITCH`, `PIPER_SOFT`, `TTS_THREADS`, `DUCK_LEVEL`, `VOICE_LEVEL` control Amy's voice in calls — off by default; see [Amy's voice (optional)](#amys-voice-optional).
 
-### Step 5: Enable the Server Members Intent (required)
+### Step 5: Enable the privileged intents: Server Members, Message Content, Presence (required)
 
 Voice features need this. In the [Discord Developer Portal](https://discord.com/developers/applications) → your application → **Bot** → **Privileged Gateway Intents**, turn on **Server Members Intent**.
 
 > ⚠️ The code sets `intents.members = True`. If you don't enable it in the portal, **the bot will not start** — it exits with `PrivilegedIntentsRequired`. The two must match.
 
 Chat also reads message text, so the code sets `intents.message_content = True`. Turn on **Message Content Intent** on the same portal page too. It is privileged like the members intent: if the code asks for it and the portal has it off, **the bot will not start** (`PrivilegedIntentsRequired`).
+
+Amy also tells you whether the members you tag are online, idle, on do-not-disturb or offline, so the code sets `intents.presences = True`. Turn on **Presence Intent** on the same portal page too. It is privileged as well: if it is off in the portal, **the bot will not start** (`PrivilegedIntentsRequired`).
+
+> **Existing install?** Turn on **Presence Intent** in the portal before restarting on this version.
+
+She only names a voice channel if you can see it yourself; otherwise she says just "in a voice channel".
 
 Amy also needs these permissions in your server (Server Settings → Roles → her role):
 
@@ -867,7 +873,7 @@ Look in `amy.log` (and `amy.log.1` … for older entries). Every warning and err
 
 **Bot won't start — `PrivilegedIntentsRequired`:**
 
-- The code sets `intents.members = True` but the **Server Members Intent** isn't enabled in the Developer Portal. Enable it (see Step 5).
+- The code asks for three privileged intents, and the Developer Portal (Bot → Privileged Gateway Intents) must have all three on: **Server Members Intent** (`intents.members`), **Message Content Intent** (`intents.message_content`) and **Presence Intent** (`intents.presences`). If any one is off, Discord refuses the connection. Enable them (see Step 5).
 
 **`/join` says "Voice support isn't fully installed":**
 

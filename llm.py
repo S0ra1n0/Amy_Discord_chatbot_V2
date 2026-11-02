@@ -330,6 +330,48 @@ def chat_text(content: str, my_id: int, my_role_id: Optional[int],
     return text.strip()
 
 
+PEOPLE_NOTE_MAX = 10
+_STATUS_WORDS = {"online": "online", "idle": "idle", "dnd": "do not disturb",
+                 "offline": "offline", "invisible": "offline"}   # invisible must never show
+
+
+PEOPLE_NAME_MAX = 40
+
+
+def _one_line(text: str) -> str:
+    """Control characters and newlines (a nickname can hold them) become spaces; capped."""
+    flat = " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
+    return flat[:PEOPLE_NAME_MAX]
+
+
+def people_note(people: Iterable[Tuple[str, Optional[str], Optional[str], bool]]) -> str:
+    """
+    A short system-prompt block about the people tagged in a message, or "" for none. Each entry
+    is (display name, discord status string or None when unknown, voice channel name or None
+    when not in voice, is a bot). A voice channel of "" means in voice but the asker may not see
+    which channel, so it is not named. Tells the model they are Discord users, not public
+    figures (so it must not web-search them), and lists their status. Names are quoted and
+    flattened to one line so a nickname can't pass for an instruction. Kept per turn: status goes
+    stale, so it is never stored.
+    """
+    lines = []
+    for name, status, voice_channel, is_bot in list(people)[:PEOPLE_NOTE_MAX]:
+        word = _STATUS_WORDS.get(str(status).lower()) if status else None
+        parts = []
+        if is_bot:
+            parts.append("a bot")
+        parts.append(word or "status unknown")
+        if voice_channel is not None:
+            channel = _one_line(voice_channel)
+            parts.append(f"in the voice channel {channel}" if channel else "in a voice channel")
+        lines.append(f'- "@{_one_line(name)}": ' + ", ".join(parts))
+    if not lines:
+        return ""
+    return ("The people tagged in this message are Discord users in this conversation, not public "
+            "figures. Do not web-search them. Answer questions about them from this list:\n"
+            + "\n".join(lines))
+
+
 def final_reply(accumulated: str, done_reason: Optional[str]) -> Tuple[str, bool]:
     """
     The reply to store and show, and whether the model hit its token limit. Empty output almost

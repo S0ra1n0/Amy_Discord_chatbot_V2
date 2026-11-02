@@ -546,7 +546,7 @@ class _Msg2(_FakeMsg):
         return nxt
 
 
-def _drive(script, user="q", search=False, chan=4343):
+def _drive(script, user="q", search=False, chan=4343, people_note=""):
     """Run chat_streaming over scripted streams (one list of chunks, or an exception, per pass)."""
     calls = []
 
@@ -561,7 +561,7 @@ def _drive(script, user="q", search=False, chan=4343):
     amy.ollama.chat, amy.WEB_SEARCH = fake_chat, search
     try:
         msg = _Msg2()
-        out = _asyncio.run(amy.chat_streaming(user, "srv", chan, msg))
+        out = _asyncio.run(amy.chat_streaming(user, "srv", chan, msg, people_note=people_note))
     finally:
         amy.ollama.chat, amy.WEB_SEARCH = saved
     return out, msg, calls
@@ -714,11 +714,22 @@ class _Author:
 
 
 _ME_ID, _MY_ROLE_ID, _BOB_ID = 480000000000000001, 480000000000000002, 480207264347717650
+_CAROL_ID, _DAN_ID = 480000000000000003, 480000000000000004
 
 
 class _Named:
-    def __init__(self, id, name):
+    def __init__(self, id, name, status="online", voice=None, bot=False):
         self.id, self.name, self.display_name = id, name, name
+        self.status, self.bot = status, bot
+        self.guild_permissions = type("GP", (), {"administrator": False})()
+        self.roles: list = []
+        self.voice = _Named(0, "vs") if voice else None
+        if voice:
+            chan = _Named(0, voice.lstrip("!"))
+            # a leading "!" marks a channel the asker (777) cannot view
+            chan.permissions_for = lambda who, hidden=voice.startswith("!"): (  # type: ignore
+                type("P", (), {"view_channel": not hidden})())
+            self.voice.channel = chan                   # type: ignore[attr-defined]
 
 
 class _Guild:
@@ -728,7 +739,13 @@ class _Guild:
     self_role = _Named(_MY_ROLE_ID, "Amy")
 
     def get_member(self, i):
-        return _Named(i, "Bob") if i == _BOB_ID else None
+        if i == _BOB_ID:
+            return _Named(i, "Bob", status="dnd", voice="General")
+        if i == _DAN_ID:
+            return _Named(i, "Dan", status="online", voice="!Staff")
+        if i == 777:                                # the asker in the people-note tests
+            return _Named(i, "Asker")
+        return None                                 # incl. _CAROL_ID: not cached
 
     def get_role(self, i):
         return None
@@ -758,14 +775,16 @@ class _InMsg:
     _next_id = 9_000_000
 
     def __init__(self, content, mtype=_dc.MessageType.default, author=None, guild=None,
-                 mentions=(), role_ids=(), reply_to=None):
+                 mentions=(), role_ids=(), reply_to=None, raw=None):
         _InMsg._next_id += 1
         self.id, self.content, self.type = _InMsg._next_id, content, mtype
         self.author = author or _Author(777)
         self.guild = guild
         self.channel = _Author(5150)
-        self.mentions = [_Named(i, "Bob" if i == _BOB_ID else "Amy") for i in mentions]
-        self.raw_mentions = list(mentions)
+        _names = {_BOB_ID: "Bob", _CAROL_ID: "Carol", _DAN_ID: "Dan"}
+        # status "offline": what a payload Member (no presence data) would claim
+        self.mentions = [_Named(i, _names.get(i, "Amy"), status="offline") for i in mentions]
+        self.raw_mentions = list(mentions) if raw is None else list(raw)
         self.raw_role_mentions = list(role_ids)
         if isinstance(reply_to, tuple):         # (author id, reference kind)
             self.reference = _Ref(*reply_to)
@@ -781,11 +800,13 @@ class _InMsg:
         return _FakeMsg()
 
 
-def _drive_on_message(m):
+def _drive_on_message(m, notes=None):
     seen = []
+    notes = [] if notes is None else notes
 
-    async def fake_chat(text, server_id, channel_id, thinking):
+    async def fake_chat(text, server_id, channel_id, thinking, people_note=""):
         seen.append(text)
+        notes.append(people_note)
         return None
 
     saved = (amy.chat_streaming, amy.bot_enabled)
@@ -862,6 +883,84 @@ for _label, _m, _want in _addr_cases:
     assert bool(_m.replies) is bool(_want), "FAIL addressed %s: replies=%r" % (_label, _m.replies)
     assert _hits == (1 if _want else 0), "FAIL addressed %s: rate-limit hits=%d" % (_label, _hits)
 print("on_message: OK (only tags, her role, replies to her and DMs are answered; text cleaned)")
+
+# ---- tagged members: their status reaches the model, per turn only (seen live 2026-11-02) ----
+# "@Amy is @Soraino online?" made the model web-search "@Soraino online" and describe a GitHub
+# account: it didn't know the name was a member of this server, and Amy couldn't see presence.
+_notes = []
+_m = _InMsg("<@%d> is <@%d> online?" % (_ME_ID, _BOB_ID), guild=_G, mentions=[_ME_ID, _BOB_ID])
+_seen, _ = _drive_on_message(_m, _notes)
+assert _seen == ["is @Bob online?"] and len(_notes) == 1, "FAIL people note: chat got %r" % (_seen,)
+assert '"@Bob": do not disturb, in the voice channel General' in _notes[0], \
+    "FAIL people note must name the member with status and voice: %r" % _notes[0]
+assert "@Amy" not in _notes[0], "FAIL people note must exclude Amy herself: %r" % _notes[0]
+# a voice channel the asker cannot view is not named
+_notes = []
+_drive_on_message(_InMsg("<@%d> is <@%d> around?" % (_ME_ID, _DAN_ID), guild=_G,
+                         mentions=[_ME_ID, _DAN_ID]), _notes)
+assert _notes, "FAIL no note for Dan"
+assert '"@Dan": online, in a voice channel' in _notes[0] and "Staff" not in _notes[0], \
+    "FAIL a channel the asker can't view must not be named: %r" % _notes
+# a member the guild has not cached: the payload's "offline" is no data, so status unknown
+_notes = []
+_drive_on_message(_InMsg("<@%d> is <@%d> there?" % (_ME_ID, _CAROL_ID), guild=_G,
+                         mentions=[_ME_ID, _CAROL_ID]), _notes)
+assert _notes and '"@Carol": status unknown' in _notes[0], \
+    "FAIL an uncached member must read as unknown, not offline: %r" % _notes
+# only people tagged in the text: a reply-ping (in mentions, not raw_mentions) adds nobody; once each
+_notes = []
+_drive_on_message(_InMsg("<@%d> <@%d> <@%d> hi" % (_ME_ID, _BOB_ID, _BOB_ID), guild=_G,
+                         mentions=[_ME_ID, _BOB_ID, _DAN_ID], raw=[_ME_ID, _BOB_ID, _BOB_ID]), _notes)
+assert _notes and _notes[0].count('"@Bob"') == 1 and "Dan" not in _notes[0], \
+    "FAIL reply-ping must not be listed and a repeated tag counts once: %r" % _notes
+_notes = []
+_drive_on_message(_InMsg("<@%d> hello" % _ME_ID, guild=_G, mentions=[_ME_ID]), _notes)
+assert _notes == [""], "FAIL no tagged member must give no note: %r" % (_notes,)
+_notes = []
+_drive_on_message(_InMsg("is <@%d> there?" % _BOB_ID, mentions=[_BOB_ID]), _notes)    # DM
+assert _notes and '"@Bob": status unknown' in _notes[0], "FAIL DM status must be unknown: %r" % (_notes,)
+
+# chat_streaming puts the note in this turn's system message (and so the tool round) only
+_got_convos = []
+
+
+class _NoteStream:
+    def __init__(self):
+        self.it = iter([{"message": {"content": "ok", "tool_calls": None}, "done_reason": "stop"}])
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self.it)
+
+
+_saved_chat = amy.ollama.chat
+amy.ollama.chat = lambda **kw: (_got_convos.append(kw["messages"]), _NoteStream())[1]  # type: ignore
+try:
+    _asyncio.run(amy.chat_streaming("is @Bob online?", "srv", 4350, _FakeMsg(),
+                                    people_note="NOTE-TEXT"))
+finally:
+    amy.ollama.chat = _saved_chat
+assert _got_convos and _got_convos[0][0]["role"] == "system" \
+    and _got_convos[0][0]["content"].endswith("NOTE-TEXT"), "FAIL note must end the system message"
+assert all("NOTE-TEXT" not in x["content"] for x in amy.db.get_messages("srv", 4350, limit=50)), \
+    "FAIL the status note must not be stored in the history"
+# ... and the tool-call follow-up round keeps it too (messages are rebuilt after the search)
+_saved_ws = (amy.websearch.search, amy.websearch.enrich)
+amy.websearch.search, amy.websearch.enrich = _fake_search, _fake_enrich
+try:
+    _tc3 = [{"function": {"name": "web_search", "arguments": {"query": "Bob"}}}]
+    _out, _m, _calls = _drive([[_chunk("", None, _tc3)], [_chunk("He is on dnd.", "stop")]],
+                              user="is @Bob online?", search=True, chan=4351,
+                              people_note="NOTE-TEXT")
+finally:
+    amy.websearch.search, amy.websearch.enrich = _saved_ws
+assert len(_calls) == 2, "FAIL note tool round: %d passes" % len(_calls)
+for _i in (0, 1):
+    assert _calls[_i]["messages"][0]["content"].endswith("NOTE-TEXT"), \
+        "FAIL pass %d system message lost the people note" % (_i + 1)
+print("people note: OK (named with status, per turn, not stored, kept in the tool round)")
 
 print()
 print("ALL REGRESSION TESTS PASSED")

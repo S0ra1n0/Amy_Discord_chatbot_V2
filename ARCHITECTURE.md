@@ -19,7 +19,7 @@ one guards against.
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
 | `access.py` | Who may do what with the music: the `Level` enum, `access_level`, the one `ACTIONS` table, `allowed` and `skip_decision` | **nothing external** |
 | `markup.py` | `escape_markdown`: makes stranger-controlled text (titles, lyrics) render literally in Discord | **nothing external** |
-| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round), whether a message is chat at all (`should_chat`) and whether it is addressed to Amy (`is_addressed`), the text the model sees (`chat_text`) | **nothing external** |
+| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round), whether a message is chat at all (`should_chat`) and whether it is addressed to Amy (`is_addressed`), the text the model sees (`chat_text`), the per-turn note on tagged members' status (`people_note`) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file, and `log_failure` for boundary catch-alls | **nothing external** |
@@ -580,6 +580,16 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `llm.chat_text(...)`, not `msg.content`: her own mention (by id) is removed, other mentions
   become `@Name` / `@role` / `#channel`, whitespace is tidied, and a bare tag (empty result) is
   ignored. History and the web-search query therefore never hold raw `<@id>` syntax.
+- **Tagged members' status is per turn and never stored.** `_people_note(msg)` builds
+  `llm.people_note(...)` from `msg.raw_mentions` (people tagged in the text, once each, not Amy; a
+  reply-ping is not listed). Status and voice come from `guild.get_member` only: in a DM or for an
+  uncached member the status is unknown (a payload Member has no presence and would read "offline").
+  A voice channel is named only if the asker can `view_channel` it, else just "in a voice channel".
+  `people_note` quotes names and flattens them to one line, capped at 40 characters, so a nickname
+  can't pose as an instruction. Needs `intents.presences` (privileged). `on_message` passes
+  it to `chat_streaming(..., people_note=)`, which appends it to THIS turn's system message (so the
+  tool-call round, rebuilt from `messages`, keeps it). It is never written to the database: status
+  goes stale. `invisible` is always shown as offline.
 
 ## Web search
 

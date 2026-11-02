@@ -92,6 +92,7 @@ import discord.voice_client as vc
 check("has_nacl", vc.has_nacl)
 check("has_dave", vc.has_dave)
 check("intents.members enabled", amy.intents.members)
+check("intents.presences enabled (status of tagged members)", amy.intents.presences)
 check("intents.message_content enabled", amy.intents.message_content)
 
 print()

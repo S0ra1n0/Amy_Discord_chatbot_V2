@@ -1292,7 +1292,7 @@ try:
     _spoken_replies = []
     _real_chat, _real_sr = amy.chat_streaming, amy.speak_reply
 
-    async def _fake_chat(content, server_id, channel_id, msg):
+    async def _fake_chat(content, server_id, channel_id, msg, people_note=""):
         return "Hi there, nice to meet you."
 
     async def _record_reply(guild, reply):

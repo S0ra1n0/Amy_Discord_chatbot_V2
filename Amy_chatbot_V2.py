@@ -189,6 +189,10 @@ intents.message_content = True
 # Needed so VoiceChannel.members resolves reliably (it looks up guild.get_member),
 # which is what empty-channel auto-disconnect depends on.
 intents.members = True
+# Privileged: must also be enabled in the Discord Developer Portal, or the bot won't start
+# (PrivilegedIntentsRequired). Needed for the online/idle/do-not-disturb status of the
+# members tagged in a chat message (llm.people_note).
+intents.presences = True
 
 # Nothing Amy sends may ping @everyone, @here, a role, or an arbitrary user. She repeats
 # text she doesn't control - model replies (steerable by fetched web pages, or by simply
@@ -684,9 +688,12 @@ async def chat_streaming(
     server_id: Union[int, str],
     channel_id: int,
     discord_msg: discord.Message,
+    people_note: str = "",
 ) -> Optional[str]:
     """
     Stream an Ollama response and progressively edit discord_msg as tokens arrive.
+    people_note (status of the tagged members) goes into this turn's system message only and
+    is never stored: status goes stale.
     Handles <think> blocks by showing 'Thinking...' until actual content begins.
     Returns the final reply text (so it can also be spoken), or None if it failed.
     """
@@ -698,8 +705,11 @@ async def chat_streaming(
     # Only the most recent turns are replayed; the full conversation stays in the database.
     history = db.get_messages(server_id, channel_id, limit=HISTORY_LIMIT)
 
-    messages = [{"role": "system",
-                 "content": system_with_time(system_prompt, datetime.now())}] + history
+    system_content = system_with_time(system_prompt, datetime.now())
+    if people_note:
+        system_content += "\n\n" + people_note
+    # `messages` is also what the tool-call follow-up round is rebuilt from, so the note survives it
+    messages = [{"role": "system", "content": system_content}] + history
 
     def stream_worker(convo, offer_tools: bool) -> None:
         """Pump one Ollama stream into the queue. Tool calls are captured, not queued."""
@@ -3384,6 +3394,40 @@ def _replied_to_author_id(msg: discord.Message) -> Optional[int]:
     return target.author.id if target is not None else None
 
 
+def _people_note(msg: discord.Message) -> str:
+    """
+    Status note for the people tagged in the TEXT of `msg` (raw_mentions, so a reply-ping doesn't
+    count; not Amy herself; each once); "" when there are none. Status and voice come only from the
+    guild's cache: a mention payload's Member carries no presence and would read "offline", so
+    that case is "status unknown" and the payload only lends its name. A voice channel the asker
+    can't view is not named.
+    """
+    my_id = bot.user.id if bot.user else 0
+    guild = msg.guild
+    asker = msg.author if isinstance(msg.author, discord.Member) else (
+        guild.get_member(msg.author.id) if guild else None)
+    payload = {u.id: u for u in msg.mentions}
+    people = []
+    for uid in dict.fromkeys(msg.raw_mentions):         # in order, once each
+        if uid == my_id:
+            continue
+        m = guild.get_member(uid) if guild else None
+        who = m or payload.get(uid)
+        if who is None:
+            continue
+        if m is None:                                   # DM or uncached: no presence data
+            people.append((who.display_name, None, None, who.bot))
+            continue
+        state = getattr(m, "voice", None)
+        chan = getattr(state, "channel", None) if state else None
+        voice_name: Optional[str] = None
+        if chan is not None:
+            can_view = asker is not None and chan.permissions_for(asker).view_channel
+            voice_name = chan.name if can_view else ""
+        people.append((m.display_name, str(m.status), voice_name, m.bot))
+    return llm.people_note(people)
+
+
 def _addressed_text(msg: discord.Message) -> Optional[str]:
     """The cleaned text for the model when `msg` is meant for Amy, else None (not addressed)."""
     my_id = bot.user.id if bot.user else 0
@@ -3465,7 +3509,8 @@ async def on_message(msg: discord.Message) -> None:
 
         log.debug("Processing as streaming chat...")
         thinking_msg = await msg.reply("⏳ Thinking...")
-        reply = await chat_streaming(text, server_id, channel_id, thinking_msg)
+        reply = await chat_streaming(text, server_id, channel_id, thinking_msg,
+                                     people_note=_people_note(msg))
         # Spoken too, but only to someone in the call with her (D4) - and in the
         # background: the paraphrase and synthesis take seconds and the text is already out.
         if reply and msg.guild is not None and in_call_with_amy(msg.guild, msg.author.id):
