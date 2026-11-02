@@ -713,15 +713,64 @@ class _Author:
         self.id, self.bot = uid, bot
 
 
+_ME_ID, _MY_ROLE_ID, _BOB_ID = 480000000000000001, 480000000000000002, 480207264347717650
+
+
+class _Named:
+    def __init__(self, id, name):
+        self.id, self.name, self.display_name = id, name, name
+
+
+class _Guild:
+    """Just what on_message reads: Amy's bot role and name lookups."""
+    id = 4242
+    owner_id = 1                    # nobody in the tests: speakers are plain, rate-limited members
+    self_role = _Named(_MY_ROLE_ID, "Amy")
+
+    def get_member(self, i):
+        return _Named(i, "Bob") if i == _BOB_ID else None
+
+    def get_role(self, i):
+        return None
+
+    def get_channel(self, i):
+        return None                 # like discord.py 2.7: no threads here
+
+    def get_channel_or_thread(self, i):
+        return _Named(i, "side-thread") if i == 555 else None
+
+
+class _Ref:
+    def __init__(self, author_id, kind="cached"):
+        self.resolved = None
+        self.cached_message = None
+        if kind == "cached":
+            self.cached_message = _Named(0, "replied-to")
+            self.cached_message.author = _Author(author_id)     # type: ignore[attr-defined]
+        elif kind == "resolved":                # a real Message, as Discord resolves a reply
+            self.resolved = object.__new__(_dc.Message)
+            self.resolved.author = _Author(author_id)           # type: ignore[assignment]
+        elif kind == "deleted":                 # DeletedReferencedMessage-like: no .author
+            self.resolved = type("DeletedReferencedMessage", (), {})()
+
+
 class _InMsg:
     _next_id = 9_000_000
 
-    def __init__(self, content, mtype=_dc.MessageType.default, author=None):
+    def __init__(self, content, mtype=_dc.MessageType.default, author=None, guild=None,
+                 mentions=(), role_ids=(), reply_to=None):
         _InMsg._next_id += 1
         self.id, self.content, self.type = _InMsg._next_id, content, mtype
         self.author = author or _Author(777)
-        self.guild = None
+        self.guild = guild
         self.channel = _Author(5150)
+        self.mentions = [_Named(i, "Bob" if i == _BOB_ID else "Amy") for i in mentions]
+        self.raw_mentions = list(mentions)
+        self.raw_role_mentions = list(role_ids)
+        if isinstance(reply_to, tuple):         # (author id, reference kind)
+            self.reference = _Ref(*reply_to)
+        else:
+            self.reference = _Ref(reply_to) if reply_to else None
         self.replies = []
 
     def is_system(self):
@@ -742,10 +791,13 @@ def _drive_on_message(m):
     saved = (amy.chat_streaming, amy.bot_enabled)
     amy.chat_streaming, amy.bot_enabled = fake_chat, True
     amy.rate_limit_store.clear()
+    saved_user = amy.bot._connection.user
+    amy.bot._connection.user = _Named(_ME_ID, "Amy")        # type: ignore[assignment]
     try:
         _asyncio.run(amy.on_message(m))     # type: ignore[arg-type]
     finally:
         amy.chat_streaming, amy.bot_enabled = saved
+        amy.bot._connection.user = saved_user
     hits = len(amy.rate_limit_store.get(m.author.id, []))
     amy.rate_limit_store.clear()
     return seen, hits
@@ -766,6 +818,50 @@ for _label, _m, _chats in _cases:
     assert bool(_m.replies) is _chats, "FAIL on_message %s: replies=%r" % (_label, _m.replies)
     assert _hits == (1 if _chats else 0), "FAIL on_message %s: rate-limit hits=%d" % (_label, _hits)
 print("on_message: OK (system, bot and text-less messages ignored; normal and reply chat)")
+
+# ---- on_message: only messages addressed to Amy (seen live 2026-11-02) -----------------------
+# A message tagging ANOTHER user was answered, and the model saw the raw <@id> and invented a
+# "/say UserID:Text" command format. In a server she answers a tag, her bot role, or a reply to
+# her; a DM is always for her. The text she gets has her own tag removed and others readable.
+_G = _Guild()
+_addr_cases = [
+    ("tags another user only", _InMsg("<@%d> are you coming?" % _BOB_ID, guild=_G,
+                                      mentions=[_BOB_ID]), None),
+    ("@everyone only", _InMsg("@everyone dinner", guild=_G), None),
+    ("plain server message", _InMsg("hello Amy", guild=_G), None),
+    ("reply to someone else", _InMsg("agreed", _dc.MessageType.reply, guild=_G,
+                                     reply_to=_BOB_ID), None),
+    ("tags a role that is not hers", _InMsg("<@&999> hi", guild=_G, role_ids=[999]), None),
+    ("tag <@id>", _InMsg("<@%d> hello" % _ME_ID, guild=_G, mentions=[_ME_ID]), "hello"),
+    ("tag <@!id>", _InMsg("hello <@!%d>" % _ME_ID, guild=_G, mentions=[_ME_ID]), "hello"),
+    ("tags Amy and another user", _InMsg("<@%d> ask <@%d>" % (_ME_ID, _BOB_ID), guild=_G,
+                                         mentions=[_ME_ID, _BOB_ID]), "ask @Bob"),
+    ("tags her role", _InMsg("<@&%d> hello" % _MY_ROLE_ID, guild=_G,
+                             role_ids=[_MY_ROLE_ID]), "hello"),
+    ("reply to Amy, no tag", _InMsg("and you?", _dc.MessageType.reply, guild=_G,
+                                    reply_to=_ME_ID), "and you?"),
+    ("reply to Amy, resolved Message", _InMsg("and you?", _dc.MessageType.reply, guild=_G,
+                                              reply_to=(_ME_ID, "resolved")), "and you?"),
+    ("reply to someone else, resolved Message", _InMsg("agreed", _dc.MessageType.reply, guild=_G,
+                                                       reply_to=(_BOB_ID, "resolved")), None),
+    ("reply to a deleted message", _InMsg("agreed", _dc.MessageType.reply, guild=_G,
+                                          reply_to=(_ME_ID, "deleted")), None),
+    ("reply with nothing resolved", _InMsg("agreed", _dc.MessageType.reply, guild=_G,
+                                           reply_to=(_ME_ID, "none")), None),
+    ("thread mention is named", _InMsg("<@%d> look in <#555>" % _ME_ID, guild=_G,
+                                       mentions=[_ME_ID]), "look in #side-thread"),
+    ("DM without a tag", _InMsg("hi there"), "hi there"),
+    ("bare tag", _InMsg("<@%d>" % _ME_ID, guild=_G, mentions=[_ME_ID]), None),
+    ("bare tag plus her role", _InMsg("<@%d> <@&%d>" % (_ME_ID, _MY_ROLE_ID), guild=_G,
+                                      mentions=[_ME_ID], role_ids=[_MY_ROLE_ID]), None),
+]
+for _label, _m, _want in _addr_cases:
+    _seen, _hits = _drive_on_message(_m)
+    assert _seen == ([_want] if _want else []), "FAIL addressed %s: chat got %r" % (_label, _seen)
+    assert all("<@" not in t for t in _seen), "FAIL addressed %s: raw mention reached chat" % _label
+    assert bool(_m.replies) is bool(_want), "FAIL addressed %s: replies=%r" % (_label, _m.replies)
+    assert _hits == (1 if _want else 0), "FAIL addressed %s: rate-limit hits=%d" % (_label, _hits)
+print("on_message: OK (only tags, her role, replies to her and DMs are answered; text cleaned)")
 
 print()
 print("ALL REGRESSION TESTS PASSED")

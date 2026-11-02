@@ -1307,7 +1307,9 @@ try:
             self.author = author
             self.guild = guild
             self.channel = type("Ch", (), {"id": 77})()
-            self.content = "hello amy"
+            self.content = "<@4000> hello amy"       # Amy only chats when tagged
+            self.mentions, self.raw_mentions, self.raw_role_mentions = [], [4000], []
+            self.reference = None
 
         def is_system(self):
             return False
@@ -1316,6 +1318,8 @@ try:
             return self
 
     amy.chat_streaming, amy.speak_reply = _fake_chat, _record_reply
+    _real_user = amy.bot._connection.user
+    amy.bot._connection.user = type("Me", (), {"id": 4000})()       # type: ignore[assignment]
     try:
         def chat_from(member, guild):
             _spoken_replies.clear()
@@ -1335,6 +1339,7 @@ try:
               chat_from(far, Guild(OWNER, far, it.guild.voice_client, guild_id=GUILD)) == [])
     finally:
         amy.chat_streaming, amy.speak_reply = _real_chat, _real_sr
+        amy.bot._connection.user = _real_user
 
     # /play confirms what it did: starting now, or where it landed in the queue
     _real_res, _real_adv, _real_ff = (amy.music.resolve_metadata, amy.advance_playback,

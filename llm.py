@@ -13,7 +13,7 @@ to import the entire bot, which builds a Discord client and opens its database.
 
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 THINK_MODES = ("false", "true", "auto")
 
@@ -275,6 +275,59 @@ def should_chat(is_system: bool, author_is_bot: bool, content: str) -> bool:
     if is_system or author_is_bot:
         return False
     return bool((content or "").strip())
+
+
+def is_addressed(is_dm: bool, mentioned_user_ids: Iterable[int], mentioned_role_ids: Iterable[int],
+                 replied_to_author_id: Optional[int], my_id: int, my_role_id: Optional[int]) -> bool:
+    """
+    True when a message is meant for Amy: a DM, a mention of her user or of her own bot role, or
+    a Discord reply to one of her messages. @everyone / @here and mentions of other people are
+    not (the caller passes only explicit user and role ids).
+    """
+    if is_dm:
+        return True
+    if my_id in set(mentioned_user_ids):
+        return True
+    if my_role_id is not None and my_role_id in set(mentioned_role_ids):
+        return True
+    return replied_to_author_id is not None and replied_to_author_id == my_id
+
+
+_USER_MENTION = re.compile(r"<@!?(\d+)>")
+_ROLE_MENTION = re.compile(r"<@&(\d+)>")
+_CHANNEL_MENTION = re.compile(r"<#(\d+)>")
+# Same, with the horizontal whitespace around it: groups 1 and 4 are the spaces, 3 is the id
+_OWN_USER = re.compile(r"([ \t]*)(<@!?(\d+)>)([ \t]*)")
+_OWN_ROLE = re.compile(r"([ \t]*)(<@&(\d+)>)([ \t]*)")
+
+
+def chat_text(content: str, my_id: int, my_role_id: Optional[int],
+              user_name: Callable[[int], Optional[str]], role_name: Callable[[int], Optional[str]],
+              channel_name: Callable[[int], Optional[str]]) -> str:
+    """
+    The message as the model should see it. Amy's own mentions (user and role, matched by id)
+    are removed; other mentions become readable (`@Name`, `@role`, `#channel`, via the
+    resolvers, which return None for unknown ids). Other whitespace, including the indentation of
+    pasted code, is left alone; only the ends are stripped. Empty when nothing but a tag was left.
+    """
+    # Whitespace is touched only around her own tag (pasted code keeps its indentation): the tag
+    # goes with the spaces/tabs beside it, leaving one space only if it sat between two words.
+    def drop_own(m: "re.Match[str]") -> str:
+        if int(m.group(3)) != my_id:
+            return m.group(0)
+        return " " if m.group(1) and m.group(4) else ""
+
+    def drop_own_role(m: "re.Match[str]") -> str:
+        if my_role_id is None or int(m.group(3)) != my_role_id:
+            return m.group(0)
+        return " " if m.group(1) and m.group(4) else ""
+
+    text = _OWN_USER.sub(drop_own, content or "")
+    text = _OWN_ROLE.sub(drop_own_role, text)
+    text = _USER_MENTION.sub(lambda m: "@" + (user_name(int(m.group(1))) or "deleted-user"), text)
+    text = _ROLE_MENTION.sub(lambda m: "@" + (role_name(int(m.group(1))) or "deleted-role"), text)
+    text = _CHANNEL_MENTION.sub(lambda m: "#" + (channel_name(int(m.group(1))) or "deleted-channel"), text)
+    return text.strip()
 
 
 def final_reply(accumulated: str, done_reason: Optional[str]) -> Tuple[str, bool]:

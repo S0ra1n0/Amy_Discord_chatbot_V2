@@ -30,7 +30,10 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/loop [off|track|queue]` - Set repeat mode
 `/autoplay [on|off]` - Play related songs when the queue ends
 `/filter [preset]` - Bass boost, nightcore, slowed or off
-(With a DJ role set, only DJs can pause, stop, seek, loop, shuffle, filter, autoplay and skip other people's songs; whoever queued a song, or someone alone with me, can still skip it; anyone in the call can /play, /search and /shush.)"""
+
+(With a DJ role set, only DJs can pause, stop, seek, loop, shuffle, filter, autoplay and skip other people's songs; whoever queued a song, or someone alone with me, can still skip it; anyone in the call can /play, /search and /shush.)
+
+**Chat:** tag @Amy, reply to one of my messages, or DM me. I ignore other messages."""
 
 HELP_ADMIN = """
 **Commands — Admin only:**

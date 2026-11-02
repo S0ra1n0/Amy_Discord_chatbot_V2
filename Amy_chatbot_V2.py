@@ -3374,6 +3374,43 @@ async def on_disconnect() -> None:
 
 last_processed_id: Union[int, None] = None
 
+
+def _replied_to_author_id(msg: discord.Message) -> Optional[int]:
+    """Author of the message this one replies to, from what Discord already sent (no API fetch)."""
+    ref = msg.reference
+    if ref is None:
+        return None
+    target = ref.resolved if isinstance(ref.resolved, discord.Message) else ref.cached_message
+    return target.author.id if target is not None else None
+
+
+def _addressed_text(msg: discord.Message) -> Optional[str]:
+    """The cleaned text for the model when `msg` is meant for Amy, else None (not addressed)."""
+    my_id = bot.user.id if bot.user else 0
+    guild = msg.guild
+    role = guild.self_role if guild else None
+    my_role_id = role.id if role else None
+    user_ids = set(msg.raw_mentions) | {u.id for u in msg.mentions}
+    if not llm.is_addressed(guild is None, user_ids, msg.raw_role_mentions,
+                            _replied_to_author_id(msg), my_id, my_role_id):
+        return None
+
+    def user_name(uid: int) -> Optional[str]:
+        m = (guild.get_member(uid) if guild else None) or discord.utils.get(msg.mentions, id=uid)
+        return m.display_name if m else None
+
+    def role_name(rid: int) -> Optional[str]:
+        r = guild.get_role(rid) if guild else None
+        return r.name if r else None
+
+    def channel_name(cid: int) -> Optional[str]:
+        # get_channel misses threads; bot.get_channel covers other servers' channels
+        c = (guild.get_channel_or_thread(cid) if guild else None) or bot.get_channel(cid)
+        return getattr(c, "name", None)
+
+    return llm.chat_text(msg.content, my_id, my_role_id, user_name, role_name, channel_name)
+
+
 @bot.event
 async def on_message(msg: discord.Message) -> None:
     """Process messages from users - execute commands or send to chat."""
@@ -3394,6 +3431,17 @@ async def on_message(msg: discord.Message) -> None:
         return
 
     try:
+        # Only talk when spoken to: a tag, a reply to her, or a DM. Before the rate limit, so a
+        # message for someone else costs nothing. Inside the try so a bug here is logged and
+        # answered with "Sorry..." like any other (an ordinary unaddressed message never errors).
+        text = _addressed_text(msg)
+        if text is None:
+            log.debug("Ignoring a message not addressed to Amy")
+            return
+        if not text:
+            log.debug("Ignoring a bare tag (nothing left after removing the mention)")
+            return
+
         server_id = msg.guild.id if msg.guild else "DM"
         channel_id = msg.channel.id
         log.debug(f"Server ID: {server_id}, Channel ID: {channel_id}")
@@ -3417,7 +3465,7 @@ async def on_message(msg: discord.Message) -> None:
 
         log.debug("Processing as streaming chat...")
         thinking_msg = await msg.reply("⏳ Thinking...")
-        reply = await chat_streaming(msg.content, server_id, channel_id, thinking_msg)
+        reply = await chat_streaming(text, server_id, channel_id, thinking_msg)
         # Spoken too, but only to someone in the call with her (D4) - and in the
         # background: the paraphrase and synthesis take seconds and the text is already out.
         if reply and msg.guild is not None and in_call_with_amy(msg.guild, msg.author.id):

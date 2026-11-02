@@ -19,7 +19,7 @@ one guards against.
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
 | `access.py` | Who may do what with the music: the `Level` enum, `access_level`, the one `ACTIONS` table, `allowed` and `skip_decision` | **nothing external** |
 | `markup.py` | `escape_markdown`: makes stranger-controlled text (titles, lyrics) render literally in Discord | **nothing external** |
-| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round), whether a message is chat at all (`should_chat`) | **nothing external** |
+| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round), whether a message is chat at all (`should_chat`) and whether it is addressed to Amy (`is_addressed`), the text the model sees (`chat_text`) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file, and `log_failure` for boundary catch-alls | **nothing external** |
@@ -571,6 +571,15 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   the "Thinking..." reply: system messages (e.g. "X joined the server"; discord.py's own
   `is_system()`, not a list of types), messages from any bot (no bot-to-bot loops) and
   text-less messages (sticker/image only) are ignored silently. `test_regression.py` drives it.
+- **Amy only chats when addressed.** After `should_chat`, still before the rate limit and the
+  "Thinking..." reply, `_addressed_text(msg)` gathers ids from the Message and asks
+  `llm.is_addressed(...)`: a DM, her user id among the mentioned ids (raw or `msg.mentions`; never
+  discord.py's "mentioned in" helper, which counts @everyone/@here), her `guild.self_role` among the role
+  mentions, or a reply whose `reference.resolved` / `cached_message` author is her (no API fetch;
+  unknown means not addressed). Otherwise the message is only `log.debug`'d. The model gets
+  `llm.chat_text(...)`, not `msg.content`: her own mention (by id) is removed, other mentions
+  become `@Name` / `@role` / `#channel`, whitespace is tidied, and a bare tag (empty result) is
+  ignored. History and the web-search query therefore never hold raw `<@id>` syntax.
 
 ## Web search
 

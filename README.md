@@ -21,6 +21,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - Automatic daily pruning of old conversation history
 - Admin access control — admin commands restricted to server owner or users with the `Admin` role
 - Rate limiting — non-admin users are capped at 5 chat messages per hour, and 3 voice commands per minute
+- Amy only chats when spoken to — tag her (or her bot role), reply to one of her messages, or DM her; `@everyone` and messages tagging other people don't count, and a bare tag with no text is ignored
 - Amy only chats with people — Discord's own system messages (such as "X joined the server"), messages from other bots and messages with no text (sticker- or image-only) are ignored: no reply, no rate-limit charge
 - **Native slash commands** — Amy's commands appear in Discord's own autocomplete, with typed arguments Discord validates before they reach the bot
 
@@ -28,7 +29,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 
 ### Chat
 
-Simply message Amy naturally — she maintains conversation context and responds thoughtfully. Amy replies with a live streaming message that updates in real-time as she generates her response, so you see output immediately instead of waiting for the full reply.
+**Tag `@Amy` or reply to one of her messages** — she only chats when spoken to, so a message that tags someone else, or no one, is left alone (in a DM every message is for her). Her own tag is removed before the model sees the text, and other mentions are shown as plain names (`@Bob`, `#general`). She maintains conversation context and responds thoughtfully. Amy replies with a live streaming message that updates in real-time as she generates her response, so you see output immediately instead of waiting for the full reply.
 
 > **Note:** Non-admin users are limited to **5 messages per hour**. Admins (server owner or `Admin` role) have no limit.
 
@@ -186,7 +187,7 @@ the autocomplete. Amy clears the stale global scope automatically on startup whe
 `GUILD_ID` is set, and logs how many duplicates she removed.
 
 > Typing a command as an ordinary message (`/play something`) no longer works — use the
-> real slash command. Talking to Amy normally is unchanged.
+> real slash command. To chat with Amy, tag her, reply to one of her messages, or DM her.
 
 ### Reasoning modes
 
@@ -515,7 +516,7 @@ If you just want Amy quieter, prefer Discord's own per-user volume slider (right
 
 1. The bot connects to your Discord server using your bot token
 2. Commands come in as Discord slash commands (`/help`, `/play`, ...), not as message text
-   - Any ordinary message is passed to Amy, who responds using the Ollama model (if the bot is enabled)
+   - A message that tags Amy, replies to her, or is a DM is passed to Amy, who responds using the Ollama model (if the bot is enabled); other messages are ignored
 3. All conversations are saved to a local SQLite database (`amy_memory.db`) — history persists across restarts
 4. A background task runs every 24 hours and deletes conversation history older than `DB_PRUNE_DAYS` (default 30 days)
 5. Non-admin users are rate-limited to 5 chat messages per hour; excess messages receive a cooldown reply
@@ -617,6 +618,8 @@ naming it, without printing either value.
 Voice features need this. In the [Discord Developer Portal](https://discord.com/developers/applications) → your application → **Bot** → **Privileged Gateway Intents**, turn on **Server Members Intent**.
 
 > ⚠️ The code sets `intents.members = True`. If you don't enable it in the portal, **the bot will not start** — it exits with `PrivilegedIntentsRequired`. The two must match.
+
+Chat also reads message text, so the code sets `intents.message_content = True`. Turn on **Message Content Intent** on the same portal page too. It is privileged like the members intent: if the code asks for it and the portal has it off, **the bot will not start** (`PrivilegedIntentsRequired`).
 
 Amy also needs these permissions in your server (Server Settings → Roles → her role):
 
@@ -843,6 +846,7 @@ Look in `amy.log` (and `amy.log.1` … for older entries). Every warning and err
 
 **Bot doesn't respond to chat:**
 
+- Amy doesn't answer — tag her (`@Amy`) or reply to one of her messages; she ignores messages that don't address her
 - Ensure Ollama is running (`ollama serve`)
 - Check that the model you want to use is installed (`ollama list`)
 - Verify your Discord token is correct in `.env`

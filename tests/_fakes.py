@@ -201,6 +201,7 @@ class Guild:
         self.owner_id = owner_id
         self._member = member
         self.voice_client = voice_client
+        self.self_role = None           # Amy's own bot-managed role (none in these fakes)
         self.me = type("Me", (), {"guild_permissions": me_perms or Perms()})()
 
     def get_member(self, uid):

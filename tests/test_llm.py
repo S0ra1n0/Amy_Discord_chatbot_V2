@@ -231,5 +231,51 @@ for _label, _args, _want in [
         _label, llm.should_chat(*_args))
 print("should_chat: OK (system, bot, text-less ignored; normal and reply answered)")
 
+# is_addressed: Amy only chats when spoken to (user tag, her bot role, reply to her, DM).
+_ME, _ROLE, _OTHER = 480000000000000001, 480000000000000002, 480207264347717650
+for _label, _args, _want in [
+    ("tagged by user mention", (False, [_ME], [], None, _ME, _ROLE), True),
+    ("tagged among others", (False, [_OTHER, _ME], [], None, _ME, _ROLE), True),
+    ("tagged by her role", (False, [], [_ROLE], None, _ME, _ROLE), True),
+    ("reply to her", (False, [], [], _ME, _ME, _ROLE), True),
+    ("reply to someone else", (False, [], [], _OTHER, _ME, _ROLE), False),
+    ("@everyone only (no ids)", (False, [], [], None, _ME, _ROLE), False),
+    ("other user only", (False, [_OTHER], [], None, _ME, _ROLE), False),
+    ("other role only", (False, [], [_OTHER], None, _ME, _ROLE), False),
+    ("her role id but she has no role", (False, [], [_ROLE], None, _ME, None), False),
+    ("DM without tag", (True, [], [], None, _ME, None), True),
+]:
+    assert llm.is_addressed(*_args) is _want, "FAIL is_addressed %s -> %r" % (
+        _label, llm.is_addressed(*_args))
+print("is_addressed: OK")
+
+# chat_text: her mentions out, others readable, whitespace tidy, bare tag -> "".
+_names = {_OTHER: "Sora"}
+_un, _rn, _cn = _names.get, {777: "mods"}.get, {555: "general"}.get
+for _label, _raw, _want in [
+    ("her <@id> removed", "<@%d> hello there" % _ME, "hello there"),
+    ("her <@!id> removed", "hi <@!%d>, how are you" % _ME, "hi, how are you"),
+    ("her tag between words keeps one space", "hi <@%d> there" % _ME, "hi there"),
+    ("her role removed", "<@&%d> hello" % _ROLE, "hello"),
+    ("other user readable", "<@%d> hey, ask <@%d> about it" % (_ME, _OTHER),
+     "hey, ask @Sora about it"),
+    ("other user nick form", "tell <@!%d> hi" % _OTHER, "tell @Sora hi"),
+    ("other role and channel", "<@&777> see <#555>", "@mods see #general"),
+    ("unknown ids", "<@123> <@&124> <#125>", "@deleted-user @deleted-role #deleted-channel"),
+    ("internal whitespace kept", "  <@%d>   a \t  b \n\n  c  " % _ME, "a \t  b \n\n  c"),
+    ("pasted code keeps its indent",
+     "<@%d> why does this fail?\n```py\ndef f(x):\n    if x:\n        return 1\n```" % _ME,
+     "why does this fail?\n```py\ndef f(x):\n    if x:\n        return 1\n```"),
+    ("bare tag", "<@%d>" % _ME, ""),
+    ("bare tags and spaces", " <@%d>  <@&%d> " % (_ME, _ROLE), ""),
+    ("@everyone left as text", "@everyone <@%d> hi" % _ME, "@everyone hi"),
+]:
+    _got = llm.chat_text(_raw, _ME, _ROLE, _un, _rn, _cn)
+    assert _got == _want, "FAIL chat_text %s: %r != %r" % (_label, _got, _want)
+assert "<@" not in llm.chat_text("<@%d> <@%d> x" % (_ME, _OTHER), _ME, None, _un, _rn, _cn)
+assert llm.chat_text("<@&%d> x" % _ROLE, _ME, None, _un, _rn, _cn) == "@deleted-role x", \
+    "FAIL chat_text must not strip a role id when Amy has no role"
+print("chat_text: OK")
+
 print()
 print("ALL LLM TESTS PASSED")

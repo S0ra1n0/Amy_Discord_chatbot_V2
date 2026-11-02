@@ -88,6 +88,7 @@ suite with no arguments, which is why that shim exists rather than a flag.
 Several were written *after* a bug reached the running bot, and now stop it recurring:
 
 - `test_llm.py` / `test_regression.py` — Discord's "X joined the server" system message (empty content, authored by the new member) was treated as chat: it hit that member's rate limit, got a "Thinking..." reply and an empty question sent to the model. `llm.should_chat` is table-tested (system, other bot, empty/whitespace, normal, reply), and `on_message` is driven with fake messages: ignored ones cause no reply, no rate-limit hit and no `chat_streaming` call; normal and reply messages still do.
+- `test_llm.py` / `test_regression.py` — Amy answered a message that tagged ANOTHER user, and the model saw the raw `<@id>` and invented a "/say UserID:Text" format. `llm.is_addressed` is table-tested (user tag, her role, reply to her, reply to someone else, @everyone only, other user only, DM) as is `llm.chat_text` (her mention removed by id, others shown as `@Name`/`@role`/`#channel`, whitespace tidied, bare tag empty); `on_message` is driven with fake guild messages: unaddressed ones cause no reply, no rate-limit hit and no `chat_streaming` call, addressed ones reach chat with clean text (no `<@`), and a bare tag is ignored.
 - `test_security.py` — `/play` could once probe any file on the host, including `.env`
 - `test_commands_audit.py` — `/dice 6 1000000000` froze the entire bot for minutes
 - `test_queue_mgmt.py` — `/skip` silently did nothing under `loop track`
