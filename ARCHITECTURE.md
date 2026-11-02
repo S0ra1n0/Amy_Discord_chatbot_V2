@@ -587,9 +587,10 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   A voice channel is named only if the asker can `view_channel` it, else just "in a voice channel".
   `people_note` quotes names and flattens them to one line, capped at 40 characters, so a nickname
   can't pose as an instruction. Needs `intents.presences` (privileged). `on_message` passes
-  it to `chat_streaming(..., people_note=)`, which appends it to THIS turn's system message (so the
-  tool-call round, rebuilt from `messages`, keeps it). It is never written to the database: status
-  goes stale. `invisible` is always shown as offline.
+  it to `chat_streaming(..., people_note=)`, which appends it to a copy of THIS turn's user message
+  (never the system message: a tiny model copies its own earlier wrong answer from the history over
+  a system note, measured 0/3 vs 3/3). The tool-call round, rebuilt from `messages`, keeps it. It is
+  never written to the database: status goes stale. `invisible` is always shown as offline.
 
 ## Web search
 

@@ -692,8 +692,8 @@ async def chat_streaming(
 ) -> Optional[str]:
     """
     Stream an Ollama response and progressively edit discord_msg as tokens arrive.
-    people_note (status of the tagged members) goes into this turn's system message only and
-    is never stored: status goes stale.
+    people_note (status of the tagged members) is appended to the model's copy of this turn's
+    user message only and is never stored: status goes stale.
     Handles <think> blocks by showing 'Thinking...' until actual content begins.
     Returns the final reply text (so it can also be spoken), or None if it failed.
     """
@@ -705,11 +705,13 @@ async def chat_streaming(
     # Only the most recent turns are replayed; the full conversation stays in the database.
     history = db.get_messages(server_id, channel_id, limit=HISTORY_LIMIT)
 
-    system_content = system_with_time(system_prompt, datetime.now())
+    messages = [{"role": "system",
+                 "content": system_with_time(system_prompt, datetime.now())}] + history
     if people_note:
-        system_content += "\n\n" + people_note
-    # `messages` is also what the tool-call follow-up round is rebuilt from, so the note survives it
-    messages = [{"role": "system", "content": system_content}] + history
+        # On the current user turn, not the system message: a tiny model copies its own earlier
+        # (wrong) answer from the history over a system note. A copy of the dict, so the stored
+        # history is untouched; `messages` is also what the tool-call round is rebuilt from.
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] + "\n\n" + people_note}
 
     def stream_worker(convo, offer_tools: bool) -> None:
         """Pump one Ollama stream into the queue. Tool calls are captured, not queued."""

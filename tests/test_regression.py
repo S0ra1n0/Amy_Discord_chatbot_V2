@@ -920,7 +920,8 @@ _notes = []
 _drive_on_message(_InMsg("is <@%d> there?" % _BOB_ID, mentions=[_BOB_ID]), _notes)    # DM
 assert _notes and '"@Bob": status unknown' in _notes[0], "FAIL DM status must be unknown: %r" % (_notes,)
 
-# chat_streaming puts the note in this turn's system message (and so the tool round) only
+# chat_streaming appends the note to the model's copy of this turn's user message (and so the
+# tool round) only
 _got_convos = []
 
 
@@ -942,10 +943,17 @@ try:
                                     people_note="NOTE-TEXT"))
 finally:
     amy.ollama.chat = _saved_chat
-assert _got_convos and _got_convos[0][0]["role"] == "system" \
-    and _got_convos[0][0]["content"].endswith("NOTE-TEXT"), "FAIL note must end the system message"
-assert all("NOTE-TEXT" not in x["content"] for x in amy.db.get_messages("srv", 4350, limit=50)), \
-    "FAIL the status note must not be stored in the history"
+def _last_user(convo):
+    return [x for x in convo if x["role"] == "user"][-1]["content"]
+
+
+# On the current USER turn, not the system message: a tiny model copied its own earlier wrong
+# answer from the history over a system note (seen live 2026-11-02).
+assert _got_convos and _last_user(_got_convos[0]) == "is @Bob online?\n\nNOTE-TEXT", \
+    "FAIL note must follow the current user turn: %r" % (_got_convos[:1],)
+assert "NOTE-TEXT" not in _got_convos[0][0]["content"], "FAIL note must not be in the system message"
+assert [x["content"] for x in amy.db.get_messages("srv", 4350, limit=50) if x["role"] == "user"] \
+    == ["is @Bob online?"], "FAIL the status note must not be stored in the history"
 # ... and the tool-call follow-up round keeps it too (messages are rebuilt after the search)
 _saved_ws = (amy.websearch.search, amy.websearch.enrich)
 amy.websearch.search, amy.websearch.enrich = _fake_search, _fake_enrich
@@ -958,8 +966,10 @@ finally:
     amy.websearch.search, amy.websearch.enrich = _saved_ws
 assert len(_calls) == 2, "FAIL note tool round: %d passes" % len(_calls)
 for _i in (0, 1):
-    assert _calls[_i]["messages"][0]["content"].endswith("NOTE-TEXT"), \
-        "FAIL pass %d system message lost the people note" % (_i + 1)
+    assert _last_user(_calls[_i]["messages"]).endswith("\n\nNOTE-TEXT"), \
+        "FAIL pass %d user turn lost the people note" % (_i + 1)
+    assert "NOTE-TEXT" not in _calls[_i]["messages"][0]["content"], \
+        "FAIL pass %d put the people note in the system message" % (_i + 1)
 print("people note: OK (named with status, per turn, not stored, kept in the tool round)")
 
 print()

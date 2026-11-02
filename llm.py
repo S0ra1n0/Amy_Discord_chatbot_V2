@@ -346,7 +346,9 @@ def _one_line(text: str) -> str:
 
 def people_note(people: Iterable[Tuple[str, Optional[str], Optional[str], bool]]) -> str:
     """
-    A short system-prompt block about the people tagged in a message, or "" for none. Each entry
+    A short note about the people tagged in a message, appended to the model's copy of that
+    user message (not the system prompt: a small model copies an old answer from the history over
+    a system note), or "" for none. It opens by saying it replaces anything said earlier. Each entry
     is (display name, discord status string or None when unknown, voice channel name or None
     when not in voice, is a bot). A voice channel of "" means in voice but the asker may not see
     which channel, so it is not named. Tells the model they are Discord users, not public
@@ -367,7 +369,9 @@ def people_note(people: Iterable[Tuple[str, Optional[str], Optional[str], bool]]
         lines.append(f'- "@{_one_line(name)}": ' + ", ".join(parts))
     if not lines:
         return ""
-    return ("The people tagged in this message are Discord users in this conversation, not public "
+    return ("Checked just now; this replaces anything said earlier in the conversation about "
+            "these people.\n"
+            "The people tagged in this message are Discord users in this conversation, not public "
             "figures. Do not web-search them. Answer questions about them from this list:\n"
             + "\n".join(lines))
 

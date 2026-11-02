@@ -297,6 +297,9 @@ for _label, _p, _want in [
     assert _want in _note.splitlines(), "FAIL people_note %s: %r" % (_label, _note)
     assert "not public figures" in _note and "web-search" in _note, \
         "FAIL people_note %s lacks the member/no-search wording" % _label
+    # The tiny model copied its own old answer from the history until told this one is fresher
+    assert "replaces anything said earlier" in _note, \
+        "FAIL people_note %s must say it replaces earlier answers" % _label
 assert "invisible" not in llm.people_note([("I", "invisible", None, False)]), \
     "FAIL people_note must never reveal invisible"
 _many = llm.people_note([("P%d" % i, "online", None, False) for i in range(25)])
