@@ -361,12 +361,16 @@ async def send_reply(interaction: discord.Interaction, result,
             kwargs["view"] = result.view
         if ephemeral or result.private:
             kwargs["ephemeral"] = True
-        if result.private and interaction.response.is_done():
+        if (result.private and interaction.response.is_done()
+                and interaction.type == discord.InteractionType.application_command):
             # A deferred command's first follow-up takes over the PUBLIC "thinking" message and
             # its visibility, so a private refusal would show to everyone. Drop that message
             # first; the follow-up is then a new, truly ephemeral one. This assumes the original
             # response is still that deferred "thinking" message: a handler must never return a
             # private refusal after sending its own first follow-up (it would delete that).
+            # Only for a slash command: a button's original response is the message carrying
+            # the buttons (the now-playing card), which must never be deleted; there an
+            # already-answered click just gets the ephemeral follow-up.
             try:
                 await interaction.delete_original_response()
             except discord.HTTPException:
@@ -1021,19 +1025,20 @@ def may_control_playback(guild: Optional[discord.Guild], user_id: int) -> bool:
         return False
     if is_admin_member(guild, user_id):
         return True
-    return in_amys_channel(guild, user_id)
+    return in_call_with_amy(guild, user_id)
 
 
-def in_amys_channel(guild: discord.Guild, user_id: int) -> bool:
-    """Whether this user is in the voice channel Amy is connected to."""
-    current = voice.active_channel(voice.get_voice_client(guild))
-    if current is None:
-        return False
+def _in_channel(guild: discord.Guild, user_id: int,
+                channel: Optional[voice.VocalChannel]) -> bool:
+    """Whether this user is in `channel` (None: Amy is in no channel, so nobody is)."""
     member = guild.get_member(user_id)
-    return bool(
-        member and member.voice and member.voice.channel
-        and member.voice.channel.id == current.id
-    )
+    return bool(channel and member and member.voice and member.voice.channel
+                and member.voice.channel.id == channel.id)
+
+
+def in_call_with_amy(guild: discord.Guild, user_id: int) -> bool:
+    """Whether this user is in Amy's voice channel right now (who her replies are spoken to)."""
+    return _in_channel(guild, user_id, voice.active_channel(voice.get_voice_client(guild)))
 
 
 #----DJ role and access levels------
@@ -1053,37 +1058,48 @@ def saved_dj_role(guild: discord.Guild) -> Tuple[Optional[int], bool]:
     return saved, guild.get_role(saved) is not None
 
 
-def dj_role_id(guild: discord.Guild) -> Optional[int]:
-    """The DJ role in force: the saved one, unless it was deleted (then there is none)."""
-    saved, exists = saved_dj_role(guild)
+def role_in_force(saved: Optional[int], exists: bool) -> Optional[int]:
+    """The DJ role in force from `saved_dj_role`'s pair: the saved id, unless it was deleted."""
     return saved if exists else None
 
 
-def alone_with_amy(guild: discord.Guild, user_id: int) -> bool:
-    """In Amy's channel and the only person (not a bot) there."""
-    if not in_amys_channel(guild, user_id):
-        return False
-    current = voice.active_channel(voice.get_voice_client(guild))
-    return current is not None and voice.humans_in(current) == 1
+def dj_role_id(guild: discord.Guild) -> Optional[int]:
+    """The DJ role in force: the saved one, unless it was deleted (then there is none)."""
+    return role_in_force(*saved_dj_role(guild))
+
+
+def _alone_in(guild: discord.Guild, user_id: int, channel: Optional[voice.VocalChannel]) -> bool:
+    """In `channel` (Amy's) and the only person (not a bot) there."""
+    return (channel is not None and _in_channel(guild, user_id, channel)
+            and voice.humans_in(channel) == 1)
+
+
+def level_in(guild: discord.Guild, user_id: int, role_id: Optional[int],
+             channel: Optional[voice.VocalChannel]) -> Level:
+    """
+    member_level from facts the caller already has: the DJ role in force (`dj_role_id`) and
+    Amy's channel (None when she is in none). A caller that needs the role or the channel
+    again reads them once and passes them here, so one decision is one SQLite read.
+    """
+    member = guild.get_member(user_id)
+    has_role = bool(role_id is not None and member is not None
+                    and any(r.id == role_id for r in member.roles))
+    return access.access_level(is_admin_member(guild, user_id), _in_channel(guild, user_id, channel),
+                               role_id is not None, has_role, _alone_in(guild, user_id, channel))
 
 
 def member_level(guild: discord.Guild, user_id: int) -> Level:
     """
     The access level of a user right now (access.py has the rules; this gathers the facts).
-    Every music command and player button decides through it, so none can skip the check.
+    Every music command and player button decides through it or `level_in`, so none can skip the check.
     """
-    role_id = dj_role_id(guild)
-    member = guild.get_member(user_id)
-    in_channel = in_amys_channel(guild, user_id)
-    has_role = bool(role_id is not None and member is not None
-                    and any(r.id == role_id for r in member.roles))
-    return access.access_level(is_admin_member(guild, user_id), in_channel,
-                               role_id is not None, has_role, alone_with_amy(guild, user_id))
+    return level_in(guild, user_id, dj_role_id(guild),
+                    voice.active_channel(voice.get_voice_client(guild)))
 
 
-def dj_only_text(guild: discord.Guild) -> str:
-    """Refusal for a listener. Names the DJ role (escaped); never pings it."""
-    role = guild.get_role(dj_role_id(guild) or 0)
+def dj_only_text(guild: discord.Guild, role_id: Optional[int]) -> str:
+    """Refusal for a listener. Names the DJ role in force `role_id` (escaped); never pings it."""
+    role = guild.get_role(role_id or 0)
     suffix = f" (you need the **{markup.escape_markdown(role.name)}** role)" if role else ""
     return f"Only a DJ can do that{suffix}."
 
@@ -1095,15 +1111,16 @@ def access_refusal(guild: discord.Guild, user_id: int, action: str,
     for someone outside Amy's channel (each command keeps its own wording), the DJ line for
     a listener.
     """
-    level = member_level(guild, user_id)
-    role_set = dj_role_id(guild) is not None
+    role_id = dj_role_id(guild)
+    role_set = role_id is not None
+    level = level_in(guild, user_id, role_id, voice.active_channel(voice.get_voice_client(guild)))
     if access.allowed(level, action, role_set):
         return None
     if level < Level.LISTENER:
         return outsider_text
     if access.required_level(action, role_set) >= Level.ADMIN:
         return ADMIN_ONLY_MSG       # a DJ role can't help: only an admin may
-    return dj_only_text(guild)
+    return dj_only_text(guild, role_id)
 #----------------------------------------------
 
 
@@ -1810,14 +1827,6 @@ def announce(guild: Optional[discord.Guild], event: str, title: Optional[str] = 
     speak(guild, voicelines.confirmation(event, values))
 
 
-def in_call_with_amy(guild: discord.Guild, user_id: int) -> bool:
-    """Whether this user is in Amy's voice channel right now - who her replies are spoken to."""
-    channel = voice.active_channel(voice.get_voice_client(guild))
-    member = guild.get_member(user_id)
-    return bool(channel and member and member.voice and member.voice.channel
-                and member.voice.channel.id == channel.id)
-
-
 async def speak_reply(guild: discord.Guild, reply: str) -> None:
     """
     Speak a chat reply (D5): short ones as written; long ones as a model paraphrase - or,
@@ -2180,22 +2189,21 @@ async def music_resume(ctx: MusicContext, refresh: bool = True) -> MusicResult:
     return _info("Resumed.")
 
 
-def skip_refusal(ctx: MusicContext) -> Tuple[Optional[Reply], bool]:
+def skip_verdict(ctx: MusicContext) -> access.SkipDecision:
     """
-    (private refusal or None, whether this skip is a VOTE). The one skip decision
-    (access.skip_decision), shared by /skip and the Skip button: (None, False) skips at once,
-    (None, True) is a vote on someone else's song, and a refusal is only for an outsider.
+    The one skip decision (access.skip_decision), shared by /skip and the Skip button:
+    ALLOWED skips at once, VOTE is a vote on someone else's song, NOT_IN_CALL is an outsider
+    (`music_skip` words that refusal). Reads the DJ role and Amy's channel once.
     """
     guild = ctx.guild
-    level = member_level(guild, ctx.user_id)
+    role_id = dj_role_id(guild)
+    channel = voice.active_channel(voice.get_voice_client(guild))
+    level = level_in(guild, ctx.user_id, role_id, channel)
     current = ctx.player.current
     mine = current is not None and music.is_requester(
         current, ctx.user_id, str(ctx.interaction.user))
-    verdict = access.skip_decision(level, mine, alone_with_amy(guild, ctx.user_id),
-                                   dj_role_id(guild) is not None)
-    if verdict is access.SkipDecision.NOT_IN_CALL:
-        return _refusal("You need to be in my voice channel to skip."), False
-    return None, verdict is access.SkipDecision.VOTE
+    return access.skip_decision(level, mine, _alone_in(guild, ctx.user_id, channel),
+                                role_id is not None)
 
 
 def skip_now(guild: discord.Guild, vc: discord.VoiceClient, player: music.GuildPlayer) -> str:
@@ -2232,23 +2240,22 @@ def vote_to_skip(ctx: MusicContext, vc: discord.VoiceClient) -> Reply:
     return Reply(embed=ui.info_embed(f"Skip vote {count}/{needed} for **{title}**"), public=True)
 
 
-async def recheck_skip_vote(guild: discord.Guild, play_id: int) -> bool:
+async def recheck_skip_vote(guild: discord.Guild) -> bool:
     """
     Someone left Amy's channel: with fewer people the open vote may now pass. Skips and says so
-    in the now-playing card's text channel (or just logs when there is none). `play_id` is the
-    play the caller saw; a different play now means the vote it knew is gone. Never skips with
-    nobody left. Returns whether it skipped.
+    in the now-playing card's text channel (or just logs when there is none). Never skips with
+    nobody left (`tally_votes` needs at least one vote). Returns whether it skipped. Runs
+    straight from the voice-state event with no await before it reads the player, so the votes
+    it sees are those of the play that was going on when the person left.
     """
     player = music_manager.player_for(guild.id)
     vc = voice.get_voice_client(guild)
     channel = voice.active_channel(vc)
-    if (vc is None or channel is None or player.play_id != play_id or not player.skip_votes
+    if (vc is None or channel is None or not player.skip_votes
             or not music.music_active(vc, player)):
         return False
-    present = voice.human_ids_in(channel)
-    if not present:
-        return False
-    count, needed, passed = access.tally_votes(player.skip_votes, present, vote_share(guild.id))
+    count, needed, passed = access.tally_votes(player.skip_votes, voice.human_ids_in(channel),
+                                               vote_share(guild.id))
     if not passed:
         return False
     title = markup.escape_markdown(skip_now(guild, vc, player))
@@ -2268,15 +2275,15 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    refused, is_vote = skip_refusal(ctx)
-    if refused is not None:
-        return refused
+    verdict = skip_verdict(ctx)
+    if verdict is access.SkipDecision.NOT_IN_CALL:
+        return _refusal("You need to be in my voice channel to skip.")
     # No lock check: a skip during a /seek, /replay or /filter rebuild is honoured by restart_at
     # (it sees skip_requested and abandons its new source); while the next track is still loading
     # nothing is active, so this answers "Nothing is playing."
     if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
-    if is_vote:
+    if verdict is access.SkipDecision.VOTE:
         return vote_to_skip(ctx, vc)
     skipped = skip_now(ctx.guild, vc, ctx.player)
     return _info(f"Skipped **{markup.escape_markdown(skipped)}**.")
@@ -2620,10 +2627,13 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
     # Users may only remove what they queued; admins may remove anything, and so may a DJ
     # when the server has a DJ role (access.ADMIN_WITHOUT_ROLE keeps today's rule otherwise)
     if not music.is_requester(target, ctx.user_id, str(ctx.interaction.user)):
-        role_set = dj_role_id(ctx.guild) is not None
-        if not access.allowed(member_level(ctx.guild, ctx.user_id), "remove_other", role_set):
+        role_id = dj_role_id(ctx.guild)
+        role_set = role_id is not None
+        level = level_in(ctx.guild, ctx.user_id, role_id,
+                         voice.active_channel(voice.get_voice_client(ctx.guild)))
+        if not access.allowed(level, "remove_other", role_set):
             if role_set:
-                return _refusal(dj_only_text(ctx.guild))
+                return _refusal(dj_only_text(ctx.guild, role_id))
             return _refusal("That track was queued by " + markup.escape_markdown(target.requested_by)
                             + ". You can only remove your own.")
 
@@ -3243,8 +3253,9 @@ def dj_overview(guild: discord.Guild) -> str:
     if current is None:
         djs = "I'm not in a voice channel."
     else:
+        in_force = role_in_force(saved, exists)     # read above: one SQLite read for every member
         names = [markup.escape_markdown(m.display_name) for m in current.members
-                 if not m.bot and member_level(guild, m.id) >= Level.DJ]
+                 if not m.bot and level_in(guild, m.id, in_force, current) >= Level.DJ]
         shown = ", ".join(names[:MAX_DJ_NAMES]) + (
             f" and {len(names) - MAX_DJ_NAMES} more" if len(names) > MAX_DJ_NAMES else "")
         djs = shown if names else "nobody right now"
@@ -3637,7 +3648,7 @@ async def on_voice_state_update(
     # empty-channel return below (which recheck_skip_vote also respects: nobody left, no skip).
     if (current is not None and not member.bot and before.channel is not None
             and before.channel.id == current.id and after.channel != before.channel):
-        await recheck_skip_vote(guild, music_manager.player_for(guild.id).play_id)
+        await recheck_skip_vote(guild)
 
     if current is None or voice.humans_in(current) > 0:
         return

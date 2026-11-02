@@ -466,7 +466,8 @@ Everyone gets one of four levels, highest first:
 
 A refused click or command gets a private reply, whether or not a DJ role is set (a person outside the call is refused privately too, so the channel stays quiet): "Only a DJ can do that (you need the **Name**
 role)." The role is named, never pinged. A refusal for a deferred command (`/play`, `/seek`,
-`/replay`, `/filter`) first removes the public "thinking" message so the reply stays private.
+`/replay`, `/filter`) first removes the public "thinking" message so the reply stays private
+(a private reply to a player button never deletes the now-playing card).
 `/dj action:votes share:half|majority|two-thirds` stores how much of the call must vote to skip
 (default `half`). Both settings are per server and survive a restart.
 

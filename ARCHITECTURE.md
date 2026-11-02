@@ -437,15 +437,20 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   the command's own "You need to be in my voice channel ..." for an outsider, "Only a DJ can do
   that (you need the **Role** role)." for a listener - the role is named (escaped), never pinged,
   and the refusal is `Reply(private=True)`, which `send_reply` shows ephemerally (for a deferred
-  command it first deletes the public "thinking" message). A new control gets an `ACTIONS` entry
+  SLASH command it first deletes the public "thinking" message; for a button click it never
+  deletes, since the original response is the now-playing card). A new control gets an `ACTIONS` entry
   and a `refusal` call in its handler, or `tests/test_access.py` fails (it walks every
   `music_*` handler and spies on `access.allowed`). `ADMIN_WITHOUT_ROLE` keeps today's rule where
   it was stricter than "everyone in the call": with no DJ role, only an admin removes somebody
   else's song. `/volume` and `/clearqueue` stay `is_admin()` checks. Skipping goes through
   `skip_decision` instead: ALLOWED for an admin, the requester, someone alone with Amy, or a DJ
   **only when a DJ role is set** (with none, level DJ is everyone, and it must not bypass the
-  vote); NOT_IN_CALL for an outsider; otherwise VOTE. `skip_refusal` (bot) turns that into
-  `(refusal, is_vote)` and `music_skip` is the one path for `/skip` and the Skip button.
+  vote); NOT_IN_CALL for an outsider; otherwise VOTE. `skip_verdict` (bot) returns that
+  `SkipDecision` and `music_skip` (the one path for `/skip` and the Skip button) words the
+  outsider refusal. **One decision reads the DJ role and Amy's channel once**: `level_in(guild,
+  user_id, role_id, channel)` takes them as arguments (`member_level` is the convenience that
+  reads them), `access_refusal`, `skip_verdict` and `/dj show` (one read for every member) pass
+  them down.
 - **Skip votes.** `access.votes_needed(humans, share)` (half = ceil(n/2), majority = n//2+1,
   two-thirds = ceil(2n/3), never below 1) and `access.tally_votes(voters, present, share)` (only
   voters still among the humans in Amy's channel count) are pure. State is `GuildPlayer.skip_votes`
@@ -468,9 +473,10 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   Permission refusals are `_refusal` (private), including `/remove` of another's song.
   `vote_to_skip` casts (public `Reply(public=True)` for a vote and for a pass, private for
   "already voted"; the Skip button sends a `public` reply instead of deferring); `skip_now` is the one
-  skip action. `recheck_skip_vote(guild, play_id)` runs from `on_voice_state_update` when a human
-  leaves Amy's channel, BEFORE the empty-channel grace period, skips if the votes now pass (never
-  with nobody left, never for a different `play_id`) and posts in `player.text_channel_id`'s
+  skip action. `recheck_skip_vote(guild)` runs from `on_voice_state_update` when a human
+  leaves Amy's channel, BEFORE the empty-channel grace period (no await between the event and the
+  player read, so it always sees the current play's votes), skips if the votes now pass (never
+  with nobody left) and posts in `player.text_channel_id`'s
   channel when it is a regular `discord.TextChannel`; with none, or a thread / voice-channel chat
   (matching `refresh_now_playing`), it only logs. Votes are in memory only.
   `may_control_playback` ("in Amy's channel, or an admin") remains only for `/leave`

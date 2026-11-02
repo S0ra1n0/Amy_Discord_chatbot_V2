@@ -526,6 +526,22 @@ it = as_(w, DJ)
 asyncio.run(amy.tree.get_command("seek").callback(it, "0:30"))
 check("an allowed deferred command deletes nothing", it.deleted_original == 0)
 
+# A button click's original response is the card carrying the buttons: never delete it.
+w = world("set")
+it = as_(w, LIS)
+it.type = discord.InteractionType.component
+asyncio.run(it.response.defer())                 # already answered, like a click that deferred
+asyncio.run(amy.send_reply(it, amy._refusal("Only a DJ can do that.")))
+check("a private reply to an answered button click does not delete the card",
+      it.deleted_original == 0, it.deleted_original)
+check("...it is an ephemeral follow-up", it.sent and it.sent[-1].kind == "followup"
+      and it.sent[-1].ephemeral is True and "Only a DJ" in text_of(None, it))
+it = as_(w, LIS)
+asyncio.run(it.response.defer())
+asyncio.run(amy.send_reply(it, amy._refusal("Only a DJ can do that.")))
+check("(control) the same reply to a slash command still deletes the 'thinking' message",
+      it.deleted_original == 1 and it.sent[-1].ephemeral is True)
+
 print()
 print("=== a required admin level answers with the admin wording ===")
 w = world("none")
@@ -573,7 +589,7 @@ src_all = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 for action in sorted(set(access.ACTIONS) - {"skip_force", "skip_own"}):
     check("the bot names action %r" % action, '"%s"' % action in src_all)
 check("the skip pair goes through access.skip_decision",
-      "access.skip_decision(" in inspect.getsource(amy.skip_refusal))
+      "access.skip_decision(" in inspect.getsource(amy.skip_verdict))
 check("MusicContext has no copy of the old blanket rule", not hasattr(amy.MusicContext, "may_control"))
 
 # ---------------------------------------------------------------------------------------------
@@ -709,6 +725,19 @@ w = world("set")
 w.guild.voice_client = None
 check("/dj show without Amy in a channel says so", "not in a voice channel" in amy.dj_overview(w.guild))
 
+w = world("set")
+_role_reads = []
+_real_get = amy.db.get_guild_setting
+amy.db.get_guild_setting = lambda gid, key: (_role_reads.append(key), _real_get(gid, key))[1]
+try:
+    shown = amy.dj_overview(w.guild)
+finally:
+    del amy.db.get_guild_setting
+_members = [m for m in w.ch.members if not m.bot]
+check("(setup) /dj show walks several members", len(_members) >= 3 and "dj" in shown, len(_members))
+check("/dj show reads the DJ role setting once, however many members are in the channel",
+      _role_reads.count(config.DJ_ROLE_KEY) == 1, _role_reads)
+
 # the slash command itself
 w = world("none")
 it = Interaction(w.m[ADM], w.guild)
@@ -767,6 +796,11 @@ w = vote_world()
 text, it = slash_run(w, REQ, amy.music_skip)
 check("the requester still skips at once (no vote)", "Skipped **playing**" in text
       and "vote" not in text.lower(), text)
+w = vote_world()                           # no DJ role: being a DJ is no bypass, being alone is
+w.ch.members = [w.m[LIS]]
+text, _ = slash_run(w, LIS, amy.music_skip)
+check("alone with Amy, no DJ role, someone else's song: skips at once, no vote",
+      "Skipped **playing**" in text and "Vote passed" not in text and w.vc.stopped, text)
 
 w = vote_world()
 w.player.current.title = "Wild *Song* _x_"
@@ -1102,7 +1136,7 @@ def leave_world(share="majority", with_text=True):
 w = leave_world()
 check("(setup) two votes of three needed have not skipped", not w.vc.stopped and w.player.skip_votes == {LIS, LIS2})
 leave(w, DJ)
-skipped = asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id))
+skipped = asyncio.run(amy.recheck_skip_vote(w.guild))
 check("someone leaving can pass the vote: it skips", skipped and w.vc.stopped and w.player.skip_requested)
 check("...and says so in the now-playing card's text channel",
       len(w.text.posts) == 1 and "Vote passed (2/2) after someone left: skipped **playing**." in w.text.posts[0],
@@ -1111,13 +1145,13 @@ check("...and says so in the now-playing card's text channel",
 w = leave_world()
 leave(w, LIS)                               # a voter leaves: 1 vote of 3 people, needs 2
 check("a leaver's vote leaves with them: no skip",
-      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is False and not w.vc.stopped
+      asyncio.run(amy.recheck_skip_vote(w.guild)) is False and not w.vc.stopped
       and not w.text.posts)
 
 w = leave_world(with_text=False)
 leave(w, DJ)
 check("no text channel: it still skips (and logs)",
-      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is True and w.vc.stopped)
+      asyncio.run(amy.recheck_skip_vote(w.guild)) is True and w.vc.stopped)
 
 w = leave_world()
 leave(w, DJ)
@@ -1125,22 +1159,17 @@ leave(w, DJ)
 
 async def _locked_recheck():
     async with w.player.lock:
-        return await amy.recheck_skip_vote(w.guild, w.player.play_id)
+        return await amy.recheck_skip_vote(w.guild)
 
 
 check("the player lock held (a rebuild in flight): the re-check still skips (restart_at gives way)",
       asyncio.run(_locked_recheck()) is True and w.vc.stopped and w.player.skip_requested)
 
 w = leave_world()
-leave(w, DJ)
-check("a different play than the one voted on is left alone",
-      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id - 1)) is False and not w.vc.stopped)
-
-w = leave_world()
 w.ch.members = []
 for m in w.m.values():
     m.voice = None
-check("nobody left: never skips", asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is False
+check("nobody left: never skips", asyncio.run(amy.recheck_skip_vote(w.guild)) is False
       and not w.vc.stopped)
 
 # through the real event handler

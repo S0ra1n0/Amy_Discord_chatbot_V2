@@ -280,6 +280,7 @@ class Interaction:
         self.user = user
         self.guild = guild
         self.channel_id = channel_id
+        self.type = discord.InteractionType.application_command   # a button click is .component
         self.channel = type("C", (), {"id": channel_id, "category": None})()
         self.sent = []
         self.response = Response(self)
