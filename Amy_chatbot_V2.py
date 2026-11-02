@@ -2217,12 +2217,14 @@ def vote_to_skip(ctx: MusicContext, vc: discord.VoiceClient) -> Reply:
     present = voice.human_ids_in(channel) if channel is not None else set()
     share = vote_share(ctx.guild.id)
     title = markup.escape_markdown(player.current.title if player.current else "this song")
-    if ctx.user_id in player.skip_votes:
-        count, needed, _ = access.tally_votes(player.skip_votes, present, share)
-        return Reply(embed=ui.info_embed(
-            f"You've already voted to skip this song ({count}/{needed})."), private=True)
+    already = ctx.user_id in player.skip_votes
     player.skip_votes.add(ctx.user_id)
     count, needed, passed = access.tally_votes(player.skip_votes, present, share)
+    if already and not passed:
+        return Reply(embed=ui.info_embed(
+            f"You've already voted to skip this song ({count}/{needed})."), private=True)
+    # (An earlier voter pressing again re-counts: the share may have dropped, or someone left
+    # without the re-check getting to skip, and the vote must not stay stuck at "already voted".)
     if passed:
         skip_now(ctx.guild, vc, player)
         return Reply(embed=ui.info_embed(f"Vote passed ({count}/{needed}): skipped **{title}**."),
@@ -2241,7 +2243,7 @@ async def recheck_skip_vote(guild: discord.Guild, play_id: int) -> bool:
     vc = voice.get_voice_client(guild)
     channel = voice.active_channel(vc)
     if (vc is None or channel is None or player.play_id != play_id or not player.skip_votes
-            or player.lock.locked() or not music.music_active(vc, player)):
+            or not music.music_active(vc, player)):
         return False
     present = voice.human_ids_in(channel)
     if not present:
@@ -2269,11 +2271,9 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
     refused, is_vote = skip_refusal(ctx)
     if refused is not None:
         return refused
-    if ctx.player.lock.locked():
-        # An advance loading the next track, or a /seek, /replay or /filter rebuilding the
-        # stream: a vc.stop() now would be swallowed (the rebuild re-starts the same track) while
-        # we said "skipped". Refused before any vote is recorded, like go_back.
-        return _refusal(BUSY_LOADING)
+    # No lock check: a skip during a /seek, /replay or /filter rebuild is honoured by restart_at
+    # (it sees skip_requested and abandons its new source); while the next track is still loading
+    # nothing is active, so this answers "Nothing is playing."
     if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
     if is_vote:
@@ -2282,6 +2282,7 @@ async def music_skip(ctx: MusicContext) -> MusicResult:
     return _info(f"Skipped **{markup.escape_markdown(skipped)}**.")
 
 
+SKIPPED_MEANWHILE = "The song was skipped meanwhile, so I didn't change it."
 NO_HISTORY = "There's no previous track to go back to."
 BUSY_LOADING = "I'm still loading the next track - try again in a moment."
 
@@ -2388,11 +2389,22 @@ async def _restart_playing(
         previous = player.filter_name
         if filter_change is not None:
             player.filter_name = filter_change
+        def skipped_meanwhile() -> MusicResult:
+            # A skip landed during the rebuild. A /filter keeps its preset for the next song (as
+            # when nothing is playing); /seek and /replay have nothing to keep.
+            if filter_change is None:
+                return _info(SKIPPED_MEANWHILE)
+            player.filter_name = filter_change
+            shown = f"**{filter_change}**" if music.filter_chain(filter_change) else "no filter"
+            return _info(f"The song was skipped meanwhile; the next one will play with {shown}.")
+
         try:
             moved = await music.restart_at(vc, player, track, after, target)
         except Exception as e:  # broad on purpose: the filter name must be rolled back on any failure
             player.filter_name = previous
             logs.log_failure(f"{label} failed on '{track.title}'", e, music.lookup_errors() + DISCORD_ERRORS)
+            if player.skip_requested:   # the skip ended the song; the failure is beside the point
+                return skipped_meanwhile()
             # The new source is built before the old one is touched, but restart_at can still
             # fail after vc.stop() (while starting it): then nothing is playing and the
             # after-callback moves on once the lock is released - so say which it is.
@@ -2401,6 +2413,8 @@ async def _restart_playing(
                               "as it was.")
             return _error(f"I couldn't {failed}, and **{markup.escape_markdown(track.title)}** stopped playing.")
         if not moved:
+            if player.skip_requested:   # restart_at gave way to a skip (a /stop clears the flag)
+                return skipped_meanwhile()
             player.filter_name = previous
             return _info(stopped)
 
@@ -2610,8 +2624,8 @@ async def music_remove(ctx: MusicContext, position: int) -> MusicResult:
         if not access.allowed(member_level(ctx.guild, ctx.user_id), "remove_other", role_set):
             if role_set:
                 return _refusal(dj_only_text(ctx.guild))
-            return (DENY + " That track was queued by " + markup.escape_markdown(target.requested_by)
-                    + ". You can only remove your own.")
+            return _refusal("That track was queued by " + markup.escape_markdown(target.requested_by)
+                            + ". You can only remove your own.")
 
     music.remove_at(queue, position)  # `target` above already proved it exists
     announce(ctx.guild, "remove", title=target.title)
@@ -2654,6 +2668,11 @@ async def music_skipto(ctx: MusicContext, position: int) -> MusicResult:
     if refused is not None:
         return refused
     player = ctx.player
+    if not music.music_active(vc, player):
+        # Nothing to stop: while the next track loads, vc.stop() does nothing and play_track's
+        # new_play() would clear the flag, so the queue would be cut and the song still play.
+        # Refused before the queue is touched.
+        return _refusal(BUSY_LOADING) if player.lock.locked() else _error("Nothing is playing.")
     target = music.peek_at(player.queue, position)
     if target is None:
         return _error("There's no track at position " + str(position) + ".")

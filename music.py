@@ -1307,7 +1307,8 @@ async def restart_at(
     position: float,
 ) -> bool:
     """
-    Restart `track` at `position`. Backs /seek and /replay. Returns whether it restarted.
+    Restart `track` at `position`. Backs /seek and /replay. Returns whether it restarted (False
+    when /stop or a skip landed while the new source was being built; `skip_requested` tells which).
 
     An audio source has no seek of its own, so the only way to move is to build a new one
     with an input offset and swap it in. Order matters:
@@ -1324,11 +1325,24 @@ async def restart_at(
     generation = player.generation
     was_paused = music_paused(voice_client)
     filter_name = player.filter_name      # captured: the source and its clock must agree
+    if player.skip_requested:
+        # Already skipped (this call waited on the lock behind a skip): don't resolve a stream
+        # only to throw it away. The same reasoning as the check after the build, below.
+        log.info(f"Not seeking {track.title}: it was already skipped")
+        return False
     # raises: nothing changed
     source = await prepare_source(track, player.volume, position, filter_name)
     if player.generation != generation:
         _discard(source)
         log.info(f"Not seeking {track.title}: playback was stopped while it loaded")
+        return False
+    if player.skip_requested:
+        # A /skip, a passed vote or a /skipto landed while the source was building: its vc.stop()
+        # already ended the old source and queued the advance (which waits for the caller's lock).
+        # Starting the rebuilt source now would carry the song on and swallow the skip. The flag
+        # is cleared at every play start, so set here means "since this play began".
+        _discard(source)
+        log.info(f"Not seeking {track.title}: it was skipped while the new source loaded")
         return False
     voice_client.stop()
     _start(voice_client, player, track, source, on_finished, position, filter_name)

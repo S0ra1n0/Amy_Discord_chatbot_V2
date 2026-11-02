@@ -815,6 +815,31 @@ check("...an outsider is still refused privately", refused_out(text_of(None, it)
       and it.sent[-1].ephemeral is True and not w.player.skip_votes)
 check("a refusal never counts as a vote", w.player.skip_votes == set())
 
+# a vote that has met the tally since it was cast must not stay stuck at "already voted"
+w = vote_world("majority")                  # four people: 3 needed
+text, _ = run(w, LIS, "skip")
+check("(setup) 1 of 3 under majority", "Skip vote 1/3" in text, text)
+amy.dj_update(w.guild, "votes", None, "half")   # half of 4 = 2 ... lower still: 2 people left
+leave(w, DJ)
+leave(w, LIS2)
+w.ch.members = [w.m[LIS], w.m[REQ]]         # two present, half needs 1
+w.m[DJ].voice = w.m[LIS2].voice = None
+text, it = slash_run(w, LIS, amy.music_skip)
+check("the same voter pressing again after the share dropped skips, publicly",
+      "Vote passed (1/1): skipped **playing**." in text and it.sent[-1].ephemeral is False
+      and w.vc.stopped and w.player.skip_requested, text)
+w = vote_world()
+run(w, LIS, "skip")
+text, it = slash_run(w, LIS, amy.music_skip)
+check("(control) pressing again below the share is still the private 'already voted'",
+      "already voted" in text and it.sent[-1].ephemeral is True and not w.vc.stopped, text)
+
+# /remove of someone else's song with no DJ role: a private refusal
+w = world("none")
+text, it = slash_run(w, LIS, amy.music_remove, 2)
+check("/remove of someone else's song (no DJ role) is refused privately",
+      "only remove your own" in text and it.sent[-1].ephemeral is True and len(w.player.queue) == 3, text)
+
 w = vote_world()
 w.player.skip_requested = True        # stale: a skip that never reached an advance
 text, _ = run(w, LIS, "skip")
@@ -826,8 +851,10 @@ pl_tmp.new_play()
 check("new_play clears a stale skip_requested and the votes", pl_tmp.skip_requested is False
       and pl_tmp.skip_votes == set())
 
-# while the player lock is held (an advance loading, or /seek /replay /filter rebuilding) a
-# vc.stop() would be swallowed, so a vote or a skip is refused and nothing is recorded
+# While the player lock is held (the advance's card refresh after a track STARTED, or a
+# /seek /replay /filter rebuild) a playing song can still be skipped or voted on: the old
+# "still loading" refusal fired right after a song started. restart_at honours a skip that
+# lands during a rebuild (tested below).
 async def _locked_skip(w, who, cmd):
     async with w.player.lock:
         it = as_(w, who)
@@ -835,21 +862,186 @@ async def _locked_skip(w, who, cmd):
         return it
 
 
-for who, label in ((LIS, "a vote"), (DJ, "a DJ's /skip")):
-    w = vote_world("half", role="set")
-    it = asyncio.run(_locked_skip(w, who, amy.music_skip))
-    check("%s while the player lock is held is refused privately as busy" % label,
-          amy.BUSY_LOADING in text_of(None, it) and it.sent[-1].ephemeral is True
-          and not w.vc.stopped and not w.player.skip_requested and w.player.skip_votes == set(),
-          text_of(None, it))
+w = vote_world("half", role="set")
+it = asyncio.run(_locked_skip(w, LIS, amy.music_skip))
+check("a vote while the player lock is held and a song plays is counted",
+      "Skip vote 1/2" in text_of(None, it) and w.player.skip_votes == {LIS}, text_of(None, it))
+w = vote_world("half", role="set")
+it = asyncio.run(_locked_skip(w, DJ, amy.music_skip))
+check("a DJ's /skip while the player lock is held skips",
+      "Skipped **playing**" in text_of(None, it) and w.vc.stopped and w.player.skip_requested,
+      text_of(None, it))
 w = vote_world()
 it = as_(w, LIS)
 async def _locked_button():
     async with w.player.lock:
         await amy.PlayerControls().skip_button.callback(it)
 asyncio.run(_locked_button())
-check("...the Skip button too", amy.BUSY_LOADING in text_of(None, it) and it.sent[-1].ephemeral is True
-      and w.player.skip_votes == set() and not w.vc.stopped)
+check("...the Skip button too", "Skip vote 1/2" in text_of(None, it) and w.player.skip_votes == {LIS})
+w = vote_world()
+w.vc.stopped = True        # the next track is still loading: nothing is active
+it = asyncio.run(_locked_skip(w, REQ, amy.music_skip))
+check("while the next track is still loading a skip answers 'Nothing is playing.'",
+      "Nothing is playing" in text_of(None, it) and w.player.skip_votes == set(), text_of(None, it))
+
+# restart_at gives way to a skip that lands while it builds the new source
+_prep_real = amy.music.prepare_source
+
+
+class _Src:
+    def __init__(self):
+        self.cleaned = False
+
+    def cleanup(self):
+        self.cleaned = True
+
+    def is_opus(self):
+        return False
+
+    def read(self):
+        return b""
+
+
+def _prepare_then(action):
+    async def _prep(track, volume, start_at=0.0, filter_name="off"):
+        r = action()
+        if inspect.isawaitable(r):
+            await r
+        s = _Src()
+        _prep.sources.append(s)
+        return s
+    _prep.sources = []
+    return _prep
+
+
+w = vote_world()
+trk = w.player.current
+trk.query = "https://youtu.be/abcdefghijk"
+trk.duration = 120
+amy.music.prepare_source = prep = _prepare_then(lambda: amy.skip_now(w.guild, w.vc, w.player))
+try:
+    n_played = len(getattr(w.vc, "played", []))
+    moved = asyncio.run(amy.music.restart_at(w.vc, w.player, trk, lambda e: None, 30.0))
+    check("restart_at abandons a rebuild when a skip landed meanwhile (returns False)", moved is False)
+    check("...and does not start the new source, discarding it",
+          len(getattr(w.vc, "played", [])) == n_played and prep.sources and prep.sources[0].cleaned)
+    check("...and leaves skip_requested for the advance that the skip queued", w.player.skip_requested is True)
+    # the same call with no skip does restart, so the abandon is the skip's doing
+    amy.music.prepare_source = prep = _prepare_then(lambda: None)
+    w.player.skip_requested = False
+    moved = asyncio.run(amy.music.restart_at(w.vc, w.player, trk, lambda e: None, 30.0))
+    check("(control) without a skip the same rebuild starts", moved is True and not prep.sources[0].cleaned)
+
+    # /seek's own reply: honest, not "failed" and not the stopped wording
+    w = vote_world()
+    trk = w.player.current
+    trk.query, trk.duration = "https://youtu.be/abcdefghijk", 120
+    amy.music.prepare_source = _prepare_then(lambda: amy.skip_now(w.guild, w.vc, w.player))
+    amy._restart_playing = _real[0]
+    try:
+        text, _ = run(w, DJ, "seek", ["0:30"])
+    finally:
+        amy._restart_playing = _stub_restart
+    check("/seek when a skip landed meanwhile says so", amy.SKIPPED_MEANWHILE in text
+          and "couldn't" not in text and "stopped" not in text.replace("skipped", ""), text)
+
+    # /skipto during a rebuild: the old song must not carry on; the target is what is next
+    w = vote_world()
+    trk = w.player.current
+    trk.query, trk.duration = "https://youtu.be/abcdefghijk", 120
+    target = w.player.queue[1]
+    amy.music.prepare_source = _prepare_then(
+        lambda: amy.music_skipto(amy.MusicContext.build(as_(w, DJ), w.guild), 2))
+    amy._restart_playing = _real[0]
+    try:
+        n_played = len(getattr(w.vc, "played", []))
+        text, _ = run(w, DJ, "seek", ["0:30"])
+    finally:
+        amy._restart_playing = _stub_restart
+    check("/skipto during a /seek rebuild: the old song is not restarted",
+          len(getattr(w.vc, "played", [])) == n_played and amy.SKIPPED_MEANWHILE in text, text)
+    check("...the target is next in the queue and the advance will force it (skip_requested)",
+          w.player.queue[0] is target and w.player.skip_requested is True)
+
+    # a rebuild that FAILS after a skip landed: the skip is what the user hears about
+    def _skip_then_fail():
+        amy.skip_now(w.guild, w.vc, w.player)
+        raise RuntimeError("yt-dlp hiccup")
+
+    w = vote_world()
+    trk = w.player.current
+    trk.query, trk.duration = "https://youtu.be/abcdefghijk", 120
+    amy.music.prepare_source = _prepare_then(_skip_then_fail)
+    amy._restart_playing = _real[0]
+    try:
+        text, _ = run(w, DJ, "seek", ["0:30"])
+    finally:
+        amy._restart_playing = _stub_restart
+    check("/seek whose rebuild fails after a skip says it was skipped, not 'stopped playing'",
+          amy.SKIPPED_MEANWHILE in text and "stopped playing" not in text and "couldn't" not in text, text)
+
+    # /filter that loses to a skip keeps its preset for the next song, with its own wording
+    for preset, before, shown in (("nightcore", "off", "with **nightcore**"), ("off", "slowed", "with no filter")):
+        w = vote_world()
+        trk = w.player.current
+        trk.query, trk.duration = "https://youtu.be/abcdefghijk", 120
+        w.player.filter_name = before
+        amy.music.prepare_source = _prepare_then(lambda: amy.skip_now(w.guild, w.vc, w.player))
+        amy._restart_playing = _real[0]
+        try:
+            text, _ = run(w, DJ, "filter", [preset])
+        finally:
+            amy._restart_playing = _stub_restart
+        check("/filter %s that loses to a skip keeps the preset for the next song" % preset,
+              w.player.filter_name == preset, w.player.filter_name)
+        check("...and says so (%s)" % shown, "skipped meanwhile; the next one will play " + shown in text, text)
+    w = vote_world()
+    trk = w.player.current
+    trk.query, trk.duration = "https://youtu.be/abcdefghijk", 120
+    amy.music.prepare_source = _prepare_then(_skip_then_fail)
+    amy._restart_playing = _real[0]
+    try:
+        text, _ = run(w, DJ, "filter", ["nightcore"])
+    finally:
+        amy._restart_playing = _stub_restart
+    check("/filter whose rebuild fails after a skip also keeps the preset for the next song",
+          w.player.filter_name == "nightcore" and "next one will play with **nightcore**" in text,
+          (w.player.filter_name, text))
+    w = vote_world()
+    trk = w.player.current
+    trk.query, trk.duration = "https://youtu.be/abcdefghijk", 120
+    w.player.filter_name = "slowed"
+    amy.music.prepare_source = _prepare_then(lambda: amy.skip_now(w.guild, w.vc, w.player))
+    amy._restart_playing = _real[0]
+    try:
+        run(w, DJ, "seek", ["0:30"])
+    finally:
+        amy._restart_playing = _stub_restart
+    check("(control) /seek that loses to a skip leaves the filter alone", w.player.filter_name == "slowed")
+
+    # already skipped before the rebuild starts: no stream is resolved just to be thrown away
+    w = vote_world()
+    trk = w.player.current
+    w.player.skip_requested = True
+    amy.music.prepare_source = prep = _prepare_then(lambda: None)
+    moved = asyncio.run(amy.music.restart_at(w.vc, w.player, trk, lambda e: None, 30.0))
+    check("restart_at with skip_requested already set resolves nothing and returns False",
+          moved is False and prep.sources == [] and len(getattr(w.vc, "played", [])) == 0)
+
+    # /skipto while the next track is loading is refused before the queue is touched
+    w = vote_world()
+    w.vc.stopped = True
+    queue_before = list(w.player.queue)
+    it = asyncio.run(_locked_skip(w, DJ, lambda ctx: amy.music_skipto(ctx, 2)))
+    check("/skipto while the next track loads (lock held) is refused privately as busy",
+          amy.BUSY_LOADING in text_of(None, it) and it.sent[-1].ephemeral is True
+          and list(w.player.queue) == queue_before and not w.player.skip_requested, text_of(None, it))
+    text, _ = run(w, DJ, "skipto", [2])
+    check("/skipto with nothing playing says so and leaves the queue alone",
+          "Nothing is playing" in text and list(w.player.queue) == queue_before
+          and not w.player.skip_requested, text)
+finally:
+    amy.music.prepare_source = _prep_real
 
 # votes belong to one play of a song
 song = make_track(amy, "Loopy")
@@ -936,10 +1128,8 @@ async def _locked_recheck():
         return await amy.recheck_skip_vote(w.guild, w.player.play_id)
 
 
-check("the player lock held (a rebuild in flight): the re-check does not skip, the vote stays open",
-      asyncio.run(_locked_recheck()) is False and not w.vc.stopped and w.player.skip_votes == {LIS, LIS2})
-check("...and the next re-check, lock free, passes it",
-      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is True and w.vc.stopped)
+check("the player lock held (a rebuild in flight): the re-check still skips (restart_at gives way)",
+      asyncio.run(_locked_recheck()) is True and w.vc.stopped and w.player.skip_requested)
 
 w = leave_world()
 leave(w, DJ)

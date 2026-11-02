@@ -494,10 +494,15 @@ Skipping a song you did not queue works like this, with or without a DJ role:
 - Votes belong to one play of a song: a new song or a `/loop track` replay starts at zero; a
   `/seek`, `/replay` or `/filter` restarts the same play and does not reset them. They live in
   memory, so a restart clears them.
-- While Amy is loading the next track or rebuilding the stream for a `/seek`, `/replay` or
-  `/filter`, a skip or vote is refused privately ("I'm still loading the next track - try again
-  in a moment.") and no vote is recorded; a vote that would pass after someone leaves waits for
-  the next leave.
+- A skip, `/skipto` or passed vote that lands while Amy is rebuilding the stream for a `/seek`,
+  `/replay` or `/filter` is honoured: the rebuild gives way, the song ends, and that command
+  answers "The song was skipped meanwhile, so I didn't change it." (also when the rebuild failed
+  after the skip). A `/filter` that loses to a skip keeps its preset for the next song: "The song
+  was skipped meanwhile; the next one will play with **nightcore**." (or "with no filter"). While
+  the next track is still loading, `/skip` says "Nothing is playing." and `/skipto` is refused
+  ("I'm still loading the next track - try again in a moment.") without touching the queue.
+- Pressing Skip again after you voted re-counts: if the share dropped meanwhile (someone left,
+  or an admin changed `/dj votes`) and your vote now passes, the song is skipped.
 
 Amy keeps **one** now-playing card per server and edits it in place as tracks change, rather
 than posting a new message for every track in a long queue. `/nowplaying` always posts a

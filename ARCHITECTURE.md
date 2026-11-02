@@ -452,10 +452,20 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   (ids) and `play_id`; `GuildPlayer.new_play()` clears the votes and bumps `play_id`. It is called by
   `music.play_track` (every advance: a new track, a `/loop` replay) and `stop_all`, **never by
   `_start` or `restart_at`**, so `/seek`, `/replay` and `/filter` restarting the same play keep the
-  votes; `new_play` also clears a stale `skip_requested`. `music_skip` refuses privately with
-  `BUSY_LOADING` while `player.lock` is held (an advance, or a `restart_at` rebuild whose
-  `vc.stop()` would be swallowed), BEFORE recording a vote; `recheck_skip_vote` just returns False
-  then and the vote stays open.
+  votes; `new_play` also clears a stale `skip_requested`. `music_skip` takes no lock
+  check: `restart_at` itself gives way after `prepare_source` when `player.skip_requested` is set
+  (a `/skip`, a passed vote or `/skipto` landed during the rebuild): it discards the new source and
+  returns False without `vc.stop()`/`_start` (the skip's own stop already queued the advance, which
+  runs when the caller releases the lock and consumes the flag). `_restart_playing` words that as
+  `SKIPPED_MEANWHILE` (also when the build raised after the skip), distinct from the /stop wording;
+  a `/filter` keeps its preset for the next song and says so. `restart_at` also checks the flag
+  BEFORE `prepare_source` (a rebuild queued on the lock behind a skip resolves nothing).
+  `music_skipto` requires `music_active` (else `BUSY_LOADING` under the lock, or "Nothing is
+  playing.") before touching the queue, since `vc.stop()` during a load does nothing and
+  `new_play` would clear the flag. Because `new_play` clears the flag at every
+  play start, set in `restart_at` means "since this play began". `vote_to_skip` re-counts for a
+  repeat voter and skips if the tally now passes (a dropped share must not leave it stuck).
+  Permission refusals are `_refusal` (private), including `/remove` of another's song.
   `vote_to_skip` casts (public `Reply(public=True)` for a vote and for a pass, private for
   "already voted"; the Skip button sends a `public` reply instead of deferring); `skip_now` is the one
   skip action. `recheck_skip_vote(guild, play_id)` runs from `on_voice_state_update` when a human
