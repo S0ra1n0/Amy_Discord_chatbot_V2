@@ -17,7 +17,7 @@ one guards against.
 | `ui.py` | Embeds, progress bar, the `Reply` wrapper | discord |
 | `websearch.py` | DuckDuckGo search, page fetching, the `web_search` tool definition | httpx |
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
-| `access.py` | Who may do what with the music: the `Level` enum, `access_level`, the one `ACTIONS` table, `allowed` and `skip_decision` | **nothing external** |
+| `access.py` | Who may do what with the music: the `Level` enum, `access_level`, the one `ACTIONS` table, `allowed`, `skip_decision`, `votes_needed` and `tally_votes` | **nothing external** |
 | `markup.py` | `escape_markdown`: makes stranger-controlled text (titles, lyrics) render literally in Discord | **nothing external** |
 | `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round), whether a message is chat at all (`should_chat`) and whether it is addressed to Amy (`is_addressed`), the text the model sees (`chat_text`), the per-turn note on tagged members' status (`people_note`) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
@@ -442,8 +442,27 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   `music_*` handler and spies on `access.allowed`). `ADMIN_WITHOUT_ROLE` keeps today's rule where
   it was stricter than "everyone in the call": with no DJ role, only an admin removes somebody
   else's song. `/volume` and `/clearqueue` stay `is_admin()` checks. Skipping goes through
-  `skip_decision` instead (admin; outsider never; no DJ role: anyone in the call, for now; with
-  one: a DJ, the requester or someone alone) - a later phase adds the vote there.
+  `skip_decision` instead: ALLOWED for an admin, the requester, someone alone with Amy, or a DJ
+  **only when a DJ role is set** (with none, level DJ is everyone, and it must not bypass the
+  vote); NOT_IN_CALL for an outsider; otherwise VOTE. `skip_refusal` (bot) turns that into
+  `(refusal, is_vote)` and `music_skip` is the one path for `/skip` and the Skip button.
+- **Skip votes.** `access.votes_needed(humans, share)` (half = ceil(n/2), majority = n//2+1,
+  two-thirds = ceil(2n/3), never below 1) and `access.tally_votes(voters, present, share)` (only
+  voters still among the humans in Amy's channel count) are pure. State is `GuildPlayer.skip_votes`
+  (ids) and `play_id`; `GuildPlayer.new_play()` clears the votes and bumps `play_id`. It is called by
+  `music.play_track` (every advance: a new track, a `/loop` replay) and `stop_all`, **never by
+  `_start` or `restart_at`**, so `/seek`, `/replay` and `/filter` restarting the same play keep the
+  votes; `new_play` also clears a stale `skip_requested`. `music_skip` refuses privately with
+  `BUSY_LOADING` while `player.lock` is held (an advance, or a `restart_at` rebuild whose
+  `vc.stop()` would be swallowed), BEFORE recording a vote; `recheck_skip_vote` just returns False
+  then and the vote stays open.
+  `vote_to_skip` casts (public `Reply(public=True)` for a vote and for a pass, private for
+  "already voted"; the Skip button sends a `public` reply instead of deferring); `skip_now` is the one
+  skip action. `recheck_skip_vote(guild, play_id)` runs from `on_voice_state_update` when a human
+  leaves Amy's channel, BEFORE the empty-channel grace period, skips if the votes now pass (never
+  with nobody left, never for a different `play_id`) and posts in `player.text_channel_id`'s
+  channel when it is a regular `discord.TextChannel`; with none, or a thread / voice-channel chat
+  (matching `refresh_now_playing`), it only logs. Votes are in memory only.
   `may_control_playback` ("in Amy's channel, or an admin") remains only for `/leave`
   (`voice_leave`), which keeps its own rule; the `/search` picker asks `search_pick` and, while
   Amy is not yet connected, joins the user's own channel like `/play`.

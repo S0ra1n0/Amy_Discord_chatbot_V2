@@ -119,6 +119,11 @@ def humans_in(channel: VocalChannel) -> int:
     return sum(1 for m in channel.members if not m.bot)
 
 
+def human_ids_in(channel: VocalChannel) -> Set[int]:
+    """Ids of the non-bot members currently in a voice channel (who a skip vote counts)."""
+    return {m.id for m in channel.members if not m.bot}
+
+
 async def connect_to(channel: VocalChannel) -> discord.VoiceClient:
     """Connect to a voice channel. Amy never needs to receive audio, so she self-deafens."""
     return await channel.connect(self_deaf=True)

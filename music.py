@@ -915,6 +915,21 @@ class GuildPlayer:
         # Set (to a fresh token) while autoplay's slow Mix lookup runs with the lock FREE; see
         # advance_playback. `current` still names the ended track meanwhile.
         self.autoplay_lookup: Optional[object] = None
+        # Skip votes (Phase 3 of DJ_PLAN.md): the ids of who voted to skip THIS play of a song,
+        # and a counter that moves on whenever a play starts (new_play), so a late recheck can
+        # tell it is looking at the play that was voted on. In memory only.
+        self.skip_votes: Set[int] = set()
+        self.play_id: int = 0
+
+    def new_play(self) -> None:
+        """
+        A song (or a /loop replay of it) just started: its skip votes start from zero, and a
+        stale skip_requested goes (the advance consumed it before this; a skip that never
+        reached an advance must not tag the next song).
+        """
+        self.play_id += 1
+        self.skip_votes.clear()
+        self.skip_requested = False
 
     def begin_autoplay_lookup(self) -> object:
         """Mark a lookup in flight and return its token (the lookup keeps it to re-check)."""
@@ -1005,6 +1020,7 @@ class GuildPlayer:
         self.back_requested = False
         self.current = None
         self.resume_position = 0.0
+        self.new_play()          # the play is over: its votes go with it
         self.generation += 1     # (a lookup in flight keeps its marker: it sees this and finishes)
 
     def reset(self) -> None:
@@ -1279,6 +1295,7 @@ async def play_track(
         log.info(f"Not starting {track.title}: playback was stopped while it loaded")
         return False
     _start(voice_client, player, track, source, on_finished, start_at, filter_name)
+    player.new_play()   # not in _start: /seek and /filter rebuild the SAME play through restart_at
     return True
 
 

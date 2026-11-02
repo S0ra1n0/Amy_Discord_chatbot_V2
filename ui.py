@@ -76,6 +76,9 @@ class Reply:
     error: bool = False
     # Show it only to the person who ran the command (a permission refusal, `_refusal`).
     private: bool = False
+    # A success the Skip button must answer with a message of its own (a skip VOTE cast or
+    # passed), instead of deferring because the card updates itself.
+    public: bool = False
 
 
 #----Embed Builders------

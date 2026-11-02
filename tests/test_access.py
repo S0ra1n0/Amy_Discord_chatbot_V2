@@ -105,19 +105,46 @@ check("an admin always skips", all(S(Level.ADMIN, m, a, r) is D.ALLOWED
                                     for m, a, r in itertools.product([False, True], repeat=3)))
 check("an outsider never does", all(S(Level.OUTSIDER, m, a, r) is D.NOT_IN_CALL
                                      for m, a, r in itertools.product([False, True], repeat=3)))
-check("no DJ role: anyone in the call skips (today)",
+check("no DJ role: someone else's song takes a vote, even for the everyone-is-a-DJ level",
+      all(S(lv, False, False, False) is D.VOTE for lv in (Level.LISTENER, Level.DJ)))
+check("no DJ role: the requester or someone alone skips at once",
       all(S(lv, m, a, False) is D.ALLOWED for lv in (Level.LISTENER, Level.DJ)
-          for m, a in itertools.product([False, True], repeat=2)))
-check("role set: a DJ skips", S(Level.DJ, False, False, True) is D.ALLOWED)
+          for m, a in ((True, False), (False, True), (True, True))))
+check("role set: a DJ skips at once", S(Level.DJ, False, False, True) is D.ALLOWED)
 check("role set: the requester skips their own song", S(Level.LISTENER, True, False, True) is D.ALLOWED)
 check("role set: someone alone with Amy skips", S(Level.LISTENER, False, True, True) is D.ALLOWED)
-check("role set: a listener cannot skip someone else's song",
-      S(Level.LISTENER, False, False, True) is D.DJ_ONLY)
+check("role set: a listener's skip of someone else's song is a vote",
+      S(Level.LISTENER, False, False, True) is D.VOTE)
+check("autoplay (no requester): a DJ skips only when a role is set, others vote",
+      S(Level.DJ, False, False, True) is D.ALLOWED and S(Level.DJ, False, False, False) is D.VOTE
+      and S(Level.LISTENER, False, False, True) is D.VOTE)
+check("no verdict is a refusal except NOT_IN_CALL", not hasattr(D, "DJ_ONLY")
+      and {d.name for d in D} == {"ALLOWED", "VOTE", "NOT_IN_CALL"})
 check("the skip decision agrees with the table (skip_force / skip_own)",
       all((S(lv, mine, False, True) is D.ALLOWED)
           == access.allowed(lv, "skip_own" if mine else "skip_force", True)
           for lv in (Level.OUTSIDER, Level.LISTENER, Level.DJ, Level.ADMIN)
           for mine in (False, True)))
+
+print()
+print("=== votes needed and the tally ===")
+V = access.votes_needed
+SHARE_TABLE = {   # people in the call -> votes needed
+    "half":       {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3},
+    "majority":   {1: 1, 2: 2, 3: 2, 4: 3, 5: 3, 6: 4},
+    "two-thirds": {1: 1, 2: 2, 3: 2, 4: 3, 5: 4, 6: 4},
+}
+for _share, _row in SHARE_TABLE.items():
+    check("votes needed, %s, 1-6 people" % _share, {n: V(n, _share) for n in _row} == _row,
+          {n: V(n, _share) for n in _row})
+check("votes needed is never below 1", all(V(0, s) == 1 for s in config.VOTE_SHARES))
+check("an unknown share counts as half", V(5, "banana") == V(5, "half"))
+T = access.tally_votes
+check("tally: leavers' votes are not counted", T({1, 2, 9}, {1, 2, 3}, "half") == (2, 2, True)
+      and T({9}, {1, 2, 3}, "half") == (0, 2, False))
+check("tally: one voter of two passes at half, not at majority",
+      T({1}, {1, 2}, "half")[2] is True and T({1}, {1, 2}, "majority")[2] is False)
+check("tally: an empty call never passes a vote nobody cast", T(set(), set(), "half") == (0, 1, False))
 
 # ---------------------------------------------------------------------------------------------
 print()
@@ -312,13 +339,16 @@ for action, cmd, args in CONTROLS:
     text, it = run(w, who, cmd, args)
     if action in ("skip_own",):
         ok = passed(text)       # the requester of the song may skip it
+    elif action == "skip_force":    # a listener votes (1 of 4 people: not enough), nothing is skipped
+        ok = "Skip vote 1/2" in text and not w.vc.stopped
     elif level is Level.DJ:
         ok = refused_dj(text)
         ok = ok and (len(w.player.queue), w.vc.stopped, w.player.loop_mode, w.player.filter_name) == before
     else:
         ok = passed(text)
-    check("%-16s listener: %s" % (action, "allowed" if (level is not Level.DJ and action != "skip_force")
-                                  or action == "skip_own" else "refused, nothing changed"), ok, text)
+    check("%-16s listener: %s" % (action, "a vote" if action == "skip_force" else
+                                  "allowed" if level is not Level.DJ or action == "skip_own"
+                                  else "refused, nothing changed"), ok, text)
     # a DJ
     w = world("set")
     text, _ = run(w, DJ, cmd, args)
@@ -400,9 +430,10 @@ def slash_run(w, who, handler, *args):
 
 w = world("set")
 text, it = slash_run(w, LIS, amy.music_skip)
-check("role set: a listener is told only a DJ can skip someone else's song",
-      "Only a DJ can skip someone else's song." in text and not w.vc.stopped and not w.player.skip_requested, text)
-check("...privately (ephemeral)", it.sent and it.sent[-1].ephemeral is True, [m.ephemeral for m in it.sent])
+check("role set: a listener's skip of someone else's song is a vote, not a refusal",
+      "Skip vote 1/2 for **playing**" in text and "Only a DJ" not in text
+      and not w.vc.stopped and not w.player.skip_requested, text)
+check("...said publicly (not ephemeral)", it.sent and it.sent[-1].ephemeral is False, [m.ephemeral for m in it.sent])
 w = world("set")
 text, it = slash_run(w, REQ, amy.music_skip)
 check("a success is public (not ephemeral)", "Skipped" in text and it.sent[-1].ephemeral is False)
@@ -415,12 +446,17 @@ check("role set: a DJ skips it", "Skipped" in text and w.vc.stopped, text)
 w = world("set")
 w.player.current.is_autoplay, w.player.current.requester_id, w.player.current.requested_by = True, None, "lis"
 text, _ = run(w, LIS, "skip")
-check("an Autoplay song is nobody's: a listener cannot skip it (a DJ can)",
-      "Only a DJ can skip" in text, text)
+check("an Autoplay song is nobody's: a listener can only vote on it",
+      "Skip vote 1/2" in text and not w.vc.stopped, text)
+text, _ = run(w, DJ, "skip")
+check("...a DJ skips it at once", "Skipped" in text and w.vc.stopped, text)
 w = world("none")
 text, _ = run(w, LIS, "skip")
-check("no role: anyone in the call still skips at once (Phase 3 makes this a vote)",
-      "Skipped" in text and w.vc.stopped, text)
+check("no role: someone else's song takes a vote even though everyone is a DJ",
+      "Skip vote 1/2" in text and not w.vc.stopped, text)
+w = world("none")
+text, _ = run(w, REQ, "skip")
+check("no role: whoever queued the song skips it at once", "Skipped" in text and w.vc.stopped, text)
 w = world("set")
 text, _ = run(w, ADM, "skip")
 check("an admin outside the call skips", "Skipped" in text, text)
@@ -557,11 +593,15 @@ for btn, expect_blocked in (("previous_button", True), ("pause_button", True), (
     asyncio.run(getattr(amy.PlayerControls(), btn).callback(it))
     text = text_of(None, it)
     state_changed = w.vc.stopped or w.vc._paused or len(w.player.queue) != 3 or w.player.back_requested
-    if expect_blocked:
+    if btn == "skip_button":     # a vote, said publicly; nothing skipped yet (1 of 2 needed)
+        ok = ("Skip vote 1/2" in text and not state_changed and it.sent[-1].ephemeral is False)
+    elif expect_blocked:
         ok = refused_dj(text) and not state_changed and it.sent[-1].ephemeral is True
     else:
         ok = passed(text)
-    check("%s as a listener with a DJ role set: %s" % (btn, "refused privately, nothing changed" if expect_blocked
+    check("%s as a listener with a DJ role set: %s" % (btn, "a public vote, nothing skipped yet"
+                                                        if btn == "skip_button" else
+                                                        "refused privately, nothing changed" if expect_blocked
                                                         else "allowed"), ok, text)
     w = world("set")
     w.player.history.append(make_track(amy, "earlier"))
@@ -581,8 +621,8 @@ w = world("set")
 it = as_(w, LIS)
 w.player.history.append(make_track(amy, "earlier"))
 asyncio.run(amy.PlayerControls().skip_button.callback(it))
-check("the Skip button refuses a listener on someone else's song like /skip",
-      "Only a DJ can skip someone else's song." in text_of(None, it) and not w.vc.stopped, text_of(None, it))
+check("the Skip button votes for a listener on someone else's song, like /skip",
+      "Skip vote 1/2 for **playing**" in text_of(None, it) and not w.vc.stopped, text_of(None, it))
 
 print()
 print("=== the /search picker ===")
@@ -691,6 +731,292 @@ check("/dj share offers the three vote shares",
       [c.value for c in {p.name: p for p in dj_cmd.parameters}["share"].choices] == list(config.VOTE_SHARES))
 check("the role option is a Discord role", {p.name: p for p in dj_cmd.parameters}["role"].type
       is discord.AppCommandOptionType.role)
+
+# ---------------------------------------------------------------------------------------------
+print()
+print("=== skip votes (Phase 3) ===")
+
+
+def leave(w, uid):
+    """Someone leaves Amy's channel (the channel's member list and their own voice state)."""
+    w.ch.members = [m for m in w.ch.members if m.id != uid]
+    w.m[uid].voice = None
+
+
+def vote_world(share="half", role="none"):
+    w = world(role)
+    if share != "half":
+        amy.dj_update(w.guild, "votes", None, share)
+    return w
+
+
+w = vote_world()           # four people in the call, half -> 2 votes
+text, it = slash_run(w, LIS, amy.music_skip)
+check("first vote: public 'Skip vote 1/2 for **Song**'",
+      "Skip vote 1/2 for **playing**" in text and it.sent[-1].ephemeral is False
+      and not w.vc.stopped and w.player.skip_votes == {LIS}, text)
+text, it = slash_run(w, LIS, amy.music_skip)
+check("voting twice does nothing: a private 'already voted (1/2)'",
+      "You've already voted to skip this song (1/2)." in text and it.sent[-1].ephemeral is True
+      and w.player.skip_votes == {LIS} and not w.vc.stopped, text)
+text, it = slash_run(w, LIS2, amy.music_skip)
+check("the vote reaching the share skips and says so publicly",
+      "Vote passed (2/2): skipped **playing**." in text and it.sent[-1].ephemeral is False
+      and w.vc.stopped and w.player.skip_requested, text)
+w = vote_world()
+text, it = slash_run(w, REQ, amy.music_skip)
+check("the requester still skips at once (no vote)", "Skipped **playing**" in text
+      and "vote" not in text.lower(), text)
+
+w = vote_world()
+w.player.current.title = "Wild *Song* _x_"
+text, _ = run(w, LIS, "skip")
+check("a vote reply escapes the song title", "Wild \\*Song\\* \\_x\\_" in text, text)
+
+w = vote_world()
+run(w, LIS, "skip")
+leave(w, LIS)                          # the voter walks out: three people left, half -> 2
+text, _ = run(w, LIS2, "skip")
+check("a voter who left no longer counts", "Skip vote 1/2" in text and not w.vc.stopped, text)
+
+w = vote_world("majority")
+text, _ = run(w, LIS, "skip")
+check("/dj votes majority: 1 of 4 is 1/3", "Skip vote 1/3" in text, text)
+w = vote_world()
+w.ch.members = [w.m[LIS], w.m[LIS2]]
+w.m[DJ].voice = w.m[REQ].voice = None
+text, _ = run(w, LIS, "skip")
+check("with 2 people and half, one vote skips", "Vote passed (1/1): skipped **playing**." in text
+      and w.vc.stopped, text)
+
+# the button and /skip are one path: same decision, same words, a vote is said in the channel
+w = vote_world()
+it = as_(w, LIS)
+asyncio.run(amy.PlayerControls().skip_button.callback(it))
+check("the Skip button casts the same vote, publicly", "Skip vote 1/2 for **playing**" in text_of(None, it)
+      and it.sent[-1].ephemeral is False and it.sent[-1].kind == "send", text_of(None, it))
+it = as_(w, LIS)
+asyncio.run(amy.PlayerControls().skip_button.callback(it))
+check("...a second press is the same private 'already voted'",
+      "already voted" in text_of(None, it) and it.sent[-1].ephemeral is True, text_of(None, it))
+it = as_(w, LIS2)
+asyncio.run(amy.PlayerControls().skip_button.callback(it))
+check("...the vote that passes it is public too", "Vote passed (2/2): skipped **playing**." in text_of(None, it)
+      and it.sent[-1].ephemeral is False and w.vc.stopped, text_of(None, it))
+w = vote_world()
+it = as_(w, REQ)
+asyncio.run(amy.PlayerControls().skip_button.callback(it))
+check("...an immediate skip by the button still just defers (the card updates itself)",
+      w.vc.stopped and not it.sent and it.response.is_done())
+w = vote_world()
+it = as_(w, OUT)
+asyncio.run(amy.PlayerControls().skip_button.callback(it))
+check("...an outsider is still refused privately", refused_out(text_of(None, it))
+      and it.sent[-1].ephemeral is True and not w.player.skip_votes)
+check("a refusal never counts as a vote", w.player.skip_votes == set())
+
+w = vote_world()
+w.player.skip_requested = True        # stale: a skip that never reached an advance
+text, _ = run(w, LIS, "skip")
+check("a stale skip_requested does not block a vote", "Skip vote 1/2" in text
+      and w.player.skip_votes == {LIS} and "already being skipped" not in text, text)
+pl_tmp = amy.music.GuildPlayer(1)
+pl_tmp.skip_requested, pl_tmp.skip_votes = True, {1}
+pl_tmp.new_play()
+check("new_play clears a stale skip_requested and the votes", pl_tmp.skip_requested is False
+      and pl_tmp.skip_votes == set())
+
+# while the player lock is held (an advance loading, or /seek /replay /filter rebuilding) a
+# vc.stop() would be swallowed, so a vote or a skip is refused and nothing is recorded
+async def _locked_skip(w, who, cmd):
+    async with w.player.lock:
+        it = as_(w, who)
+        await amy.simple_music(it, cmd, cooldown=False)
+        return it
+
+
+for who, label in ((LIS, "a vote"), (DJ, "a DJ's /skip")):
+    w = vote_world("half", role="set")
+    it = asyncio.run(_locked_skip(w, who, amy.music_skip))
+    check("%s while the player lock is held is refused privately as busy" % label,
+          amy.BUSY_LOADING in text_of(None, it) and it.sent[-1].ephemeral is True
+          and not w.vc.stopped and not w.player.skip_requested and w.player.skip_votes == set(),
+          text_of(None, it))
+w = vote_world()
+it = as_(w, LIS)
+async def _locked_button():
+    async with w.player.lock:
+        await amy.PlayerControls().skip_button.callback(it)
+asyncio.run(_locked_button())
+check("...the Skip button too", amy.BUSY_LOADING in text_of(None, it) and it.sent[-1].ephemeral is True
+      and w.player.skip_votes == set() and not w.vc.stopped)
+
+# votes belong to one play of a song
+song = make_track(amy, "Loopy")
+_real_prepare = amy.music.prepare_source
+
+
+async def _fake_prepare(track, volume, start_at=0.0, filter_name="off"):
+    return object()
+
+
+amy.music.prepare_source = _fake_prepare
+try:
+    pl = amy.music.GuildPlayer(4242)
+    fvc = VoiceClient(w.ch)
+    pl.skip_votes = {LIS, LIS2}
+    before_id = pl.play_id
+    asyncio.run(amy.music.play_track(fvc, pl, song, lambda e: None))
+    check("a new track starts with no votes", pl.skip_votes == set() and pl.play_id == before_id + 1)
+    pl.skip_votes = {LIS}
+    asyncio.run(amy.music.play_track(fvc, pl, song, lambda e: None))
+    check("a /loop replay of the same track starts with no votes too",
+          pl.skip_votes == set() and pl.play_id == before_id + 2)
+    pl.skip_votes = {LIS}
+    asyncio.run(amy.music.restart_at(fvc, pl, song, lambda e: None, 30.0))
+    check("a /seek or /filter rebuild of the same play keeps the votes",
+          pl.skip_votes == {LIS} and pl.play_id == before_id + 2, (pl.skip_votes, pl.play_id))
+    pl.stop_all()
+    check("/stop ends the play: votes go", pl.skip_votes == set() and pl.play_id == before_id + 3)
+finally:
+    amy.music.prepare_source = _real_prepare
+check("only play_track starts a new play (the advance path), not _start",
+      "new_play()" in inspect.getsource(amy.music.play_track)
+      and "new_play" not in inspect.getsource(amy.music._start)
+      and "new_play" not in inspect.getsource(amy.music.restart_at))
+
+
+class FakeText(discord.TextChannel):
+    """A text channel that satisfies isinstance(x, discord.TextChannel) and records its posts."""
+    def __init__(self, id_):
+        self.id = id_
+        self.posts = []
+
+    async def send(self, content=None, *, embed=None, **kw):
+        self.posts.append(text_of(None, type("I", (), {"sent": [type("S", (), {"content": content, "embed": embed})()]})()))
+
+
+def leave_world(share="majority", with_text=True):
+    """Four people, majority needs 3: LIS and LIS2 voted (2/3), then DJ leaves -> 2 of 3 people."""
+    w = vote_world(share)
+    run(w, LIS, "skip")
+    run(w, LIS2, "skip")
+    w.text = FakeText(555)
+    w.player.text_channel_id = 555 if with_text else None
+    amy.bot.get_channel = lambda cid: w.text if cid == 555 else None
+    return w
+
+
+w = leave_world()
+check("(setup) two votes of three needed have not skipped", not w.vc.stopped and w.player.skip_votes == {LIS, LIS2})
+leave(w, DJ)
+skipped = asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id))
+check("someone leaving can pass the vote: it skips", skipped and w.vc.stopped and w.player.skip_requested)
+check("...and says so in the now-playing card's text channel",
+      len(w.text.posts) == 1 and "Vote passed (2/2) after someone left: skipped **playing**." in w.text.posts[0],
+      w.text.posts)
+
+w = leave_world()
+leave(w, LIS)                               # a voter leaves: 1 vote of 3 people, needs 2
+check("a leaver's vote leaves with them: no skip",
+      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is False and not w.vc.stopped
+      and not w.text.posts)
+
+w = leave_world(with_text=False)
+leave(w, DJ)
+check("no text channel: it still skips (and logs)",
+      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is True and w.vc.stopped)
+
+w = leave_world()
+leave(w, DJ)
+
+
+async def _locked_recheck():
+    async with w.player.lock:
+        return await amy.recheck_skip_vote(w.guild, w.player.play_id)
+
+
+check("the player lock held (a rebuild in flight): the re-check does not skip, the vote stays open",
+      asyncio.run(_locked_recheck()) is False and not w.vc.stopped and w.player.skip_votes == {LIS, LIS2})
+check("...and the next re-check, lock free, passes it",
+      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is True and w.vc.stopped)
+
+w = leave_world()
+leave(w, DJ)
+check("a different play than the one voted on is left alone",
+      asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id - 1)) is False and not w.vc.stopped)
+
+w = leave_world()
+w.ch.members = []
+for m in w.m.values():
+    m.voice = None
+check("nobody left: never skips", asyncio.run(amy.recheck_skip_vote(w.guild, w.player.play_id)) is False
+      and not w.vc.stopped)
+
+# through the real event handler
+amy.voice.EMPTY_DISCONNECT_DELAY = 0
+_left = []
+
+
+async def _fake_leave(*a, **k):
+    _left.append(True)
+    return "x"
+
+
+_real_leave = amy.voice.leave_voice
+amy.voice.leave_voice = _fake_leave
+try:
+    def state(ch):
+        return type("VS", (), {"channel": ch})()
+
+    w = leave_world()
+    leave(w, DJ)
+    w.m[DJ].guild = w.guild
+    asyncio.run(amy.on_voice_state_update(w.m[DJ], state(w.ch), state(None)))
+    check("a human leaving Amy's channel re-checks the vote (voice-state event)",
+          w.vc.stopped and w.text.posts and not _left, (w.vc.stopped, w.text.posts, _left))
+
+    w = leave_world()
+    leave(w, DJ)
+    w.m[DJ].guild = w.guild
+    asyncio.run(amy.on_voice_state_update(w.m[DJ], state(VoiceChannel(99, "other")), state(None)))
+    check("...but leaving some other channel does not", not w.vc.stopped and not w.text.posts)
+
+    w = leave_world()
+    leave(w, DJ)        # the channel could now pass the vote, but this event is only a mute
+    w.m[DJ].guild = w.guild
+    asyncio.run(amy.on_voice_state_update(w.m[DJ], state(w.ch), state(w.ch)))
+    check("...a mute or deafen inside Amy's channel does not", not w.vc.stopped and not w.text.posts)
+
+    w = leave_world()
+    leave(w, DJ)
+    w.m[DJ].guild = w.guild
+    w.m[DJ].bot = True
+    asyncio.run(amy.on_voice_state_update(w.m[DJ], state(w.ch), state(None)))
+    check("...a bot leaving does not", not w.vc.stopped and not w.text.posts)
+
+    w = leave_world()
+    for uid in list(w.m):
+        leave(w, uid)
+    w.m[DJ].guild = w.guild
+    asyncio.run(amy.on_voice_state_update(w.m[DJ], state(w.ch), state(None)))
+    check("the last human leaving never skips (Amy goes on to leave on her own)",
+          not w.vc.stopped and not w.text.posts and _left == [True], (w.vc.stopped, _left))
+finally:
+    amy.voice.leave_voice = _real_leave
+src_evt = inspect.getsource(amy.on_voice_state_update)
+check("the re-check comes before the empty-channel grace period",
+      0 < src_evt.index("recheck_skip_vote") < src_evt.index("EMPTY_DISCONNECT_DELAY"))
+
+print()
+print("=== /dj wording ===")
+w = world("none")
+for text_ in (amy.dj_overview(w.guild), text_of(amy.dj_update(w.guild, "votes", None, "half")),
+              text_of(amy.dj_update(w.guild, "role", Role(ROLE_ID, ROLE_NAME), None))):
+    check("no 'not active yet' in /dj text", "not active" not in text_ and "not yet" not in text_, text_)
+check("/dj votes says what the share means for skips",
+      "Skipping someone else's song will need" in text_of(amy.dj_update(w.guild, "votes", None, "majority")))
+check("...and /dj show too", "skipping someone else's song needs" in amy.dj_overview(w.guild))
 
 (amy._restart_playing, amy.announce, amy.music.find_ffmpeg, amy.music.resolve_metadata,
  amy.lyrics.find_lyrics, amy.advance_playback) = _real

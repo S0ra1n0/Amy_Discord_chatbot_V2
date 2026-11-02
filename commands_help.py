@@ -15,7 +15,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/play [song, URL, or file]` - Queue a track (I'll join your channel)
 `/search [song]` - Show the top 5 matches and pick one
 `/pause` / `/resume` - Pause or resume playback
-`/skip` - Skip the current track
+`/skip` - Skip the current track (someone else's song takes a vote)
 `/previous` - Go back to the previous track
 `/shush` - Stop me talking (the music carries on)
 `/seek [position]` - Jump to a spot (`1:30`, `1:02:03` or `90`)
@@ -31,7 +31,7 @@ HELP_EVERYONE = """**Commands — Everyone:**
 `/autoplay [on|off]` - Play related songs when the queue ends
 `/filter [preset]` - Bass boost, nightcore, slowed or off
 
-(With a DJ role set, only DJs can pause, stop, seek, loop, shuffle, filter, autoplay and skip other people's songs; whoever queued a song, or someone alone with me, can still skip it; anyone in the call can /play, /search and /shush.)
+(With a DJ role set, only DJs can pause, stop, seek, loop, shuffle, filter and autoplay. Skipping someone else's song is a vote of the people in the call, unless you are a DJ, queued it or are alone with me; anyone in the call can /play, /search, /shush and vote.)
 
 **Chat:** tag @Amy, reply to one of my messages, or DM me. I ignore other messages."""
 

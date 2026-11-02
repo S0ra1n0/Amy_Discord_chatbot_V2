@@ -9,7 +9,7 @@ check and a button can never be a way around a command. tests/test_access.py wal
 """
 
 import enum
-from typing import Dict
+from typing import Dict, Iterable, Tuple
 
 
 class Level(enum.IntEnum):
@@ -90,26 +90,52 @@ def allowed(level: Level, action: str, dj_role_set: bool = False) -> bool:
 
 
 class SkipDecision(enum.Enum):
-    ALLOWED = "allowed"
+    ALLOWED = "allowed"             # skip at once
+    VOTE = "vote"                   # in the call, someone else's song: a vote
     NOT_IN_CALL = "not_in_call"     # an outsider
-    DJ_ONLY = "dj_only"             # a listener, someone else's song, a DJ role is set
 
 
 def skip_decision(level: Level, is_requester: bool, alone: bool,
                   dj_role_set: bool) -> SkipDecision:
     """
-    May this person skip the current song at once?
+    What a skip of the current song comes to for this person.
 
-    An admin always may; an outsider never. With no DJ role set, anyone in the call may (as
-    before - Phase 3 turns this into a vote for someone else's song). With one set: a DJ, the
-    person who queued the song, or someone alone with Amy may; a listener may not.
+    At once: an admin (anywhere), whoever queued the song, someone alone with Amy, and a DJ -
+    but a DJ only when a DJ role IS set (with none, everyone in the call is level DJ, and
+    that must not let them override the vote). An outsider is refused. Everyone else in the
+    call votes. An autoplay song has no requester, so it takes a DJ or a vote.
     """
     if level >= Level.ADMIN:
         return SkipDecision.ALLOWED
     if level < Level.LISTENER:
         return SkipDecision.NOT_IN_CALL
-    if not dj_role_set:
+    if is_requester or alone or (dj_role_set and level >= Level.DJ):
         return SkipDecision.ALLOWED
-    if level >= Level.DJ or is_requester or alone:
-        return SkipDecision.ALLOWED
-    return SkipDecision.DJ_ONLY
+    return SkipDecision.VOTE
+
+
+def votes_needed(humans: int, share: str) -> int:
+    """
+    Votes that pass a skip with `humans` people (not bots) in the call; never below 1.
+    half = ceil(n/2), majority = n//2 + 1, two-thirds = ceil(2n/3). An unknown share is half.
+    """
+    n = max(0, humans)
+    if share == "majority":
+        need = n // 2 + 1
+    elif share == "two-thirds":
+        need = -(-2 * n // 3)
+    else:
+        need = -(-n // 2)
+    return max(1, need)
+
+
+def tally_votes(voter_ids: Iterable[int], present_ids: Iterable[int],
+                share: str) -> Tuple[int, int, bool]:
+    """
+    (votes counted, votes needed, passed). Only voters still among `present_ids` (the humans
+    in Amy's channel now) count, so a vote leaves with the person who cast it.
+    """
+    present = set(present_ids)
+    count = len(set(voter_ids) & present)
+    needed = votes_needed(len(present), share)
+    return count, needed, count >= needed

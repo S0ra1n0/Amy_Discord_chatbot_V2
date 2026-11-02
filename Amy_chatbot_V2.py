@@ -1179,8 +1179,11 @@ class PlayerControls(discord.ui.View):
             return
         # The same handler as /skip, so a rule added there applies to the button too.
         result = await music_skip(MusicContext.build(interaction, guild))
-        if isinstance(result, Reply) and result.error:
+        if isinstance(result, Reply) and (result.error or result.private):
             await send_reply(interaction, result, ephemeral=True)
+            return
+        if isinstance(result, Reply) and result.public:     # a skip vote: said in the channel
+            await send_reply(interaction, result)
             return
         await interaction.response.defer()   # the card updates itself when the queue advances
 
@@ -2177,11 +2180,11 @@ async def music_resume(ctx: MusicContext, refresh: bool = True) -> MusicResult:
     return _info("Resumed.")
 
 
-def skip_refusal(ctx: MusicContext) -> Optional[Reply]:
+def skip_refusal(ctx: MusicContext) -> Tuple[Optional[Reply], bool]:
     """
-    None when this user may skip the current song at once, else the private refusal.
-    The one skip decision (access.skip_decision), shared by /skip and the Skip button; Phase 3
-    makes a listener's skip of someone else's song a vote here.
+    (private refusal or None, whether this skip is a VOTE). The one skip decision
+    (access.skip_decision), shared by /skip and the Skip button: (None, False) skips at once,
+    (None, True) is a vote on someone else's song, and a refusal is only for an outsider.
     """
     guild = ctx.guild
     level = member_level(guild, ctx.user_id)
@@ -2190,27 +2193,92 @@ def skip_refusal(ctx: MusicContext) -> Optional[Reply]:
         current, ctx.user_id, str(ctx.interaction.user))
     verdict = access.skip_decision(level, mine, alone_with_amy(guild, ctx.user_id),
                                    dj_role_id(guild) is not None)
-    if verdict is access.SkipDecision.ALLOWED:
-        return None
     if verdict is access.SkipDecision.NOT_IN_CALL:
-        return _refusal("You need to be in my voice channel to skip.")
-    return _refusal("Only a DJ can skip someone else's song.")
+        return _refusal("You need to be in my voice channel to skip."), False
+    return None, verdict is access.SkipDecision.VOTE
+
+
+def skip_now(guild: discord.Guild, vc: discord.VoiceClient, player: music.GuildPlayer) -> str:
+    """Skip the current track the usual way (the after-callback advances). Returns its title."""
+    skipped = player.current.title if player.current else "the current track"
+    player.skip_requested = True
+    vc.stop()  # triggers the after-callback, which advances the queue
+    announce(guild, "skip", title=skipped)
+    return skipped
+
+
+def vote_to_skip(ctx: MusicContext, vc: discord.VoiceClient) -> Reply:
+    """
+    Count this person's vote to skip the current song; skip when it reaches the server's share
+    of the people in Amy's channel. The vote and the pass are public, "already voted" private.
+    """
+    player = ctx.player
+    channel = voice.active_channel(vc)
+    present = voice.human_ids_in(channel) if channel is not None else set()
+    share = vote_share(ctx.guild.id)
+    title = markup.escape_markdown(player.current.title if player.current else "this song")
+    if ctx.user_id in player.skip_votes:
+        count, needed, _ = access.tally_votes(player.skip_votes, present, share)
+        return Reply(embed=ui.info_embed(
+            f"You've already voted to skip this song ({count}/{needed})."), private=True)
+    player.skip_votes.add(ctx.user_id)
+    count, needed, passed = access.tally_votes(player.skip_votes, present, share)
+    if passed:
+        skip_now(ctx.guild, vc, player)
+        return Reply(embed=ui.info_embed(f"Vote passed ({count}/{needed}): skipped **{title}**."),
+                     public=True)
+    return Reply(embed=ui.info_embed(f"Skip vote {count}/{needed} for **{title}**"), public=True)
+
+
+async def recheck_skip_vote(guild: discord.Guild, play_id: int) -> bool:
+    """
+    Someone left Amy's channel: with fewer people the open vote may now pass. Skips and says so
+    in the now-playing card's text channel (or just logs when there is none). `play_id` is the
+    play the caller saw; a different play now means the vote it knew is gone. Never skips with
+    nobody left. Returns whether it skipped.
+    """
+    player = music_manager.player_for(guild.id)
+    vc = voice.get_voice_client(guild)
+    channel = voice.active_channel(vc)
+    if (vc is None or channel is None or player.play_id != play_id or not player.skip_votes
+            or player.lock.locked() or not music.music_active(vc, player)):
+        return False
+    present = voice.human_ids_in(channel)
+    if not present:
+        return False
+    count, needed, passed = access.tally_votes(player.skip_votes, present, vote_share(guild.id))
+    if not passed:
+        return False
+    title = markup.escape_markdown(skip_now(guild, vc, player))
+    text_channel = bot.get_channel(player.text_channel_id) if player.text_channel_id else None
+    line = f"Vote passed ({count}/{needed}) after someone left: skipped **{title}**."
+    if not isinstance(text_channel, discord.TextChannel):
+        log.info(f"Skip vote passed after a leave in guild {guild.id}; the now-playing card is not in a text channel to tell")
+        return True
+    try:
+        await text_channel.send(embed=ui.info_embed(line))
+    except discord.HTTPException:
+        log.warning(f"Could not post the skip-vote result in guild {guild.id}", exc_info=True)
+    return True
 
 
 async def music_skip(ctx: MusicContext) -> MusicResult:
     vc = ctx.connected()
     if vc is None:
         return _error(NOT_CONNECTED)
-    refused = skip_refusal(ctx)
+    refused, is_vote = skip_refusal(ctx)
     if refused is not None:
         return refused
+    if ctx.player.lock.locked():
+        # An advance loading the next track, or a /seek, /replay or /filter rebuilding the
+        # stream: a vc.stop() now would be swallowed (the rebuild re-starts the same track) while
+        # we said "skipped". Refused before any vote is recorded, like go_back.
+        return _refusal(BUSY_LOADING)
     if not music.music_active(vc, ctx.player):
         return _error("Nothing is playing.")
-    player = ctx.player
-    skipped = player.current.title if player.current else "the current track"
-    player.skip_requested = True
-    vc.stop()  # triggers the after-callback, which advances the queue
-    announce(ctx.guild, "skip", title=skipped)
+    if is_vote:
+        return vote_to_skip(ctx, vc)
+    skipped = skip_now(ctx.guild, vc, ctx.player)
     return _info(f"Skipped **{markup.escape_markdown(skipped)}**.")
 
 
@@ -3133,7 +3201,7 @@ async def slash_voice(interaction: discord.Interaction,
 
 
 VOTE_SHARE_WORDS = {
-    "half": "at least half of the people in my voice channel",
+    "half": "at least half of the people in my voice channel (with 2 people, 1 vote skips)",
     "majority": "more than half of the people in my voice channel",
     "two-thirds": "at least two thirds of the people in my voice channel",
 }
@@ -3162,7 +3230,7 @@ def dj_overview(guild: discord.Guild) -> str:
             f" and {len(names) - MAX_DJ_NAMES} more" if len(names) > MAX_DJ_NAMES else "")
         djs = shown if names else "nobody right now"
     return (f"**DJ role:** {role_line}\n"
-            f"**Skip votes:** {share} ({VOTE_SHARE_WORDS[share]}; skip voting itself is not active yet)\n"
+            f"**Skip votes:** {share} - skipping someone else's song needs {VOTE_SHARE_WORDS[share]}\n"
             f"**DJs in my channel now:** {djs}")
 
 
@@ -3182,7 +3250,8 @@ def dj_update(guild: discord.Guild, action: str, role: Optional[discord.Role],
         log.info(f"DJ role set to {role.id} in guild {guild.id}")
         return _info(f"The DJ role is now **{markup.escape_markdown(role.name)}**. Only members "
                      "with it, anyone alone with me, and admins can control playback; everyone "
-                     "in the call can still queue songs and skip their own.")
+                     "in the call can still queue songs, skip their own, and vote to skip "
+                     "someone else's.")
     if action == "clear":
         db.clear_guild_setting(guild.id, config.DJ_ROLE_KEY)
         log.info(f"DJ role cleared in guild {guild.id}")
@@ -3192,8 +3261,9 @@ def dj_update(guild: discord.Guild, action: str, role: Optional[discord.Role],
             return _error("Pick the share: " + ", ".join(f"`{s}`" for s in config.VOTE_SHARES) + ".")
         db.set_guild_setting(guild.id, config.VOTE_SHARE_KEY, share)
         log.info(f"Vote share set to {share} in guild {guild.id}")
-        return _info(f"Skip votes will need **{share}**: {VOTE_SHARE_WORDS[share]}. "
-                     "(Skip voting itself is not active yet; the setting is saved.)")
+        return _info(f"Skipping someone else's song will need **{share}**: "
+                     f"{VOTE_SHARE_WORDS[share]}. Admins, whoever queued the song, "
+                     "anyone alone with me and DJs (when a role is set) skip at once.")
     return _info(dj_overview(guild))
 
 
@@ -3543,6 +3613,13 @@ async def on_voice_state_update(
         return
 
     current = voice.active_channel(voice.get_voice_client(guild))
+
+    # A human left Amy's channel: an open skip vote may pass with fewer people. Before the
+    # empty-channel return below (which recheck_skip_vote also respects: nobody left, no skip).
+    if (current is not None and not member.bot and before.channel is not None
+            and before.channel.id == current.id and after.channel != before.channel):
+        await recheck_skip_vote(guild, music_manager.player_for(guild.id).play_id)
+
     if current is None or voice.humans_in(current) > 0:
         return
 

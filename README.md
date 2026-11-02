@@ -54,7 +54,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 | `/play [query]`          | Queue a track — song name, YouTube/audio URL, or local file path          | In-channel |
 | `/search [song]`         | Show the top 5 matches and pick one from a menu                           | In-channel |
 | `/pause` / `/resume`     | Pause or resume playback                                                  | In-channel (DJ if a role is set) |
-| `/skip`                  | Skip the current track                                                    | In-channel |
+| `/skip`                  | Skip the current track (someone else's song takes a [vote](#skip-votes))  | In-channel |
 | `/previous`               | Go back to the previous track                                             | In-channel (DJ if a role is set) |
 | `/shush`                  | Stop Amy talking mid-sentence (the music carries on)                      | In-channel |
 | `/seek [position]`       | Jump to a spot in the current track (`1:30`, `1:02:03` or `90`)           | In-channel (DJ if a role is set) |
@@ -403,7 +403,8 @@ The now-playing card carries four buttons — **Previous**, **Pause/Resume**, **
 They follow exactly the same permission rule as the equivalent commands (each button runs its
 command's own code, including the [DJ role](#dj-role) check): you must be in Amy's voice
 channel, or be an admin. With a [DJ role](#dj-role) set, Previous, Pause/Resume and Stop also
-need DJ; Skip follows the skip rule there, and Shush stays open to everyone in the call. Pressing
+need DJ; Skip follows the [skip vote](#skip-votes) rule (a vote or a pass is posted in the
+channel, not privately), and Shush stays open to everyone in the call. Pressing
 one without permission gets a private (ephemeral)
 refusal that nobody else sees, so a button is never a way around a command's check.
 
@@ -423,8 +424,8 @@ partway through a song.
 
 ### DJ role
 
-By default nothing changes: everyone in Amy's voice channel can use every music control, as
-before. An admin can make playback shared and orderly by naming a **DJ role** with
+By default everyone in Amy's voice channel can use every music control, as before (except that
+skipping someone else's song is a [vote](#skip-votes)). An admin can make playback shared and orderly by naming a **DJ role** with
 `/dj action:role role:@DJ` (stored by the role's id, so renaming it is safe; `/dj action:clear`
 removes it; `/dj action:show` lists the role, the skip-vote share and who is a DJ right now,
 privately). If the saved role is later deleted in Discord, it counts as no role and `show` says so.
@@ -456,7 +457,7 @@ Everyone gets one of four levels, highest first:
 | Control | With a DJ role set | With no DJ role (default) |
 |---|---|---|
 | `/stop`, `/skipto`, `/previous`, `/seek`, `/replay`, `/loop`, `/shuffle`, `/pause`, `/resume`, `/filter <preset>`, `/autoplay on/off`, removing someone else's song, and the Stop / Previous / Pause buttons | DJ (or admin) | anyone in the call, except removing someone else's song, which stays admin-only |
-| `/skip` and the Skip button | DJ, admin, whoever queued the song, or someone alone with Amy; a listener skipping someone else's song is told "Only a DJ can skip someone else's song." | anyone in the call (as before) |
+| `/skip` and the Skip button | at once for an admin (even outside the call), whoever queued the song, someone alone with Amy, or a DJ; anyone else in the call **votes** (see [Skip votes](#skip-votes)) | at once for an admin, whoever queued the song or someone alone with Amy; anyone else in the call votes (the one visible change for a server that never set a role) |
 | `/play`, the `/search` menu, `/remove` on your own song, `/shush` and the Shush button | anyone in the call | anyone in the call |
 | `/queue`, `/nowplaying`, `/lyrics`, `/filter` and `/autoplay` with no argument | everyone | everyone |
 | `/volume`, `/clearqueue`, `/dj`, `/say`, `/voice`, ... | admin only (unchanged) | admin only |
@@ -466,8 +467,36 @@ A refused click or command gets a private reply, whether or not a DJ role is set
 role)." The role is named, never pinged. A refusal for a deferred command (`/play`, `/seek`,
 `/replay`, `/filter`) first removes the public "thinking" message so the reply stays private.
 `/dj action:votes share:half|majority|two-thirds` stores how much of the call must vote to skip
-(default `half`); skip voting itself is not built yet, so the setting only waits for it.
-Both settings are per server and survive a restart.
+(default `half`). Both settings are per server and survive a restart.
+
+#### Skip votes
+
+Skipping a song you did not queue works like this, with or without a DJ role:
+
+- **At once:** an admin (even outside the call), whoever queued the song, someone alone with
+  Amy, or a DJ - but a DJ only when a DJ role *is* set (with none, everyone in the call counts
+  as a DJ, which must not let one person override the vote).
+- **Otherwise it is a vote.** An outsider is refused (privately) as before. Autoplay songs have
+  no requester, so they take a DJ (role set) or a vote.
+- **How many votes:** a share of the people (not bots) in Amy's channel, set per server:
+  `half` (rounded up: 1 of 1, 1 of 2, 2 of 3, 2 of 4, 3 of 5 - so **with two people one vote
+  skips**), `majority` (more than half) or `two-thirds` (rounded up). Never fewer than one.
+- Only votes from people still in the call count, and voting twice does nothing (you get a
+  private "You've already voted to skip this song (1/2)."). `/skip` and the Skip button are the
+  same code: a vote shows publicly as "Skip vote 1/2 for **Song**", and the vote that reaches the
+  share skips and says "Vote passed (2/2): skipped **Song**.".
+- When someone **leaves** the call and the votes already cast now reach the share, Amy skips and
+  says "Vote passed (2/2) after someone left: skipped **Song**." in the now-playing card's channel.
+  She never skips when nobody is left. If the now-playing card is not in a regular text channel
+  (a thread, or a voice channel's chat), the pass is only written to the log, as with the card
+  itself.
+- Votes belong to one play of a song: a new song or a `/loop track` replay starts at zero; a
+  `/seek`, `/replay` or `/filter` restarts the same play and does not reset them. They live in
+  memory, so a restart clears them.
+- While Amy is loading the next track or rebuilding the stream for a `/seek`, `/replay` or
+  `/filter`, a skip or vote is refused privately ("I'm still loading the next track - try again
+  in a moment.") and no vote is recorded; a vote that would pass after someone leaves waits for
+  the next leave.
 
 Amy keeps **one** now-playing card per server and edits it in place as tracks change, rather
 than posting a new message for every track in a long queue. `/nowplaying` always posts a
@@ -807,6 +836,14 @@ A DJ role is set on this server and you don't hold it. Ask an admin to give you 
 run `/dj action:clear`. If the saved role was deleted in Discord, `/dj action:show` says so and
 everyone in the call is a DJ again. If a role is given but nothing changes, check that the
 Server Members Intent is on (Step 5).
+
+**/skip or the Skip button says "Skip vote 1/2" instead of skipping:**
+
+The song is someone else's, so skipping it is a vote of the people in Amy's channel (see
+[Skip votes](#skip-votes)). Ask enough listeners to press Skip, or have an admin, the person who
+queued it or a DJ skip it. To change how many votes are needed, an admin runs
+`/dj action:votes share:half|majority|two-thirds`. "You've already voted" means your vote is
+counted and only others can add to it.
 
 **Amy replies "I ran out of room before I could finish that answer":**
 
