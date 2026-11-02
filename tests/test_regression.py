@@ -704,5 +704,68 @@ assert all(x["content"] != "cut question" for x in amy.db.get_messages("srv", 43
     "FAIL cut stream must pop the stored question"
 print("chat_streaming P1-P3: OK (open think, second-pass window, unsendable page)")
 
+# ---- on_message: only conversation reaches chat (seen live 2026-11-02) ----------------------
+# Discord's "X joined the server" system message (new_member, empty content, authored by the
+# new member) used to count against that member's rate limit, get a "Thinking..." reply and be
+# sent to the model as an empty question.
+class _Author:
+    def __init__(self, uid, bot=False):
+        self.id, self.bot = uid, bot
+
+
+class _InMsg:
+    _next_id = 9_000_000
+
+    def __init__(self, content, mtype=_dc.MessageType.default, author=None):
+        _InMsg._next_id += 1
+        self.id, self.content, self.type = _InMsg._next_id, content, mtype
+        self.author = author or _Author(777)
+        self.guild = None
+        self.channel = _Author(5150)
+        self.replies = []
+
+    def is_system(self):
+        return _dc.Message.is_system(self)      # discord.py's own rule, on our fake's .type
+
+    async def reply(self, content=None, **kw):
+        self.replies.append(content)
+        return _FakeMsg()
+
+
+def _drive_on_message(m):
+    seen = []
+
+    async def fake_chat(text, server_id, channel_id, thinking):
+        seen.append(text)
+        return None
+
+    saved = (amy.chat_streaming, amy.bot_enabled)
+    amy.chat_streaming, amy.bot_enabled = fake_chat, True
+    amy.rate_limit_store.clear()
+    try:
+        _asyncio.run(amy.on_message(m))     # type: ignore[arg-type]
+    finally:
+        amy.chat_streaming, amy.bot_enabled = saved
+    hits = len(amy.rate_limit_store.get(m.author.id, []))
+    amy.rate_limit_store.clear()
+    return seen, hits
+
+
+_cases = [
+    ("system join message", _InMsg("", _dc.MessageType.new_member), False),
+    ("system join message with text", _InMsg("hi", _dc.MessageType.new_member), False),
+    ("another bot", _InMsg("hello", author=_Author(888, bot=True)), False),
+    ("whitespace only", _InMsg("  \n "), False),
+    ("sticker/image only (empty)", _InMsg(""), False),
+    ("normal message", _InMsg("hello Amy"), True),
+    ("reply with text", _InMsg("and you?", _dc.MessageType.reply), True),
+]
+for _label, _m, _chats in _cases:
+    _seen, _hits = _drive_on_message(_m)
+    assert bool(_seen) is _chats, "FAIL on_message %s: chat called=%r" % (_label, _seen)
+    assert bool(_m.replies) is _chats, "FAIL on_message %s: replies=%r" % (_label, _m.replies)
+    assert _hits == (1 if _chats else 0), "FAIL on_message %s: rate-limit hits=%d" % (_label, _hits)
+print("on_message: OK (system, bot and text-less messages ignored; normal and reply chat)")
+
 print()
 print("ALL REGRESSION TESTS PASSED")

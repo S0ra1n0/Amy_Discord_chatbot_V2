@@ -3389,6 +3389,10 @@ async def on_message(msg: discord.Message) -> None:
         log.debug("Ignoring bot's own message")
         return
 
+    if not llm.should_chat(msg.is_system(), msg.author.bot, msg.content):
+        log.debug("Ignoring a system, bot or text-less message")
+        return
+
     try:
         server_id = msg.guild.id if msg.guild else "DM"
         channel_id = msg.channel.id

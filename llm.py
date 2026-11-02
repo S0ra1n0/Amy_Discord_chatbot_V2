@@ -266,6 +266,17 @@ def tool_round_messages(messages: List[Dict[str, Any]], call: Any, tool_name: st
     ]
 
 
+def should_chat(is_system: bool, author_is_bot: bool, content: str) -> bool:
+    """
+    True when a message is conversation Amy should answer. Discord's own system messages
+    ("X joined the server", pins, boosts), anything from a bot (no bot-to-bot loops) and
+    messages with no text (stickers, images, attachments only) are not.
+    """
+    if is_system or author_is_bot:
+        return False
+    return bool((content or "").strip())
+
+
 def final_reply(accumulated: str, done_reason: Optional[str]) -> Tuple[str, bool]:
     """
     The reply to store and show, and whether the model hit its token limit. Empty output almost

@@ -21,6 +21,7 @@ Amy is an intelligent personal assistant bot that runs on your Discord server. S
 - Automatic daily pruning of old conversation history
 - Admin access control — admin commands restricted to server owner or users with the `Admin` role
 - Rate limiting — non-admin users are capped at 5 chat messages per hour, and 3 voice commands per minute
+- Amy only chats with people — Discord's own system messages (such as "X joined the server"), messages from other bots and messages with no text (sticker- or image-only) are ignored: no reply, no rate-limit charge
 - **Native slash commands** — Amy's commands appear in Discord's own autocomplete, with typed arguments Discord validates before they reach the bot
 
 ## Functions & Commands
@@ -847,6 +848,7 @@ Look in `amy.log` (and `amy.log.1` … for older entries). Every warning and err
 - Verify your Discord token is correct in `.env`
 - Check if the bot was disabled with `/toggle` — this setting persists across restarts, and Amy logs `Restored saved state: responses are OFF` at startup when it does
 - Check if you have hit the rate limit (5 messages/hour for non-admins)
+- Amy deliberately ignores system messages, other bots' messages and messages with only a sticker/image/attachment (before, a "joined the server" notice got a nonsense "Thinking..." answer)
 - Use `/status` (Admin) to quickly diagnose connectivity and bot state
 
 **Amy replies with "Thinking..." but never updates:**

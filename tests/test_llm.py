@@ -217,5 +217,19 @@ assert _sys.startswith("PROMPT\n\n[IMPORTANT] Current date and time: 2026-10-29 
 assert _sys.endswith("when answering questions about time.")
 print("system_with_time: OK")
 
+# should_chat: system messages, bots and text-less messages are not conversation.
+for _label, _args, _want in [
+    ("system join message", (True, False, ""), False),
+    ("system message with text", (True, False, "hi"), False),
+    ("other bot", (False, True, "hello"), False),
+    ("empty", (False, False, ""), False),
+    ("whitespace only", (False, False, "  \n\t "), False),
+    ("normal text", (False, False, "hello Amy"), True),
+    ("reply with text", (False, False, "  and you? "), True),
+]:
+    assert llm.should_chat(*_args) is _want, "FAIL should_chat %s -> %r" % (
+        _label, llm.should_chat(*_args))
+print("should_chat: OK (system, bot, text-less ignored; normal and reply answered)")
+
 print()
 print("ALL LLM TESTS PASSED")

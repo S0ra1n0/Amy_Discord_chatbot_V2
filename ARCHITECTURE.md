@@ -19,7 +19,7 @@ one guards against.
 | `lyrics.py` | `/lyrics`: title to search terms, choosing a LRCLIB record, timestamp stripping, paging, the one LRCLIB request | httpx |
 | `access.py` | Who may do what with the music: the `Level` enum, `access_level`, the one `ACTIONS` table, `allowed` and `skip_decision` | **nothing external** |
 | `markup.py` | `escape_markdown`: makes stranger-controlled text (titles, lyrics) render literally in Discord | **nothing external** |
-| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round) | **nothing external** |
+| `llm.py` | Reasoning modes, leak detection, probe judging, startup model choice, system prompt, the decisions of a streamed chat reply (overflow, live/final text, empty-answer reason, tool round), whether a message is chat at all (`should_chat`) | **nothing external** |
 | `config.py` | Parsing settings: a bad value warns and falls back instead of crashing | **nothing external** |
 | `models.py` | `ModelManager`: the active model, `/model` switching and probing, warm-up, the startup check | ollama, database, llm |
 | `logs.py` | Logging setup: console plus a rotating file, and `log_failure` for boundary catch-alls | **nothing external** |
@@ -566,6 +566,11 @@ whole truth table is then tested offline. Try this before writing "needs manual 
   ordinary stop), `tool_round_call` / `tool_call_query` / `tool_round_messages` (one search,
   never a loop) and `system_with_time`. `test_llm.py` pins them; `test_regression.py` drives
   the whole function over scripted streams.
+- **Amy only chats with people.** `on_message` asks `llm.should_chat(msg.is_system(),
+  msg.author.bot, msg.content)` right after the own-message check, before the rate limit and
+  the "Thinking..." reply: system messages (e.g. "X joined the server"; discord.py's own
+  `is_system()`, not a list of types), messages from any bot (no bot-to-bot loops) and
+  text-less messages (sticker/image only) are ignored silently. `test_regression.py` drives it.
 
 ## Web search
 

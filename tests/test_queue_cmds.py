@@ -1309,6 +1309,9 @@ try:
             self.channel = type("Ch", (), {"id": 77})()
             self.content = "hello amy"
 
+        def is_system(self):
+            return False
+
         async def reply(self, text):
             return self
 
